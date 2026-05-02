@@ -1,0 +1,50 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    # Build on the oldest still-supported Ubuntu so the dynamically-linked
+    # glibc in the resulting binary stays broadly compatible.
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            libhyperscan-dev
+
+      - name: Build
+        run: make -j"$(nproc)"
+
+      - name: Show binary info
+        run: |
+          file hprscript
+          ldd hprscript || true
+          ./hprscript -h | head -20 || true
+
+      - name: Run tests
+        run: make test
+
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hprscript-linux-x86_64
+          path: hprscript
+          if-no-files-found: error
+
+      - name: Attach binary to release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: hprscript
+          fail_on_unmatched_files: true
