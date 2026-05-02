@@ -85,6 +85,11 @@ bool Matcher::compile(const std::vector<Pattern> &patterns, CompileError *err) {
     rc = hs_alloc_scratch(db_, &scratch_);
     if (rc != HS_SUCCESS) {
         if (err) err->message = "hs_alloc_scratch failed";
+        // Don't rely on the destructor: callers may discard the Matcher
+        // before it runs, and we want compile() to leave the object in a
+        // clean "uncompiled" state on failure.
+        hs_free_database(db_);
+        db_ = nullptr;
         return false;
     }
     return true;
@@ -99,7 +104,11 @@ bool Matcher::scan(std::string_view buf, const MatchCb &cb) {
     // HS_INVALID can occur in UTF-8 mode if the input contains invalid
     // UTF-8 sequences — we treat that as "scan finished with whatever
     // matches we've already seen" rather than a hard failure, so the
-    // caller can still emit partial results from the file.
+    // caller can still emit partial results from the file. Note: any
+    // matches reported before the invalid byte are kept as-is; their
+    // offsets are still in raw byte positions and remain accurate for
+    // line-number lookup, but the scan stops at the first invalid byte
+    // so later matches in the file are silently dropped.
     return rc == HS_SUCCESS || rc == HS_SCAN_TERMINATED || rc == HS_INVALID;
 }
 
