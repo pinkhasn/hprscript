@@ -304,6 +304,10 @@ struct ScriptState {
     std::map<std::string, FileRank> rank_per_file;
     // Per-current-file pattern-id matches (cleared on file end).
     std::set<std::string> rank_file_pat_ids;
+    // While true, per-match output (emit/print) is dropped. Used by `rank`
+    // mode so only the per-file rank table is shown — match records are
+    // suppressed but side-effect actions (set/increment/...) still run.
+    bool suppress_records = false;
 };
 
 // ---- Execution context ------------------------------------------------------
@@ -717,6 +721,7 @@ std::string extract_group_key(const std::string &json_line, const std::string &f
 void emit_record_string(const std::string &json_line, const ExecCtx &ctx,
                         const std::string &group_key_hint) {
     ScriptState &st = *ctx.state;
+    if (st.suppress_records) return;
     // Per-file cap stops the per-file scan, and treats already-skipped
     // records as part of the cap.
     if (st.limit_per_file > 0 && st.per_file_emits >= st.limit_per_file) {
@@ -1258,6 +1263,7 @@ void execute_action(const Action &a, ExecCtx &ctx) {
         return;
     }
     case ActionKind::Print: {
+        if (state.suppress_records) return;
         // print emits a raw text line. Without `value`, emits the default
         // JSON record (effectively same as emit in that case).
         std::string text;
@@ -1900,6 +1906,7 @@ void run_phase(const CompiledPhase &phase, ScriptState &state,
         state.stop_file = false;
         state.per_file_emits = 0;
         if (state.rank_enabled) state.rank_file_pat_ids.clear();
+        state.suppress_records = state.rank_enabled;
 
         ExecCtx ctx;
         ctx.file = display_name;
@@ -1953,6 +1960,7 @@ void run_phase(const CompiledPhase &phase, ScriptState &state,
             ac.line_available = true;
             execute_actions(cp.on_match, ac);
         }
+        state.suppress_records = false;
 
         // Phase-level on_file_end.
         if (!phase.on_file_end.empty()) {

@@ -723,7 +723,7 @@ hprscript -s '{
 {"file":"src/util.go","score":0.5,"density":0.01,"matched_patterns":["todo"]}
 ```
 
-`on_match` actions still fire normally. `rank` adds output, it doesn't replace it.
+When `rank` is enabled, the rank table **replaces** match output: per-match `emit` and `print` are suppressed so only the rank rows are written. `on_match` actions still execute (so `count`, `set`, `map_increment`, etc. continue to update variables), but record-producing actions are silenced. Aggregations from `on_file_end` and `on_complete` are **not** suppressed.
 
 ### Skip + limit (pagination)
 

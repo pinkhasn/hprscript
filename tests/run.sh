@@ -389,6 +389,21 @@ OUT=$(cd "$SAMPLE" && "$BIN" -s '{
 expect_contains "rank: a.go scored 4" '"file":"a.go","score":4' "$OUT"
 expect_contains "rank: b.go scored 4" '"file":"b.go","score":4' "$OUT"
 expect_contains "rank: matched_patterns" '"matched_patterns":["fn","todo"]' "$OUT"
+# rank-only output: no per-match records mixed in (2 files matched → 2 lines).
+expect_lines "rank: only rank rows emitted" 2 "$OUT"
+expect_not_contains "rank: no match records" '"match":' "$OUT"
+
+# rank suppresses on_match emit/print but lets aggregations through
+OUT=$(cd "$SAMPLE" && "$BIN" -s '{
+  "scan":["**/*.go"],"exclude":["vendor"],"rank":true,
+  "variables":{"n":{"type":"int"}},
+  "patterns":[{"id":"t","regexp":"TODO","on_match":[
+    {"action":"increment","var":"n"},
+    {"action":"emit","data":{"hit":"$MATCH"}}]}],
+  "on_complete":[{"action":"emit","data":{"total":"$n"}}]
+}')
+expect_contains "rank+on_complete: total emitted" '"total":2' "$OUT"
+expect_not_contains "rank+on_complete: per-match emit suppressed" '"hit":"TODO"' "$OUT"
 
 # skip + limit pagination
 OUT=$(cd "$SAMPLE" && "$BIN" -s '{
