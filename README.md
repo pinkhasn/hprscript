@@ -74,6 +74,20 @@ Default per-match record:
 
 ## Install
 
+### Download a prebuilt binary
+
+A prebuilt Linux x86-64 binary is attached to every tagged release:
+
+> **https://github.com/pinkhasn/hprscript/releases/latest**
+
+Download `hprscript`, mark it executable, and drop it in your `PATH`:
+
+```bash
+curl -L -o hprscript https://github.com/pinkhasn/hprscript/releases/latest/download/hprscript
+chmod +x hprscript
+mv hprscript ~/.local/bin/
+```
+
 ### Build from source
 
 Requires `g++` (C++17), `make`, and Hyperscan (`libhs-dev` on Debian/Ubuntu).
