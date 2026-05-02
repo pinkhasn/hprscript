@@ -115,6 +115,7 @@ Positional file/dir args after `-s`/`-script` (or after a positional script file
 | `-o` | Matched text only, one per line (like `grep -o`) |
 | `-format <tmpl>` | Custom one-line template |
 | `-absent` | Files where the pattern is **not** found (like `grep -L`) |
+| `-llm` | Token-efficient plain text grouped by file (LLM-friendly). See [LLM output mode](#llm-output-mode). |
 
 `-format` template tokens (substituted per match):
 
@@ -1176,7 +1177,7 @@ hprscript -s '{
     {"id":"error",   "regexp":"err != nil",  "weight":1},
     {"id":"todo",    "regexp":"TODO",         "weight":0.5}
   ]
-}' | head -20
+}' | grep '"score"' | head -20
 ```
 
 ### "Group results by file"
@@ -1528,6 +1529,66 @@ In script mode, the same names are top-level fields:
 
 ---
 
+## LLM output mode
+
+`-llm` emits a compact, plain-text format intended for direct consumption by language models — no JSON parsing, no per-match metadata noise, just file → line → matched text. Far cheaper in tokens than `-j` for the same information.
+
+Layout: one **file header** per file (deduped — never repeated), then each match indented as `  <line>: <text>`. The output adapts to whichever extras are active:
+
+| Active flag | Per-match line shape |
+|---|---|
+| (none) | `  <line>: <match line>` |
+| `-block-open`/`-block-close` | `  <line_start>-<line_end>` then the full block content on following lines |
+| `-scope <pack>` / `-scope-pattern …` | `  <line>: <match line>  [in <kind> <name>]` |
+| Both block + scope | block form, with a `[in <kind> <name>]` suffix on the header |
+
+When `-limit` or `-max-output-bytes` truncates the output, a final `--- limit reached: ... ---` (or `--- output-byte budget reached ... ---`) footer line is emitted so the reader knows the result was cut, not finished.
+
+### Examples
+
+```bash
+# Plain matches — one block per file
+hprscript -p 'TODO|FIXME' -llm -glob '**/*.go'
+# →
+# pkg/foo.go
+#   42:     // TODO refactor
+#   88:     // FIXME edge case
+# pkg/bar.go
+#   17: // TODO add tests
+
+# With scope — agent gets "what function is this in?" inline
+hprscript -p 'TODO' -llm -scope auto -glob '**/*.{go,rs,ts}'
+# →
+# api/handler.go
+#   42:     // TODO refactor  [in func handleRequest]
+
+# With block extraction — full body of every Go func that mentions the anchor
+hprscript -p 'func \w+\(' -llm -block-open '{' -block-close '}' -glob '**/*.go'
+# →
+# main.go
+#   4-7
+# func main() {
+#     fmt.Println("hello world")
+# }
+
+# Truncation footer makes incomplete output explicit
+hprscript -p 'TODO' -llm -limit 1 -glob '**/*.go'
+# →
+# main.go
+#   3: // TODO: refactor this
+# --- limit reached: stopped at 1 matches; more may exist (re-run with -limit 0 for all) ---
+```
+
+### When to use it
+
+- **Agent reading matches into context.** `-llm` strips JSON keys and quoting, so the same N matches occupy ~30–50% fewer tokens than `-j`.
+- **Quick human eyeballing.** The grouped layout reads like `grep -n` output rather than JSON Lines — easier to skim.
+- **You don't need byte offsets / pattern IDs / capture groups.** If a downstream tool needs `from`/`to`/`pat`/`extracted`, stick with `-j`.
+
+`-llm` is mutually exclusive with the other output modes (`-j`, `-f`, `-c`, `-o`, `-format`, `-absent`).
+
+---
+
 ## Build and install
 
 ```bash
@@ -1560,4 +1621,5 @@ The binary depends only on `libc`, `libm`, `libpthread`, and `ld-linux` — veri
 - **`-near A:B:K` and `-far A:B:K` express "X with/without Y nearby" in one call.** Common agent intents (`defer` near `Lock()`, `log.Print` without `// allow-print` on the same line) become single-flag queries.
 - **Use `-sample N` for "show me representative usages"** when an agent doesn't need every match — diversifying by file and surrounding-line shape produces a better picture in fewer tokens than `-limit N`.
 - **Set byte budgets defensively.** A `-max-context-bytes 500 -max-output-bytes 200000` floor protects an agent from a single minified line wiping out its context. Truncation is reported explicitly via per-field `*_truncated` flags and a final `output_truncated` info record — never silent.
+- **Prefer `-llm` over `-j` when piping matches into an LLM.** It strips JSON noise, dedupes file headers, and adapts to `-block-open`/`-scope` automatically — same information, ~30–50% fewer tokens. Switch back to `-j` only when you need offsets, pattern IDs, or `extracted` capture groups.
 - **hprscript does not modify files.** It is a read-only search tool — any action that would alter file contents on disk is rejected, as are the `--write`/`--backup` flags.
