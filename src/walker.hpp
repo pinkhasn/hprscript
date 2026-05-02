@@ -2,7 +2,7 @@
 //
 // Aggregates scan items (literal files, directories, and globs) plus exclude
 // rules, then yields candidate file paths to a visitor. Exclude rules accept
-// three forms (per SRSCRIPT.md):
+// three forms:
 //   1. glob pattern         "*.log", "src/**/*.test.go"
 //   2. bare directory name  "vendor"   — match against any path segment
 //   3. path prefix with /   "vendor/", "src/generated/"

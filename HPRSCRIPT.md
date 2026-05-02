@@ -6,8 +6,6 @@ Because hprscript reads content from stdin when no files/globs are given, it slo
 
 It is a single self-contained binary with no runtime dependencies beyond libc/libm. Built for Linux x86-64.
 
-`hprscript` is the Hyperscan-PCRE sibling of `srscript` — same ergonomics, same JSON-Lines style script mode, but PCRE-native patterns and Hyperscan's matching engine.
-
 ---
 
 ## Quick start
@@ -316,7 +314,7 @@ Available inside `$`-substitution (every string in `data` / `value` / `key` / fo
 | `$LOOKUP_KEY`, `$LOOKUP_VALUE` | Available inside a `lookup`'s `on_hit` / `on_miss` |
 | `$<varname>` | Any user-declared variable. When the entire string is `"$x"` the variable's native type is preserved; when embedded in a larger string it's stringified. |
 
-`$WORD` and `$SENTENCE` exist for compatibility with srscript scripts but currently always resolve to `0` — the lexical pass that populates them is not yet implemented.
+`$WORD` and `$SENTENCE` are reserved tokens but currently always resolve to `0` — the lexical pass that populates them is not yet implemented.
 
 ### Variables
 
@@ -1025,7 +1023,7 @@ Following grep's convention:
 
 ---
 
-## What hprscript does NOT support (vs `srscript`)
+## What hprscript does NOT support
 
 The following are deliberately rejected with an explicit error so they don't fail silently:
 
@@ -1033,11 +1031,9 @@ The following are deliberately rejected with an explicit error so they don't fai
 
 **Per-pattern**: `pcre` (not needed — Hyperscan is already PCRE), `run_pattern_at`, `run_pattern_from`, `run_pattern_to`, `run_pattern_until`.
 
-**Actions**: file modification (`replace`, `replace_span`, `insert_before`, `insert_after`, `insert_before_line`, `insert_after_line`, `delete`, `delete_line`) and the `--write`/`--backup` CLI flags that drive them.
+**Actions**: hprscript is a read-only search tool — any action that would alter file contents on disk is rejected, as are the `--write`/`--backup` CLI flags.
 
 **Other**: word/sentence counters (`$WORD`/`$SENTENCE` resolve to 0 — the lexical pass is not yet wired up).
-
-If you need any of the above today, use `srscript`. The two tools share the same JSON shape, so scripts port back and forth by adding/removing the unsupported pieces.
 
 ---
 
@@ -1564,4 +1560,4 @@ The binary depends only on `libc`, `libm`, `libpthread`, and `ld-linux` — veri
 - **`-near A:B:K` and `-far A:B:K` express "X with/without Y nearby" in one call.** Common agent intents (`defer` near `Lock()`, `log.Print` without `// allow-print` on the same line) become single-flag queries.
 - **Use `-sample N` for "show me representative usages"** when an agent doesn't need every match — diversifying by file and surrounding-line shape produces a better picture in fewer tokens than `-limit N`.
 - **Set byte budgets defensively.** A `-max-context-bytes 500 -max-output-bytes 200000` floor protects an agent from a single minified line wiping out its context. Truncation is reported explicitly via per-field `*_truncated` flags and a final `output_truncated` info record — never silent.
-- **For file modification, use `srscript`.** hprscript intentionally rejects `replace`/`insert`/`delete` actions and the `--write`/`--backup` flags.
+- **hprscript does not modify files.** It is a read-only search tool — any action that would alter file contents on disk is rejected, as are the `--write`/`--backup` flags.

@@ -1,6 +1,6 @@
 // Script mode (-s / -script) — runs a JSON program against scanned files.
 //
-// Supports an MVP subset of SRSCRIPT.md: top-level "scan", "exclude",
+// Supports an MVP subset of the script DSL: top-level "scan", "exclude",
 // "patterns", "context"/"context_before"/"context_after", "limit",
 // "limit_per_file"; per-pattern "id", "regexp", "case_insensitive",
 // "word_boundary"; on_match action "emit" (with optional "data" mapping

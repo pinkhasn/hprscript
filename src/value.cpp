@@ -179,8 +179,8 @@ RuntimeValue RuntimeValue::from_json(const json::Value &v) {
 }
 
 bool RuntimeValue::equals(const RuntimeValue &other) const {
-    // Numeric/string cross-equality: 5 == "5", true == 1, etc. — matches the
-    // loose comparison srscript exposes via the `eq` operator.
+    // Numeric/string cross-equality: 5 == "5", true == 1, etc. — the loose
+    // comparison the `eq` operator exposes.
     if (kind_ == Int && other.kind_ == Int) return i_ == other.i_;
     if (kind_ == Bool && other.kind_ == Bool) return b_ == other.b_;
     if (kind_ == Str && other.kind_ == Str) return s_ == other.s_;

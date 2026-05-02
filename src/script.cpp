@@ -1,6 +1,6 @@
 // Script-mode (-s / -script) interpreter.
 //
-// Supports the SRSCRIPT.md feature set that maps cleanly onto Hyperscan's
+// Supports the script DSL feature set that maps cleanly onto Hyperscan's
 // PCRE engine: typed variables, conditions and `if`, list/map ops,
 // `for_each`, `submatch`, `block`, `lookup`, file/complete lifecycle hooks,
 // `group_by`, `rank` (with weights), `skip`, `phases`, and absent patterns.
@@ -718,7 +718,7 @@ void emit_record_string(const std::string &json_line, const ExecCtx &ctx,
                         const std::string &group_key_hint) {
     ScriptState &st = *ctx.state;
     // Per-file cap stops the per-file scan, and treats already-skipped
-    // records as part of the cap (mirrors srscript).
+    // records as part of the cap.
     if (st.limit_per_file > 0 && st.per_file_emits >= st.limit_per_file) {
         st.stop_file = true;
         return;
@@ -1268,9 +1268,9 @@ void execute_action(const Action &a, ExecCtx &ctx) {
         } else {
             text = build_default_record(ctx).to_json();
         }
-        // print bypasses skip/limit per srscript design. But it does count
-        // toward emit cap for stop semantics — we treat it the same as emit
-        // here for predictable behaviour.
+        // print bypasses skip/limit by design. But it does count toward the
+        // emit cap for stop semantics — we treat it the same as emit here for
+        // predictable behaviour.
         if (state.group_by.empty()) {
             std::fwrite(text.data(), 1, text.size(), stdout);
             std::fputc('\n', stdout);

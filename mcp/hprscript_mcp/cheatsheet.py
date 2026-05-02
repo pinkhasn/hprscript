@@ -159,10 +159,10 @@ Per-pattern flags: `id`, `regexp`, `case_insensitive`, `word_boundary`,
 ranking), `absent: true` (fires `on_match` once per file where the
 pattern is **NOT** found), `on_match`.
 
-## What hprscript does NOT do (vs `srscript`)
+## What hprscript does NOT do
 
-File modification is rejected: `replace`, `replace_span`, `insert_*`,
-`delete*`, `--write`, `--backup`. Use `srscript` for edits.
+hprscript is a read-only search tool. Any action that would alter file
+contents on disk is rejected, as are the `--write`/`--backup` flags.
 
 Other rejected DSL fields (will error explicitly): top-level `boundary`,
 `on_boundary`, `ascii_only`, `overlap`, `files`; per-pattern `pcre` (not

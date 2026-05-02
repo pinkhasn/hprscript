@@ -1,6 +1,6 @@
 // Path-aware glob matcher.
 //
-// Supports the subset documented in SRSCRIPT.md:
+// Supports the documented subset:
 //   *      one path segment, any chars except '/'
 //   ?      one char except '/'
 //   **     zero or more path segments
