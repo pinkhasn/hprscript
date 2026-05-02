@@ -1350,7 +1350,26 @@ hprscript -s '{"scan":["**/*.go"],"skip":20,"limit":20,"patterns":[{"id":"t","re
 
 Hyperscan ignores `(...)` capture groups. To surface them, declare names with
 `-extract` (CLI) or `extract:[…]` (script) — `hprscript` runs a `std::regex`
-post-pass over each `$MATCH` to pull out the groups by position.
+post-pass over each `$MATCH` to pull out the groups by position. Names are
+matched to groups left-to-right in pattern order.
+
+**Single group — pull one value:**
+
+```bash
+# Extract the version from `version: X.Y.Z` lines.
+hprscript -p 'version:\s*([\d.]+)' -extract version
+# →  …,"extracted":{"version":"1.2.3"}
+```
+
+**Two groups — split a key/value pair:**
+
+```bash
+# Each `KEY=VALUE` assignment becomes two named fields.
+hprscript -p '(\w+)=(\S+)' -extract key,value
+# →  …,"extracted":{"key":"PATH","value":"/usr/bin"}
+```
+
+**Multiple groups — function name + arg list:**
 
 ```bash
 # Extract function name + arg list from each Go signature.
@@ -1374,6 +1393,15 @@ In script mode:
 
 The default record gains an `extracted` map; the `$EXTRACT_<NAME>` token is
 also available inside custom `data` shapes.
+
+**Optional / alternation — unmatched groups become empty strings:**
+
+```bash
+# `TODO: …` or `TODO(alice): …` — `author` is empty when the `(name)` is omitted.
+hprscript -p 'TODO(?:\(([^)]+)\))?:\s*(.*)' -extract author,message
+# →  …,"extracted":{"author":"alice","message":"refactor this"}
+# →  …,"extracted":{"author":"","message":"fix later"}
+```
 
 **Limitations.** The extract regex must compile under `std::regex`'s
 ECMAScript flavor. Most patterns Hyperscan accepts compile cleanly, but a
