@@ -35,6 +35,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <climits>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -249,8 +250,12 @@ private:
 
 struct FileRank {
     std::set<std::string> matched_pat_ids;
-    double score = 0.0;
+    double raw_score = 0.0;        // Σ weight of distinct matched pattern IDs.
     uint32_t line_count = 1;
+    // Per-file pattern-id → local index (0..N-1) for compact match_points.
+    std::map<std::string, uint16_t> pat_local_ids;
+    // Every match recorded as (1-based line, pat_local_id) for proximity sweep.
+    std::vector<std::pair<uint32_t, uint16_t>> match_points;
 };
 
 // ---- Script-wide state ------------------------------------------------------
@@ -300,6 +305,9 @@ struct ScriptState {
     // Rank.
     bool rank_enabled = false;
     std::map<std::string, double> pattern_weights;
+    // Total non-absent queried pattern IDs across phases (denominator for
+    // coverage). Set once, after compile.
+    uint32_t rank_total_queried = 0;
     std::vector<std::string> rank_file_order;
     std::map<std::string, FileRank> rank_per_file;
     // Per-current-file pattern-id matches (cleared on file end).
@@ -1931,13 +1939,29 @@ void run_phase(const CompiledPhase &phase, ScriptState &state,
             ctx.has_block = false;
             ctx.has_lookup = false;
             if (state.rank_enabled) {
+                auto &fr = state.rank_per_file[display_name];
+                if (fr.matched_pat_ids.empty() && fr.match_points.empty())
+                    state.rank_file_order.push_back(display_name);
+                // First time seeing this pattern in this file: bump raw score.
                 if (state.rank_file_pat_ids.insert(cp.pat.id).second) {
-                    auto &fr = state.rank_per_file[display_name];
-                    if (fr.matched_pat_ids.empty())
-                        state.rank_file_order.push_back(display_name);
                     fr.matched_pat_ids.insert(cp.pat.id);
-                    fr.score += cp.pat.weight;
+                    fr.raw_score += cp.pat.weight;
                     fr.line_count = idx.line_count();
+                }
+                // Record the match point for proximity. Cap to keep memory
+                // bounded on pathological files.
+                static constexpr size_t kMaxMatchPoints = 4096;
+                if (fr.match_points.size() < kMaxMatchPoints) {
+                    auto pit = fr.pat_local_ids.find(cp.pat.id);
+                    uint16_t local;
+                    if (pit == fr.pat_local_ids.end()) {
+                        local = (uint16_t)std::min<size_t>(
+                            fr.pat_local_ids.size(), 0xFFFFu);
+                        fr.pat_local_ids[cp.pat.id] = local;
+                    } else {
+                        local = pit->second;
+                    }
+                    fr.match_points.emplace_back(idx.line_of(m.from), local);
                 }
             }
             execute_actions(cp.on_match, ctx);
@@ -2033,6 +2057,31 @@ void flush_groups(ScriptState &state) {
     state.group_order.clear();
 }
 
+// Count proximity clusters: contiguous groups of match points where each
+// adjacent pair is within K lines, and the group spans ≥2 distinct pattern
+// IDs. K=20 is roughly "same function" in typical code.
+static uint32_t count_prox_clusters(
+    std::vector<std::pair<uint32_t, uint16_t>> pts) {
+    static constexpr uint32_t K = 20;
+    if (pts.size() < 2) return 0;
+    std::sort(pts.begin(), pts.end(),
+              [](const auto &a, const auto &b) { return a.first < b.first; });
+    uint32_t clusters = 0;
+    size_t i = 0;
+    while (i < pts.size()) {
+        size_t j = i + 1;
+        while (j < pts.size() && pts[j].first - pts[j - 1].first <= K) ++j;
+        if (j - i >= 2) {
+            uint16_t first_id = pts[i].second;
+            for (size_t k = i + 1; k < j; ++k) {
+                if (pts[k].second != first_id) { ++clusters; break; }
+            }
+        }
+        i = j;
+    }
+    return clusters;
+}
+
 void flush_rank(ScriptState &state) {
     if (!state.rank_enabled) return;
     struct Row {
@@ -2041,14 +2090,34 @@ void flush_rank(ScriptState &state) {
         double density;
         std::vector<std::string> pats;
     };
+    // Tunables. Coverage exponent makes "matches all queried patterns" a
+    // strong multiplier; density divisor gently penalizes huge files;
+    // proximity bonus rewards co-located matches (cohesion).
+    static constexpr double kCoverageExp = 1.5;
+    static constexpr double kProximityWeight = 0.5;
+    const double queried = state.rank_total_queried > 0
+                               ? (double)state.rank_total_queried
+                               : 1.0;
+
     std::vector<Row> rows;
     rows.reserve(state.rank_file_order.size());
     for (const auto &f : state.rank_file_order) {
         const FileRank &fr = state.rank_per_file[f];
+        double matched = (double)fr.matched_pat_ids.size();
+        double coverage = matched / queried;
+        if (coverage > 1.0) coverage = 1.0;
+        double cov_factor = std::pow(coverage, kCoverageExp);
+        double divisor = std::log((double)fr.line_count + 10.0);
+        if (divisor <= 0.0) divisor = 1.0;
+        uint32_t clusters = count_prox_clusters(fr.match_points);
+        double prox_bonus = kProximityWeight * (double)clusters;
+
         Row r;
         r.file = f;
-        r.score = fr.score;
-        r.density = fr.line_count > 0 ? fr.score / (double)fr.line_count : 0.0;
+        r.score = cov_factor * fr.raw_score / divisor + prox_bonus;
+        r.density = fr.line_count > 0
+                        ? fr.raw_score / (double)fr.line_count
+                        : 0.0;
         r.pats.assign(fr.matched_pat_ids.begin(), fr.matched_pat_ids.end());
         rows.push_back(std::move(r));
     }
@@ -2363,11 +2432,14 @@ int run_script(const Cli &cli) {
 
     // Track per-pattern weights (for rank). After compile.
     if (state.rank_enabled) {
+        std::set<std::string> queried_ids;
         for (const auto &ph : phases) {
             for (const auto &p : ph.patterns) {
                 state.pattern_weights[p.pat.id] = p.pat.weight;
+                if (!p.absent) queried_ids.insert(p.pat.id);
             }
         }
+        state.rank_total_queried = (uint32_t)queried_ids.size();
     }
 
     // Top-level on_file_end / on_complete (run after each phase / at end).

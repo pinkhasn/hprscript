@@ -705,7 +705,17 @@ Output:
 
 ### Match ranking (`rank`)
 
-After scanning, emits one JSON line per file containing at least one match, sorted by score descending (density is the tiebreaker). Score is the sum of `weight` for **distinct** matched pattern IDs in the file (multiple matches of the same pattern don't increase the score).
+After scanning, emits one JSON line per file containing at least one match, sorted by score descending (density is the tiebreaker).
+
+The score combines three signals:
+
+- **Coverage** — fraction of queried (non-`absent`) pattern IDs the file matches. Scaled with exponent 1.5 so a file matching all patterns dominates one matching a subset.
+- **Weighted hits** — Σ `weight` over **distinct** matched pattern IDs (re-matches of the same pattern don't accumulate), normalized by `log(file_lines + 10)` so big files don't win on size alone.
+- **Proximity bonus** — `+0.5` for each cluster of matches where ≥2 distinct pattern IDs co-occur within 20 lines (rewards "all matches in one function").
+
+`score = coverage^1.5 × Σweight / log(lines + 10) + 0.5 × clusters`
+
+`density` (Σweight / line_count) is reported for diagnostics and used as a tiebreaker.
 
 ```bash
 hprscript -s '{
@@ -719,8 +729,8 @@ hprscript -s '{
 ```
 
 ```json
-{"file":"src/api/handler.go","score":3.5,"density":0.07,"matched_patterns":["endpoint","todo"]}
-{"file":"src/util.go","score":0.5,"density":0.01,"matched_patterns":["todo"]}
+{"file":"src/api/handler.go","score":1.43,"density":0.07,"matched_patterns":["endpoint","todo"]}
+{"file":"src/util.go","score":0.06,"density":0.01,"matched_patterns":["todo"]}
 ```
 
 When `rank` is enabled, the rank table **replaces** match output: per-match `emit` and `print` are suppressed so only the rank rows are written. `on_match` actions still execute (so `count`, `set`, `map_increment`, etc. continue to update variables), but record-producing actions are silenced. Aggregations from `on_file_end` and `on_complete` are **not** suppressed.

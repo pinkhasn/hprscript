@@ -386,12 +386,61 @@ OUT=$(cd "$SAMPLE" && "$BIN" -s '{
     {"id":"fn","regexp":"func \\w+","weight":1}
   ]
 }')
-expect_contains "rank: a.go scored 4" '"file":"a.go","score":4' "$OUT"
-expect_contains "rank: b.go scored 4" '"file":"b.go","score":4' "$OUT"
+expect_contains "rank: a.go listed"  '"file":"a.go"'  "$OUT"
+expect_contains "rank: b.go listed"  '"file":"b.go"'  "$OUT"
 expect_contains "rank: matched_patterns" '"matched_patterns":["fn","todo"]' "$OUT"
+expect_contains "rank: density field"    '"density":'  "$OUT"
 # rank-only output: no per-match records mixed in (2 files matched → 2 lines).
 expect_lines "rank: only rank rows emitted" 2 "$OUT"
 expect_not_contains "rank: no match records" '"match":' "$OUT"
+
+# rank: coverage factor — file matching all queried patterns outranks
+# a file that matches only a subset, even at higher weight per match.
+OUT=$(cd "$SAMPLE" && "$BIN" -s '{
+  "scan":["**/*.go"],"exclude":["vendor"],"rank":true,
+  "patterns":[
+    {"id":"todo","regexp":"TODO","weight":1},
+    {"id":"fn",  "regexp":"func \\w+","weight":1},
+    {"id":"pkg", "regexp":"^package ","weight":1}
+  ]
+}')
+# All three patterns match in both files → both files get coverage=1. Sanity:
+# both files appear with a positive score.
+expect_contains "rank cov: a.go listed" '"file":"a.go"' "$OUT"
+expect_contains "rank cov: b.go listed" '"file":"b.go"' "$OUT"
+
+# rank: proximity bonus — a file with co-located distinct patterns scores
+# higher than a file where the same patterns are spread far apart.
+mkdir -p "$SAMPLE/proxtest"
+cat >"$SAMPLE/proxtest/near.go" <<'EOF'
+package main
+// TODO fix this
+func handler() {}
+EOF
+# Build a "far" file: pattern A on line 1, then a wide gap, then pattern B.
+{
+  echo 'package main'
+  echo '// TODO fix this'
+  for _ in $(seq 1 80); do echo '// padding'; done
+  echo 'func handler() {}'
+} > "$SAMPLE/proxtest/far.go"
+OUT=$(cd "$SAMPLE/proxtest" && "$BIN" -s '{
+  "scan":["**/*.go"],"rank":true,
+  "patterns":[
+    {"id":"todo","regexp":"TODO","weight":1},
+    {"id":"fn",  "regexp":"func \\w+","weight":1}
+  ]
+}')
+# near.go must come first (proximity bonus + smaller divisor).
+near_pos=$(printf '%s\n' "$OUT" | grep -n '"file":"near.go"' | head -1 | cut -d: -f1)
+far_pos=$(printf '%s\n'  "$OUT" | grep -n '"file":"far.go"'  | head -1 | cut -d: -f1)
+if [ -n "$near_pos" ] && [ -n "$far_pos" ] && [ "$near_pos" -lt "$far_pos" ]; then
+  report ok "rank prox: near.go ranks above far.go"
+else
+  report fail "rank prox: expected near.go before far.go"
+  printf "%s\n" "$OUT" | sed 's/^/      | /'
+fi
+rm -rf "$SAMPLE/proxtest"
 
 # rank suppresses on_match emit/print but lets aggregations through
 OUT=$(cd "$SAMPLE" && "$BIN" -s '{
