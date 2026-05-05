@@ -1638,6 +1638,26 @@ hprscript -s '{
 }'
 ```
 
+### 14.6 Extract bodies of functions whose name contains a substring
+
+**Problem:** Pull every function whose name *includes* a fragment — handy when you remember a piece of the name (`qualify`, `Validate`, `parse`) but not the full identifier, or when sweeping every `Parse*` / `Validate*` family at once. The signature regex matches by substring; `-block-open` / `-block-close` walks each match forward and grabs the balanced body, depth-tracked across nested braces.
+
+**Input:** Source tree.
+
+```bash
+# Perl: every `sub *qualify*` — signature + full body per match.
+# Worked target: the standard `Symbol.pm` module, which defines both
+# `qualify` and `qualify_to_ref`.
+hprscript -p 'sub\s+\w*qualify\w*' -block-open '{' -block-close '}' \
+  -o perl/run/lib/5.36.1/Symbol.pm
+
+# Go: every function or method whose name contains `Validate`.
+hprscript -p 'func\s+(?:\([^)]*\)\s+)?\w*Validate\w*' \
+  -block-open '{' -block-close '}' -o '**/*.go'
+```
+
+For a worked single-function extraction (with the depth-tracking walk-through on `\*{ ... }` derefs), see [HPRSCRIPT.md → Extract a single named function](HPRSCRIPT.md#extract-a-single-named-function).
+
 ---
 
 ## 15. Migration scans
