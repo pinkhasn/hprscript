@@ -122,6 +122,7 @@ enum class ActionKind {
     Set, Increment, Decrement, Add, Subtract, Multiply, Divide, Reset,
     Append, Collect, UniqueAppend, Sort,
     MapSet, MapIncrement, Count,
+    SetDifference, SetIntersection, SetUnion,
     If, ForEach, Stop,
     Submatch, Block, Lookup,
 };
@@ -165,6 +166,10 @@ struct Action {
 
     // Lookup.
     std::string lookup_map;
+
+    // Set algebra.
+    std::string set_a;
+    std::string set_b;
 };
 
 // ---- Compiled pattern -------------------------------------------------------
@@ -977,6 +982,22 @@ bool compile_action(const json::Value &av, Action &out, std::string &err) {
         }
         return true;
     }
+    if (name == "set_difference" || name == "set_intersection" ||
+        name == "set_union") {
+        if (name == "set_difference")        out.kind = ActionKind::SetDifference;
+        else if (name == "set_intersection") out.kind = ActionKind::SetIntersection;
+        else                                 out.kind = ActionKind::SetUnion;
+        if (!take_var("target", out.target)) {
+            err = name + " requires 'target'"; return false;
+        }
+        if (!take_var("a", out.set_a)) {
+            err = name + " requires 'a'"; return false;
+        }
+        if (!take_var("b", out.set_b)) {
+            err = name + " requires 'b'"; return false;
+        }
+        return true;
+    }
     if (name == "if") {
         out.kind = ActionKind::If;
         const json::Value *c = av.find("condition");
@@ -1423,6 +1444,53 @@ void execute_action(const Action &a, ExecCtx &ctx) {
         auto it = mm.find(k);
         if (it == mm.end()) mm.emplace(k, RuntimeValue::make_int(1));
         else it->second = RuntimeValue::make_int(it->second.to_int() + 1);
+        return;
+    }
+    case ActionKind::SetDifference:
+    case ActionKind::SetIntersection:
+    case ActionKind::SetUnion: {
+        // Iterate the unique string members of a variable in insertion order:
+        //   map  → keys (already unique by construction)
+        //   list → elements coerced via to_str(), deduped on the fly
+        //   str  → single member
+        //   else → no calls
+        auto for_each_unique = [&](const std::string &name, auto &&fn) {
+            const RuntimeValue *v = vars.find(name);
+            if (!v) return;
+            if (v->is_map()) {
+                for (const auto &kv : v->as_map()) fn(kv.first);
+            } else if (v->is_list()) {
+                std::unordered_set<std::string> seen;
+                for (const auto &e : v->as_list()) {
+                    std::string s = e.to_str();
+                    if (seen.insert(s).second) fn(std::move(s));
+                }
+            } else if (v->is_str()) {
+                fn(v->as_str());
+            }
+        };
+
+        // Build into a local first so `target` may safely alias `a` or `b`
+        // (either by name or via shared list/map storage).
+        std::vector<RuntimeValue> result;
+        if (a.kind == ActionKind::SetUnion) {
+            std::unordered_set<std::string> seen;
+            auto add_unique = [&](std::string s) {
+                if (seen.insert(s).second)
+                    result.push_back(RuntimeValue::make_str(std::move(s)));
+            };
+            for_each_unique(a.set_a, add_unique);
+            for_each_unique(a.set_b, add_unique);
+        } else {
+            std::unordered_set<std::string> b_seen;
+            for_each_unique(a.set_b, [&](std::string s) { b_seen.insert(std::move(s)); });
+            bool keep_if_in_b = (a.kind == ActionKind::SetIntersection);
+            for_each_unique(a.set_a, [&](std::string s) {
+                if ((b_seen.count(s) > 0) == keep_if_in_b)
+                    result.push_back(RuntimeValue::make_str(std::move(s)));
+            });
+        }
+        var_or_create_list(a.target).as_list() = std::move(result);
         return;
     }
     case ActionKind::If: {

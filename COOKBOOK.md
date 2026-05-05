@@ -1658,6 +1658,33 @@ hprscript -p 'func\s+(?:\([^)]*\)\s+)?\w*Validate\w*' \
 
 For a worked single-function extraction (with the depth-tracking walk-through on `\*{ ... }` derefs), see [HPRSCRIPT.md → Extract a single named function](HPRSCRIPT.md#extract-a-single-named-function).
 
+### 14.7 Defined functions never called (set difference of two phases)
+
+**Problem:** Phase 1 collects every function definition. Phase 2 collects every callsite. The unused set is the keys present in `defs` but not in `uses` — one `set_difference` action over the two maps, no `for_each + lookup + on_miss` boilerplate.
+
+**Input:** Source tree.
+
+```bash
+hprscript -s '{
+  "variables": {"defs":{"type":"map"}, "uses":{"type":"map"}},
+  "phases": [
+    {"id":"d","scan":["**/*.go"], "patterns":[
+      {"id":"fn","regexp":"^func\\s+(\\w+)","extract":["n"],
+       "on_match":[{"action":"map_set","target":"defs","key":"$EXTRACT_N","value":"$FILE:$LINE"}]}]},
+    {"id":"u","scan":["**/*.go"], "patterns":[
+      {"id":"call","regexp":"\\b(\\w+)\\s*\\(","extract":["n"],
+       "on_match":[{"action":"map_set","target":"uses","key":"$EXTRACT_N","value":"1"}]}]}
+  ],
+  "on_complete":[
+    {"action":"set_difference","target":"unused","a":"defs","b":"uses"},
+    {"action":"for_each","var":"unused","as":"n","do":[
+      {"action":"emit","data":{"unused":"$n"}}]}
+  ]
+}'
+```
+
+**Why hprscript:** Two phases share the variable store, and `set_difference` collapses what would otherwise be `for_each` + `lookup` with `on_miss` into one declarative action. `set_intersection` and `set_union` are useful in the same shape — e.g., "endpoints documented in OpenAPI but not implemented" is a `set_difference` of `documented` and `implemented` map keysets. Operands can be lists or maps; maps are coerced to their keysets, and the output `target` is a deduped, insertion-ordered list of strings.
+
 ---
 
 ## 15. Migration scans

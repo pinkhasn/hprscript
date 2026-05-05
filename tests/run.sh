@@ -478,6 +478,176 @@ expect_contains "block action: body has both lines (b)" 'b := 2' "$OUT"
 rm -f "$BLK"
 
 # ---------------------------------------------------------------------------
+section "script: set algebra (set_difference / set_intersection / set_union)"
+
+# All three actions over two maps (defaults), with both directions of diff.
+OUT=$("$BIN" -s '{
+  "variables":{
+    "sa":{"type":"map","default":{"alpha":"1","beta":"1","gamma":"1"}},
+    "sb":{"type":"map","default":{"beta":"1","delta":"1"}}
+  },
+  "scan":["nonexistent_glob"],
+  "patterns":[{"id":"_x","regexp":"never_matches"}],
+  "on_complete":[
+    {"action":"set_difference",  "target":"diff_ab","a":"sa","b":"sb"},
+    {"action":"set_difference",  "target":"diff_ba","a":"sb","b":"sa"},
+    {"action":"set_intersection","target":"inter",  "a":"sa","b":"sb"},
+    {"action":"set_union",       "target":"uni",    "a":"sa","b":"sb"},
+    {"action":"for_each","var":"diff_ab","as":"x","do":[{"action":"emit","data":{"diff_ab":"$x"}}]},
+    {"action":"for_each","var":"diff_ba","as":"x","do":[{"action":"emit","data":{"diff_ba":"$x"}}]},
+    {"action":"for_each","var":"inter",  "as":"x","do":[{"action":"emit","data":{"inter":"$x"}}]},
+    {"action":"for_each","var":"uni",    "as":"x","do":[{"action":"emit","data":{"uni":"$x"}}]}
+  ]
+}' | sort)
+expect_eq "set ops: full output (sorted)" '{"diff_ab":"alpha"}
+{"diff_ab":"gamma"}
+{"diff_ba":"delta"}
+{"inter":"beta"}
+{"uni":"alpha"}
+{"uni":"beta"}
+{"uni":"delta"}
+{"uni":"gamma"}' "$OUT"
+
+# Lists as operands, with duplicate input that should be deduped.
+OUT=$("$BIN" -s '{
+  "variables":{
+    "la":{"type":"list","default":["alpha","beta","gamma","beta"]},
+    "lb":{"type":"list","default":["beta","delta"]}
+  },
+  "scan":["nonexistent_glob"],
+  "patterns":[{"id":"_x","regexp":"never_matches"}],
+  "on_complete":[
+    {"action":"set_intersection","target":"inter","a":"la","b":"lb"},
+    {"action":"set_union",       "target":"uni",  "a":"la","b":"lb"},
+    {"action":"for_each","var":"inter","as":"x","do":[{"action":"emit","data":{"inter":"$x"}}]},
+    {"action":"for_each","var":"uni",  "as":"x","do":[{"action":"emit","data":{"uni":"$x"}}]}
+  ]
+}' | sort)
+expect_eq "set ops: list operands dedup" '{"inter":"beta"}
+{"uni":"alpha"}
+{"uni":"beta"}
+{"uni":"delta"}
+{"uni":"gamma"}' "$OUT"
+
+# Mixed list+map and a missing variable (treated as empty set).
+OUT=$("$BIN" -s '{
+  "variables":{
+    "la":{"type":"list","default":["alpha","beta","gamma"]},
+    "mb":{"type":"map", "default":{"beta":"x","delta":"y"}}
+  },
+  "scan":["nonexistent_glob"],
+  "patterns":[{"id":"_x","regexp":"never_matches"}],
+  "on_complete":[
+    {"action":"set_difference","target":"diff",   "a":"la","b":"mb"},
+    {"action":"set_union",     "target":"with_nil","a":"la","b":"nope"},
+    {"action":"for_each","var":"diff",    "as":"x","do":[{"action":"emit","data":{"diff":"$x"}}]},
+    {"action":"for_each","var":"with_nil","as":"x","do":[{"action":"emit","data":{"with_nil":"$x"}}]}
+  ]
+}' | sort)
+expect_eq "set ops: mixed list/map + missing var" '{"diff":"alpha"}
+{"diff":"gamma"}
+{"with_nil":"alpha"}
+{"with_nil":"beta"}
+{"with_nil":"gamma"}' "$OUT"
+
+# Parser errors: missing required fields.
+expect_exit "set_difference missing 'b' fails" 2 \
+  "$BIN" -s '{"patterns":[{"id":"x","regexp":"x","on_match":[
+    {"action":"set_difference","target":"o","a":"sa"}]}]}'
+expect_exit "set_union missing 'a' fails" 2 \
+  "$BIN" -s '{"patterns":[{"id":"x","regexp":"x","on_match":[
+    {"action":"set_union","target":"o","b":"sb"}]}]}'
+
+# Aliasing: target may name the same variable as `a` and/or `b`. The result
+# must be computed from the pre-action contents, not from a destination that
+# was cleared mid-flight.
+OUT=$("$BIN" -s '{
+  "variables":{
+    "x":{"type":"list","default":["alpha","beta","gamma"]},
+    "y":{"type":"list","default":["beta","delta"]}
+  },
+  "scan":["nonexistent_glob"],
+  "patterns":[{"id":"_x","regexp":"never_matches"}],
+  "on_complete":[
+    {"action":"set_union","target":"x","a":"x","b":"y"},
+    {"action":"for_each","var":"x","as":"e","do":[{"action":"emit","data":{"x":"$e"}}]}
+  ]
+}' | sort)
+expect_eq "set ops: target aliases a (union)" '{"x":"alpha"}
+{"x":"beta"}
+{"x":"delta"}
+{"x":"gamma"}' "$OUT"
+
+OUT=$("$BIN" -s '{
+  "variables":{
+    "x":{"type":"list","default":["alpha","beta","gamma"]},
+    "y":{"type":"list","default":["beta","delta"]}
+  },
+  "scan":["nonexistent_glob"],
+  "patterns":[{"id":"_x","regexp":"never_matches"}],
+  "on_complete":[
+    {"action":"set_difference","target":"x","a":"x","b":"y"},
+    {"action":"for_each","var":"x","as":"e","do":[{"action":"emit","data":{"x":"$e"}}]}
+  ]
+}' | sort)
+expect_eq "set ops: target aliases a (difference)" '{"x":"alpha"}
+{"x":"gamma"}' "$OUT"
+
+OUT=$("$BIN" -s '{
+  "variables":{
+    "x":{"type":"list","default":["alpha","beta","gamma"]},
+    "y":{"type":"list","default":["beta","delta"]}
+  },
+  "scan":["nonexistent_glob"],
+  "patterns":[{"id":"_x","regexp":"never_matches"}],
+  "on_complete":[
+    {"action":"set_difference","target":"y","a":"x","b":"y"},
+    {"action":"for_each","var":"y","as":"e","do":[{"action":"emit","data":{"y":"$e"}}]}
+  ]
+}' | sort)
+expect_eq "set ops: target aliases b (difference)" '{"y":"alpha"}
+{"y":"gamma"}' "$OUT"
+
+OUT=$("$BIN" -s '{
+  "variables":{
+    "x":{"type":"list","default":["alpha","beta","gamma"]},
+    "y":{"type":"list","default":["beta","delta"]}
+  },
+  "scan":["nonexistent_glob"],
+  "patterns":[{"id":"_x","regexp":"never_matches"}],
+  "on_complete":[
+    {"action":"set_intersection","target":"x","a":"x","b":"y"},
+    {"action":"for_each","var":"x","as":"e","do":[{"action":"emit","data":{"x":"$e"}}]}
+  ]
+}' | sort)
+expect_eq "set ops: target aliases a (intersection)" '{"x":"beta"}' "$OUT"
+
+# Edge case: a, b, and target all the same variable. Union/intersection are
+# the deduped self; difference is empty.
+OUT=$("$BIN" -s '{
+  "variables":{"x":{"type":"list","default":["alpha","beta","alpha"]}},
+  "scan":["nonexistent_glob"],
+  "patterns":[{"id":"_x","regexp":"never_matches"}],
+  "on_complete":[
+    {"action":"set_intersection","target":"x","a":"x","b":"x"},
+    {"action":"for_each","var":"x","as":"e","do":[{"action":"emit","data":{"x":"$e"}}]}
+  ]
+}' | sort)
+expect_eq "set ops: target aliases both a and b (intersection)" '{"x":"alpha"}
+{"x":"beta"}' "$OUT"
+
+OUT=$("$BIN" -s '{
+  "variables":{"x":{"type":"list","default":["alpha","beta"]}},
+  "scan":["nonexistent_glob"],
+  "patterns":[{"id":"_x","regexp":"never_matches"}],
+  "on_complete":[
+    {"action":"set_difference","target":"x","a":"x","b":"x"},
+    {"action":"for_each","var":"x","as":"e","do":[{"action":"emit","data":{"x":"$e"}}]}
+  ]
+}')
+expect_eq "set ops: target aliases both a and b (difference is empty)" "" "$OUT"
+
+# ---------------------------------------------------------------------------
 section "script: phases (cross-phase variable sharing)"
 
 OUT=$(cd "$SAMPLE" && "$BIN" -s '{

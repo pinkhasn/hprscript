@@ -147,6 +147,9 @@ Actions:
   `multiply`, `divide`, `reset`
 - Lists: `append`, `collect`, `unique_append`, `sort`
 - Maps: `map_set`, `map_increment`, `count`
+- Set algebra: `set_difference`, `set_intersection`, `set_union`
+  (`{target, a, b}`; lists or maps — maps coerced to keysets; output is a
+  deduped, insertion-ordered list of strings)
 - Control: `if`, `for_each`, `stop`
 - Cross-line: `submatch` (sub-patterns over `$MATCH`/`$BLOCK`/etc),
   `block` (find balanced delimiter block then run `on_block`),

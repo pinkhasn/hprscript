@@ -403,6 +403,25 @@ Declare variables in the top-level `variables` object. They persist across match
 {"action": "count", "var": "by_pat"}
 ```
 
+#### Set algebra
+
+| Action | Description |
+|---|---|
+| `set_difference` | `target` = elements in `a` but not in `b`. |
+| `set_intersection` | `target` = elements present in both `a` and `b`. |
+| `set_union` | `target` = elements present in either `a` or `b`. |
+
+`a` and `b` may be lists or maps. Maps are coerced to their keysets. List
+elements are coerced to strings via `to_str()` and deduped. The output
+`target` is always a fresh list of strings, in insertion order (`a` first,
+then `b` for unions). Missing variables are treated as the empty set.
+
+```json
+{"action": "set_difference",   "target": "unused", "a": "defs", "b": "uses"}
+{"action": "set_intersection", "target": "shared", "a": "groupA", "b": "groupB"}
+{"action": "set_union",        "target": "all",    "a": "errors", "b": "warnings"}
+```
+
 #### Control flow
 
 | Action | Description |
