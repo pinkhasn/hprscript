@@ -116,6 +116,19 @@ The `mcp/` directory contains an [MCP](https://modelcontextprotocol.io/) server 
 
 ---
 
+## Claude Code skill
+
+If you use [Claude Code](https://docs.claude.com/en/docs/claude-code), the `skills/hprscript/` directory ships a ready-to-use [skill](https://docs.claude.com/en/docs/claude-code/skills) that teaches Claude when and how to invoke `hprscript` (CLI binary, no MCP required). Install with one copy:
+
+```bash
+mkdir -p ~/.claude/skills/hprscript
+cp skills/hprscript/SKILL.md ~/.claude/skills/hprscript/SKILL.md
+```
+
+Start a new `claude` session and Claude will reach for `hprscript` instead of `grep`/`rg` whenever you ask it to search code. The skill carries an inline cheat sheet and points at [`HPRSCRIPT.md`](HPRSCRIPT.md) for full DSL depth.
+
+---
+
 ## Documentation
 
 - **[HPRSCRIPT.md](HPRSCRIPT.md)** — full reference: every CLI flag, the script-mode JSON DSL, Unicode handling, regex quirks, exit codes, and a cookbook of recipes.
