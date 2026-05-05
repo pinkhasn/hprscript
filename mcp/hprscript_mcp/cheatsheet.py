@@ -97,6 +97,14 @@ extract_blocks(patterns=["\\"config\\"\\\\s*:"],
 count_per_file(patterns=["TODO"], globs=["**/*.go"])
 ```
 
+### Mixed case sensitivity in one call
+Combine case-sensitive and case-insensitive patterns; both run in the same DFA pass.
+```
+search(patterns=["panic\\\\("],
+       case_insensitive_patterns=["error|warning|critical"],
+       globs=["**/*.go"])
+```
+
 ## run_script — the full DSL
 
 Use `run_script` when convenience tools aren't enough. Skeleton:
@@ -158,6 +166,60 @@ Per-pattern flags: `id`, `regexp`, `case_insensitive`, `word_boundary`,
 `utf8` (default true), `ucp` (Unicode `\\w`/`\\d`/`\\s`), `weight` (for
 ranking), `absent: true` (fires `on_match` once per file where the
 pattern is **NOT** found), `on_match`.
+
+## More run_script recipes
+
+### Files with A but not B (e.g. error checks lacking wrap)
+Set a per-file bool on A; an `absent` pattern for B emits when B is
+missing AND A was seen. Reset the bool in `on_file_end`.
+```json
+{
+  "scan": ["**/*.go"],
+  "variables": {"has_err": {"type": "bool"}},
+  "patterns": [
+    {"id": "err", "regexp": "if err != nil",
+     "on_match": [{"action": "set", "var": "has_err", "value": true}]},
+    {"id": "no_wrap", "regexp": "fmt\\\\.Errorf\\\\(", "absent": true,
+     "on_match": [
+       {"action": "if",
+        "condition": {"op": "eq", "args": ["$has_err", true]},
+        "then": [{"action": "emit", "data": {"file": "$FILE"}}]}
+     ]}
+  ],
+  "on_file_end": [{"action": "reset", "vars": ["has_err"]}]
+}
+```
+
+### Per-file relevance ranking (`rank: true`)
+Emits one row per file containing matches, sorted by score. Replaces
+per-match output (use this when you want "which files are most relevant
+to this set of patterns").
+```json
+{
+  "scan": ["**/*.go"],
+  "rank": true,
+  "patterns": [
+    {"id": "endpoint", "regexp": "func handle", "weight": 3},
+    {"id": "todo",     "regexp": "TODO",        "weight": 0.5}
+  ]
+}
+```
+Output: `{"file": "...", "score": 1.43, "density": 0.07, "matched_patterns": [...]}`.
+
+### Group emits by field (`group_by`)
+Buffers `emit` records and flushes one JSON line per distinct value of
+the named field. Use `"group_by": "file"` for a per-file digest.
+```json
+{
+  "scan": ["**/*.go"],
+  "group_by": "file",
+  "patterns": [{"id": "t", "regexp": "TODO|FIXME", "on_match": [
+    {"action": "emit",
+     "data": {"file": "$FILE", "line": "$LINE", "match": "$MATCH"}}
+  ]}]
+}
+```
+Output: `{"key": "main.go", "group": [{"file": "main.go", "line": 12}, ...]}`.
 
 ## What hprscript does NOT do
 
