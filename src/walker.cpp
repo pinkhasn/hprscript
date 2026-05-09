@@ -2,26 +2,12 @@
 
 #include "glob.hpp"
 
-#include <cstdio>
 #include <filesystem>
-#include <fstream>
 #include <unordered_set>
 
 namespace fs = std::filesystem;
 
 namespace hpr {
-
-bool file_looks_binary(const std::string &path) {
-    std::ifstream in(path, std::ios::binary);
-    if (!in) return false;
-    char buf[512];
-    in.read(buf, sizeof(buf));
-    auto n = in.gcount();
-    for (std::streamsize i = 0; i < n; ++i) {
-        if (buf[i] == '\0') return true;
-    }
-    return false;
-}
 
 namespace {
 
@@ -85,7 +71,6 @@ void Walker::walk(const std::function<bool(const WalkItem &)> &visit) {
         if (!seen.insert(path).second) return true;
         WalkItem it;
         it.path = path;
-        it.is_binary = file_looks_binary(path);
         if (!visit(it)) { stop = true; return false; }
         return true;
     };

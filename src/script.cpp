@@ -84,6 +84,14 @@ bool slurp_file_to_string(const std::string &path, std::string &out) {
 
 bool slurp_stdin(std::string &out) { return read_stdin(out); }
 
+bool looks_binary(std::string_view content) {
+    size_t n = std::min<size_t>(content.size(), 512);
+    for (size_t i = 0; i < n; ++i) {
+        if (content[i] == '\0') return true;
+    }
+    return false;
+}
+
 std::string i64_str(int64_t v) {
     char buf[32];
     std::snprintf(buf, sizeof(buf), "%lld", (long long)v);
@@ -2097,12 +2105,12 @@ void run_phase(const CompiledPhase &phase, ScriptState &state,
 
     walker.walk([&](const WalkItem &it) {
         if (state.stop_all) return false;
-        if (it.is_binary) return true;
         MappedFile mf;
         if (!mf.open(it.path)) {
             std::fprintf(stderr, "hprscript: cannot read %s\n", it.path.c_str());
             return true;
         }
+        if (looks_binary(mf.view())) return true;
         return scan_buf(it.path, mf.view());
     });
 }

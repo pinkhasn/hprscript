@@ -48,6 +48,14 @@ std::string normalise_shape(std::string_view line) {
     return s;
 }
 
+bool looks_binary(std::string_view content) {
+    size_t n = std::min<size_t>(content.size(), 512);
+    for (size_t i = 0; i < n; ++i) {
+        if (content[i] == '\0') return true;
+    }
+    return false;
+}
+
 } // namespace
 
 namespace hpr {
@@ -383,13 +391,13 @@ int run_search(const Cli &cli) {
         scan_buf("<stdin>", content);
     } else {
         walker.walk([&](const WalkItem &it) {
-            if (it.is_binary) return true; // skip silently
             MappedFile mf;
             if (!mf.open(it.path)) {
                 std::fprintf(stderr, "hprscript: cannot read %s: %s\n",
                              it.path.c_str(), std::strerror(errno));
                 return true;
             }
+            if (looks_binary(mf.view())) return true; // skip silently
             return scan_buf(it.path, mf.view());
         });
     }
