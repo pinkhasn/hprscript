@@ -131,7 +131,8 @@ Start a new `claude` session and Claude will reach for `hprscript` instead of `g
 
 ## Documentation
 
-- **[HPRSCRIPT.md](HPRSCRIPT.md)** — full reference: every CLI flag, the script-mode JSON DSL, Unicode handling, regex quirks, exit codes, and a cookbook of recipes.
+- **[HPRSCRIPT.md](HPRSCRIPT.md)** — full reference: every CLI flag, the script-mode JSON DSL, Unicode handling, regex quirks, and exit codes.
+- **[COOKBOOK.md](COOKBOOK.md)** — task-oriented recipes organized by problem domain (logs, source code, configs, pipelines). Copy-paste invocations with explanations of which hprscript features make each one work.
 
 ---
 
