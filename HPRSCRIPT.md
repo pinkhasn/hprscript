@@ -81,7 +81,7 @@ Positional file/dir args after `-s`/`-script` (or after a positional script file
 |---|---|
 | `-p <pattern>` | Case-sensitive search pattern (repeatable for multi-pattern, all match in one pass) |
 | `-pi <pattern>` | Case-insensitive search pattern (HS `CASELESS`; folds Unicode by default; repeatable, mixable with `-p`) |
-| `-glob <glob>` | Scan glob (e.g. `"**/*.go"`; repeatable) |
+| `-glob <glob>` | Scan glob (e.g. `"**/*.go"`; repeatable). Absolute bases work too (`"/var/log/**/*.log"`). |
 | `-exclude <pat>` | Exclude rule (repeatable). Three forms: glob (`"*.log"`), bare directory name (`"vendor"` skips any `vendor/` dir), path prefix with `/` (`"src/generated/"`). |
 | `-w` | Whole-word matching (wraps the pattern as `\b(?:expr)\b`) |
 | `-no-utf8` | Disable UTF-8 mode (byte-level matching — see [UTF-8 / Unicode](#utf-8--unicode-support)) |
@@ -262,7 +262,7 @@ A script is a JSON object that describes a multi-pattern scan plus the actions t
 
 | Field | Type | Description |
 |---|---|---|
-| `scan` | `string[]` | Glob patterns for files to scan (e.g. `["**/*.py", "src/*.js"]`). Supports `**` for recursive traversal. |
+| `scan` | `string[]` | Glob patterns for files to scan (e.g. `["**/*.py", "src/*.js"]`). Supports `**` for recursive traversal. Patterns may be relative or absolute (`"/var/log/**/*.log"`). |
 | `exclude` | `string[]` | Exclude rules: glob, bare directory name, or path prefix (same semantics as the `-exclude` flag). |
 | `patterns` | `object[]` | Pattern definitions (see below). Required unless `phases` is used. |
 | `phases` | `object[]` | Sequential scan rounds. See [Phases](#phases). When set, `patterns` at the top level is rejected. |

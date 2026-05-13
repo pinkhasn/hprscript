@@ -112,13 +112,15 @@ bool glob_match(std::string_view pat, std::string_view path) {
 
 GlobSplit split_glob(std::string_view pat) {
     GlobSplit out;
+    bool absolute = !pat.empty() && pat.front() == '/';
     auto segs = split_path(pat);
     size_t magic = segs.size();
     for (size_t i = 0; i < segs.size(); ++i) {
         if (has_glob_chars(segs[i])) { magic = i; break; }
     }
+    if (absolute) out.base = "/";
     for (size_t i = 0; i < magic; ++i) {
-        if (!out.base.empty()) out.base += '/';
+        if (!out.base.empty() && out.base.back() != '/') out.base += '/';
         out.base.append(segs[i].data(), segs[i].size());
     }
     for (size_t i = magic; i < segs.size(); ++i) {

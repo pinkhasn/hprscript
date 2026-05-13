@@ -199,6 +199,21 @@ OUT=$(cd "$SAMPLE" && "$BIN" -p TODO -j -glob '**/*' -exclude '*.txt')
 expect_not_contains "-exclude '*.txt' (glob)" 'c.txt' "$OUT"
 
 # ---------------------------------------------------------------------------
+section "absolute-path glob"
+
+# Recursive glob with an absolute base must walk that base, not silently
+# resolve to a non-existent relative path. Run from a neutral cwd so the
+# only way the binary can find the fixture is via the absolute pattern.
+OUT=$(cd / && "$BIN" -p TODO -j -glob "$SAMPLE/**/*.go" -exclude vendor)
+expect_lines    "abs glob: 2 matches under absolute base" 2 "$OUT"
+expect_contains "abs glob: a.go found" "/a.go" "$OUT"
+expect_contains "abs glob: b.go found" "/b.go" "$OUT"
+
+# Absolute path as a positional scan item (no -glob) — same expectation.
+OUT=$(cd / && "$BIN" -p TODO -j -exclude vendor "$SAMPLE/**/*.go")
+expect_lines "abs glob positional: 2 matches" 2 "$OUT"
+
+# ---------------------------------------------------------------------------
 section "match deduplication (greedy non-overlapping)"
 
 # File walk order is fs-dependent (readdir / inode order on Linux), so

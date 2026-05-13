@@ -20,7 +20,7 @@ Each recipe has the same shape:
 
 ## Conventions
 
-- Globs use `**/*.ext`. Replace with whatever file shape you have.
+- Globs use `**/*.ext`. Replace with whatever file shape you have. Both relative (`**/*.go`) and absolute (`/var/log/**/*.log`) bases work; absolute is handy when the target tree is not under the working directory.
 - Stdin recipes omit `-glob` and any positional file arg — content flows in from the upstream pipe.
 - `-pi` is per-pattern case-insensitive; `-p` is case-sensitive. They mix freely in one invocation.
 - Capture groups `(...)` are ignored by Hyperscan unless surfaced via `-extract <names>` (CLI) or `"extract": [...]` (script). Names map left-to-right in pattern order.
