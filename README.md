@@ -2,9 +2,9 @@
 
 **Multi-pattern PCRE search for files, directory trees, and stdin — all patterns matched in a single pass.**
 
-`hprscript` is a command-line search tool built on Intel's [Hyperscan](https://www.hyperscan.io/) regex engine. It scans any input — files, recursive globs, or arbitrary data piped on **stdin** — and matches **all patterns simultaneously**. One invocation of `hprscript` replaces N sequential `grep`/`rg` calls.
+`hprscript` is a command-line search tool built on [Vectorscan](https://github.com/VectorCamp/vectorscan), the portable open-source fork of Intel's [Hyperscan](https://www.hyperscan.io/) regex engine. It scans any input — files, recursive globs, or arbitrary data piped on **stdin** — and matches **all patterns simultaneously**. One invocation of `hprscript` replaces N sequential `grep`/`rg` calls.
 
-It is a single self-contained binary with no runtime dependencies beyond `libc`/`libm`/`libpthread`. Built for Linux x86-64.
+It is a single self-contained binary with no runtime dependencies beyond `libc`/`libm`/`libpthread`. Built for Linux on x86-64 and ARM64.
 
 ---
 
@@ -90,17 +90,31 @@ mv hprscript ~/.local/bin/
 
 ### Build from source
 
-Requires `g++` (C++17), `make`, and Hyperscan (`libhs-dev` on Debian/Ubuntu).
+Requires `g++` (C++17), `make`, and a Vectorscan install at `/opt/vectorscan` (override with `VECTORSCAN_PREFIX=...`).
+
+Most Linux distros don't yet package Vectorscan, so build it once from source:
 
 ```bash
-sudo apt install libhs-dev g++ make    # Ubuntu/Debian
+sudo apt install -y build-essential cmake ragel pkg-config libboost-dev libsimde-dev
+git clone --depth 1 --recurse-submodules https://github.com/VectorCamp/vectorscan.git
+cmake -S vectorscan -B vectorscan/build \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DBUILD_STATIC_LIBS=ON -DBUILD_SHARED_LIBS=OFF \
+      -DCMAKE_INSTALL_PREFIX=/opt/vectorscan
+cmake --build vectorscan/build -j"$(nproc)"
+sudo cmake --install vectorscan/build
+```
+
+Then build `hprscript`:
+
+```bash
 make                                    # builds ./hprscript
 make install                            # copies to ~/.local/bin/hprscript
 ```
 
-The build statically links Hyperscan and `libstdc++` so the resulting binary runs on any modern Linux x86-64 without extra packages. Verify with `ldd hprscript` — only `libc`, `libm`, `libpthread`, and `ld-linux` should appear.
+The build statically links Vectorscan and `libstdc++` so the resulting binary runs on any modern Linux host without extra packages. Verify with `ldd hprscript` — only `libc`, `libm`, `libpthread`, and `ld-linux` should appear.
 
-Tested on Ubuntu 24.04 with Hyperscan 5.4.
+The same recipe works on x86-64 (SSE/AVX2) and ARM64 (NEON/SVE) — Vectorscan auto-targets the host's SIMD.
 
 ### Run the test suite
 
