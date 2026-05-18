@@ -1,6 +1,6 @@
 # hprscript
 
-`hprscript` is a command-line multi-pattern content-search tool. It scans **any input** — files, directory trees, or arbitrary data piped on **stdin** — in a single pass, matching **all patterns simultaneously** using Intel's Hyperscan regex engine. One invocation replaces N sequential `grep`/`rg` calls. Patterns use **PCRE** syntax (the subset Hyperscan accepts).
+`hprscript` is a command-line multi-pattern content-search tool. It scans **any input** — files, directory trees, or arbitrary data piped on **stdin** — in a single pass, matching **all patterns simultaneously** using [Vectorscan](https://github.com/VectorCamp/vectorscan), the portable open-source fork of Intel's Hyperscan regex engine. One invocation replaces N sequential `grep`/`rg` calls. Patterns use **PCRE** syntax (the subset Hyperscan/Vectorscan accepts).
 
 Because hprscript reads content from stdin when no files/globs are given, it slots naturally into bash pipelines — `curl … | hprscript`, `cat … | hprscript`, `kubectl logs … | hprscript`, etc.
 
@@ -1649,11 +1649,13 @@ hprscript -p 'TODO' -llm -limit 1 -glob '**/*.go'
 ## Build and install
 
 ```bash
-make            # produces ./hprscript (statically linked Hyperscan)
+make            # produces ./hprscript (statically linked Vectorscan)
 make install    # copies to ~/.local/bin/hprscript
 ```
 
-The binary depends only on `libc`, `libm`, `libpthread`, and `ld-linux` — verify with `ldd hprscript`. Tested on Ubuntu 24.04 with Hyperscan 5.4.
+Requires a Vectorscan install at `/opt/vectorscan` (override with `VECTORSCAN_PREFIX=...`). See [README → Build from source](README.md#build-from-source) for the one-time Vectorscan build recipe.
+
+The binary depends only on `libc`, `libm`, `libpthread`, and `ld-linux` — verify with `ldd hprscript`. Works on x86-64 and ARM64.
 
 ---
 
