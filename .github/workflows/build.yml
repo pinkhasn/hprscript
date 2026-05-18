@@ -23,8 +23,27 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            build-essential \
-            libhyperscan-dev
+            build-essential cmake ragel pkg-config \
+            libboost-dev libsimde-dev
+
+      - name: Cache vectorscan
+        id: cache-vectorscan
+        uses: actions/cache@v4
+        with:
+          path: /opt/vectorscan
+          key: vectorscan-${{ runner.os }}-${{ runner.arch }}-v1
+
+      - name: Build vectorscan
+        if: steps.cache-vectorscan.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --recurse-submodules \
+            https://github.com/VectorCamp/vectorscan.git /tmp/vectorscan
+          cmake -S /tmp/vectorscan -B /tmp/vectorscan/build \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_STATIC_LIBS=ON -DBUILD_SHARED_LIBS=OFF \
+            -DCMAKE_INSTALL_PREFIX=/opt/vectorscan
+          cmake --build /tmp/vectorscan/build -j"$(nproc)"
+          sudo cmake --install /tmp/vectorscan/build
 
       - name: Build
         run: make -j"$(nproc)"
