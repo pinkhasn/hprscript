@@ -31,7 +31,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: /opt/vectorscan
-          key: vectorscan-${{ runner.os }}-${{ runner.arch }}-v1
+          key: vectorscan-${{ runner.os }}-${{ runner.arch }}-nofat-v2
 
       - name: Build vectorscan
         if: steps.cache-vectorscan.outputs.cache-hit != 'true'
@@ -41,6 +41,7 @@ jobs:
           cmake -S /tmp/vectorscan -B /tmp/vectorscan/build \
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_STATIC_LIBS=ON -DBUILD_SHARED_LIBS=OFF \
+            -DFAT_RUNTIME=OFF \
             -DCMAKE_INSTALL_PREFIX=/opt/vectorscan
           cmake --build /tmp/vectorscan/build -j"$(nproc)"
           sudo cmake --install /tmp/vectorscan/build
