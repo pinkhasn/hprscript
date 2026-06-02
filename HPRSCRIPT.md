@@ -275,6 +275,8 @@ A script is a JSON object that describes a multi-pattern scan plus the actions t
 | `skip` | `int` | Number of records to skip before emitting. Use with `limit` for pagination. |
 | `group_by` | `string` | Buffer emits and flush one JSON line per distinct value of this field. See [Match grouping](#match-grouping-group_by). |
 | `rank` | `bool` | Emit a per-file relevance ranking after the scan. See [Match ranking](#match-ranking-rank). |
+| `rank_surprise` | `bool` | Opt-in: fold a corpus-derived IDF-style surprise factor into each pattern's effective weight. Default `false`. See [Match ranking](#match-ranking-rank). |
+| `rank_rich_clusters` | `bool` | Opt-in: scale the proximity bonus by the number of distinct pattern IDs in each cluster. Default `false`. See [Match ranking](#match-ranking-rank). |
 | `on_file_end` | `action[]` | Actions to run after every file is fully scanned. |
 | `on_complete` | `action[]` | Actions to run after all files (and all phases) are processed. |
 
@@ -753,6 +755,38 @@ hprscript -s '{
 ```
 
 When `rank` is enabled, the rank table **replaces** match output: per-match `emit` and `print` are suppressed so only the rank rows are written. `on_match` actions still execute (so `count`, `set`, `map_increment`, etc. continue to update variables), but record-producing actions are silenced. Aggregations from `on_file_end` and `on_complete` are **not** suppressed.
+
+#### Corpus-surprise weighting (`rank_surprise`)
+
+Opt-in. A pattern that matches almost every file barely distinguishes files; a pattern that matches few files strongly distinguishes them. With `rank_surprise: true`, each pattern's user-supplied `weight` is multiplied by a corpus-derived **surprise factor** (IDF-style):
+
+```
+surprise_p        = log( (N + 1) / (df_p + 1) ) + 1
+effective_weight_p = user_weight_p × surprise_p
+```
+
+where `N` is the number of files in the rank table and `df_p` is the number of those files that matched pattern `p` at least once. A pattern matching every file collapses to `surprise_p = 1` (its base weight); a rare pattern is boosted. `absent` patterns are excluded.
+
+`effective_weight_p` replaces `weight` in both `Σweight` and `density`. The corpus is too small for document-frequency to be meaningful below 3 files, so when `N < 3` all factors collapse to `1` (i.e. equivalent to the flag being off for that run).
+
+When on, each rank row carries a `surprise` diagnostic listing the factor per matched pattern:
+
+```json
+{"file":"src/api/handler.go","score":1.95,"density":0.78,"matched_patterns":["endpoint","todo"],"surprise":{"endpoint":1.92,"todo":1}}
+```
+
+#### Rich proximity clusters (`rank_rich_clusters`)
+
+Opt-in. By default, every cluster (≥2 distinct pattern IDs within 20 lines) contributes a flat `+0.5`. With `rank_rich_clusters: true`, each cluster instead contributes `0.5 × (distinct_pat_ids_in_cluster − 1)` — so a 2-pattern cluster still contributes `0.5` (unchanged), a 3-pattern cluster contributes `1.0`, a 5-pattern cluster `2.0`. Denser co-occurrences score higher; 2-pattern clusters are unaffected.
+
+Combined formula (both flags on):
+
+```
+score = coverage^1.5 × Σ_distinct_matched effective_weight_p / log(lines + 10)
+        + 0.5 × Σ_clusters (distinct_pat_ids_in_cluster − 1)
+```
+
+With both flags off the formula reduces exactly to the default above.
 
 ### Skip + limit (pagination)
 

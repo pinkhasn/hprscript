@@ -317,7 +317,16 @@ struct ScriptState {
 
     // Rank.
     bool rank_enabled = false;
+    // Opt-in: fold a corpus-derived surprise factor (IDF-style) into the
+    // per-pattern weight. Off → behaviour identical to the original formula.
+    bool rank_surprise = false;
+    // Opt-in: scale per-cluster proximity bonus by (distinct_pat_ids − 1).
+    // Off → each ≥2-distinct cluster contributes exactly 1 (original).
+    bool rank_rich_clusters = false;
     std::map<std::string, double> pattern_weights;
+    // Queried (non-absent) pattern IDs, captured at compile time. Used to
+    // bound the per-pattern document-frequency map for `rank_surprise`.
+    std::set<std::string> rank_queried_ids;
     // Total non-absent queried pattern IDs across phases (denominator for
     // coverage). Set once, after compile.
     uint32_t rank_total_queried = 0;
@@ -2136,26 +2145,34 @@ void flush_groups(ScriptState &state) {
 // Count proximity clusters: contiguous groups of match points where each
 // adjacent pair is within K lines, and the group spans ≥2 distinct pattern
 // IDs. K=20 is roughly "same function" in typical code.
+//
+// When `rich` is false, each qualifying cluster contributes 1 (original
+// behaviour). When `rich` is true, each cluster contributes
+// (distinct_pat_ids_in_cluster − 1) so that denser co-occurrences score
+// higher — at the 2-distinct minimum this still contributes 1, preserving
+// the original score for two-pattern clusters.
 static uint32_t count_prox_clusters(
-    std::vector<std::pair<uint32_t, uint16_t>> pts) {
+    std::vector<std::pair<uint32_t, uint16_t>> pts,
+    bool rich = false) {
     static constexpr uint32_t K = 20;
     if (pts.size() < 2) return 0;
     std::sort(pts.begin(), pts.end(),
               [](const auto &a, const auto &b) { return a.first < b.first; });
-    uint32_t clusters = 0;
+    uint32_t total = 0;
     size_t i = 0;
     while (i < pts.size()) {
         size_t j = i + 1;
         while (j < pts.size() && pts[j].first - pts[j - 1].first <= K) ++j;
         if (j - i >= 2) {
-            uint16_t first_id = pts[i].second;
-            for (size_t k = i + 1; k < j; ++k) {
-                if (pts[k].second != first_id) { ++clusters; break; }
+            std::set<uint16_t> ids;
+            for (size_t k = i; k < j; ++k) ids.insert(pts[k].second);
+            if (ids.size() >= 2) {
+                total += rich ? (uint32_t)(ids.size() - 1) : 1u;
             }
         }
         i = j;
     }
-    return clusters;
+    return total;
 }
 
 void flush_rank(ScriptState &state) {
@@ -2165,6 +2182,9 @@ void flush_rank(ScriptState &state) {
         double score;
         double density;
         std::vector<std::string> pats;
+        // Only populated when rank_surprise is on; lists surprise factor of
+        // each matched pattern in this file.
+        std::vector<std::pair<std::string, double>> surprise;
     };
     // Tunables. Coverage exponent makes "matches all queried patterns" a
     // strong multiplier; density divisor gently penalizes huge files;
@@ -2175,26 +2195,83 @@ void flush_rank(ScriptState &state) {
                                ? (double)state.rank_total_queried
                                : 1.0;
 
+    // Change 1 — corpus-surprise weighting. surprise_p = log((N+1)/(df_p+1)) + 1.
+    // N = number of files in the rank table (contributed at least one match);
+    // df_p = number of those files whose matched-pattern set contains p.
+    // With N<3 the corpus is too small for document-frequency to be
+    // meaningful, so all factors collapse to 1 (i.e. base user_weight).
+    std::map<std::string, double> surprise_p;
+    const bool surprise_active =
+        state.rank_surprise && state.rank_file_order.size() >= 3;
+    if (state.rank_surprise) {
+        const double N = (double)state.rank_file_order.size();
+        std::map<std::string, uint32_t> df;
+        for (const auto &id : state.rank_queried_ids) df[id] = 0;
+        for (const auto &f : state.rank_file_order) {
+            const FileRank &fr = state.rank_per_file[f];
+            for (const auto &id : fr.matched_pat_ids) {
+                auto it = df.find(id);
+                if (it != df.end()) ++it->second;
+            }
+        }
+        for (const auto &id : state.rank_queried_ids) {
+            double s = 1.0;
+            if (surprise_active) {
+                double dfp = (double)df[id];
+                s = std::log((N + 1.0) / (dfp + 1.0)) + 1.0;
+                if (s < 1.0) s = 1.0;
+            }
+            surprise_p[id] = s;
+        }
+    }
+
+    auto effective_weight = [&](const std::string &id) -> double {
+        double base = 1.0;
+        if (auto it = state.pattern_weights.find(id);
+            it != state.pattern_weights.end()) base = it->second;
+        if (state.rank_surprise) {
+            auto sit = surprise_p.find(id);
+            if (sit != surprise_p.end()) base *= sit->second;
+        }
+        return base;
+    };
+
     std::vector<Row> rows;
     rows.reserve(state.rank_file_order.size());
     for (const auto &f : state.rank_file_order) {
         const FileRank &fr = state.rank_per_file[f];
+        // Recompute Σ effective_weight over distinct matched patterns. When
+        // rank_surprise is off, effective_weight == user_weight and this
+        // matches the value already accumulated in fr.raw_score.
+        double sum_weight = 0.0;
+        for (const auto &id : fr.matched_pat_ids) {
+            sum_weight += effective_weight(id);
+        }
         double matched = (double)fr.matched_pat_ids.size();
         double coverage = matched / queried;
         if (coverage > 1.0) coverage = 1.0;
         double cov_factor = std::pow(coverage, kCoverageExp);
         double divisor = std::log((double)fr.line_count + 10.0);
         if (divisor <= 0.0) divisor = 1.0;
-        uint32_t clusters = count_prox_clusters(fr.match_points);
+        uint32_t clusters = count_prox_clusters(fr.match_points,
+                                                state.rank_rich_clusters);
         double prox_bonus = kProximityWeight * (double)clusters;
 
         Row r;
         r.file = f;
-        r.score = cov_factor * fr.raw_score / divisor + prox_bonus;
+        r.score = cov_factor * sum_weight / divisor + prox_bonus;
         r.density = fr.line_count > 0
-                        ? fr.raw_score / (double)fr.line_count
+                        ? sum_weight / (double)fr.line_count
                         : 0.0;
         r.pats.assign(fr.matched_pat_ids.begin(), fr.matched_pat_ids.end());
+        if (state.rank_surprise) {
+            r.surprise.reserve(fr.matched_pat_ids.size());
+            for (const auto &id : fr.matched_pat_ids) {
+                auto sit = surprise_p.find(id);
+                r.surprise.emplace_back(
+                    id, sit != surprise_p.end() ? sit->second : 1.0);
+            }
+        }
         rows.push_back(std::move(r));
     }
     std::sort(rows.begin(), rows.end(), [](const Row &a, const Row &b) {
@@ -2226,7 +2303,21 @@ void flush_rank(ScriptState &state) {
             json_escape_to(line, r.pats[i]);
             line += '"';
         }
-        line += "]}\n";
+        line += "]";
+        if (state.rank_surprise) {
+            line += ",\"surprise\":{";
+            for (size_t i = 0; i < r.surprise.size(); ++i) {
+                if (i) line += ',';
+                line += '"';
+                json_escape_to(line, r.surprise[i].first);
+                line += "\":";
+                char buf[32];
+                std::snprintf(buf, sizeof(buf), "%g", r.surprise[i].second);
+                line += buf;
+            }
+            line += "}";
+        }
+        line += "}\n";
         std::fwrite(line.data(), 1, line.size(), stdout);
     }
 }
@@ -2347,6 +2438,10 @@ int run_script(const Cli &cli) {
         state.group_by = it->second.as_string();
     if (auto it = root.find("rank"); it != root.end() && it->second.is_bool())
         state.rank_enabled = it->second.as_bool();
+    if (auto it = root.find("rank_surprise"); it != root.end() && it->second.is_bool())
+        state.rank_surprise = it->second.as_bool();
+    if (auto it = root.find("rank_rich_clusters"); it != root.end() && it->second.is_bool())
+        state.rank_rich_clusters = it->second.as_bool();
 
     // Byte budgets (top-level; applied during populate_match_ctx, the block
     // action, and emit_record_string).
@@ -2508,14 +2603,13 @@ int run_script(const Cli &cli) {
 
     // Track per-pattern weights (for rank). After compile.
     if (state.rank_enabled) {
-        std::set<std::string> queried_ids;
         for (const auto &ph : phases) {
             for (const auto &p : ph.patterns) {
                 state.pattern_weights[p.pat.id] = p.pat.weight;
-                if (!p.absent) queried_ids.insert(p.pat.id);
+                if (!p.absent) state.rank_queried_ids.insert(p.pat.id);
             }
         }
-        state.rank_total_queried = (uint32_t)queried_ids.size();
+        state.rank_total_queried = (uint32_t)state.rank_queried_ids.size();
     }
 
     // Top-level on_file_end / on_complete (run after each phase / at end).
