@@ -130,16 +130,50 @@ The `mcp/` directory contains an [MCP](https://modelcontextprotocol.io/) server 
 
 ---
 
-## Claude Code skill
+## Use it as an agent skill
 
-If you use [Claude Code](https://docs.claude.com/en/docs/claude-code), the `skills/hprscript/` directory ships a ready-to-use [skill](https://docs.claude.com/en/docs/claude-code/skills) that teaches Claude when and how to invoke `hprscript` (CLI binary, no MCP required). Install with one copy:
+`hprscript` ships a portable **agent skill** at [`skills/hprscript/SKILL.md`](skills/hprscript/SKILL.md) — a single Markdown file (YAML frontmatter + instructions) that teaches an LLM coding agent *when* and *how* to reach for `hprscript` instead of `grep`/`rg`. It drives the CLI binary directly (no MCP required), carries an inline cheat sheet, and points at [`HPRSCRIPT.md`](HPRSCRIPT.md) / [`COOKBOOK.md`](COOKBOOK.md) for depth.
+
+It follows the standard `SKILL.md` convention — filename in caps, with `name` and `description` frontmatter — that a growing number of agents discover automatically. The only requirement on your side: the `hprscript` binary must be on the agent's `PATH` (see [Install](#install)).
+
+### Claude Code
+
+Copy the skill into your skills directory — globally (every project) or per-project:
 
 ```bash
-mkdir -p ~/.claude/skills/hprscript
-cp skills/hprscript/SKILL.md ~/.claude/skills/hprscript/SKILL.md
+# Global — applies everywhere
+mkdir -p ~/.claude/skills/hprscript && cp skills/hprscript/SKILL.md ~/.claude/skills/hprscript/
+
+# Or per-project — commit it with your repo
+mkdir -p .claude/skills/hprscript && cp skills/hprscript/SKILL.md .claude/skills/hprscript/
 ```
 
-Start a new `claude` session and Claude will reach for `hprscript` instead of `grep`/`rg` whenever you ask it to search code. The skill carries an inline cheat sheet and points at [`HPRSCRIPT.md`](HPRSCRIPT.md) for full DSL depth.
+Start a new `claude` session and it reaches for `hprscript` whenever you ask it to search code. See the [Claude Code skills docs](https://docs.claude.com/en/docs/claude-code/skills).
+
+### opencode
+
+[opencode](https://opencode.ai) loads skills automatically via its native `skill` tool — **and it scans the same `.claude/skills/` and `~/.claude/skills/` paths as Claude Code**, so if you installed it above, opencode already sees it. To install it only for opencode:
+
+```bash
+# Global
+mkdir -p ~/.config/opencode/skills/hprscript && cp skills/hprscript/SKILL.md ~/.config/opencode/skills/hprscript/
+
+# Or per-project
+mkdir -p .opencode/skills/hprscript && cp skills/hprscript/SKILL.md .opencode/skills/hprscript/
+```
+
+No config required. See the [opencode skills docs](https://opencode.ai/docs/skills/).
+
+### Other agents
+
+`SKILL.md` is just Markdown, so any agent can use it one of two ways:
+
+- **Native skill discovery** — agents that scan skill directories typically also read `.agents/skills/` and `~/.agents/skills/` (alongside the Claude/opencode paths above). Drop the `hprscript/` folder wherever your agent looks.
+- **Instructions / rules file** — for agents driven by an instructions file (`AGENTS.md`, Cursor rules, OpenAI Codex, …), point that file at the skill or paste its contents. opencode's `opencode.json`, for example, can reference it directly (local path or remote URL):
+
+  ```json
+  { "$schema": "https://opencode.ai/config.json", "instructions": ["skills/hprscript/SKILL.md"] }
+  ```
 
 ---
 
