@@ -104,7 +104,7 @@ section() { printf "\n\033[1m%s\033[0m\n" "$1"; }
 # ---------------------------------------------------------------------------
 section "smoke"
 expect_contains "version flag"  "hprscript" "$("$BIN" --version)"
-expect_contains "version flag has hyperscan" "hyperscan" "$("$BIN" --version)"
+expect_contains "version flag has vectorscan" "vectorscan" "$("$BIN" --version)"
 expect_contains "help"          "Usage:"   "$("$BIN" --help)"
 expect_exit    "no args, no stdin"   2 "$BIN"
 expect_exit    "unknown flag"        2 "$BIN" -nope

@@ -1,6 +1,6 @@
 // Script-mode (-s / -script) interpreter.
 //
-// Supports the script DSL feature set that maps cleanly onto Hyperscan's
+// Supports the script DSL feature set that maps cleanly onto Vectorscan's
 // PCRE engine: typed variables, conditions and `if`, list/map ops,
 // `for_each`, `submatch`, `block`, `lookup`, file/complete lifecycle hooks,
 // `group_by`, `rank` (with weights), `skip`, `phases`, and absent patterns.
@@ -14,7 +14,7 @@
 //
 // File layout:
 //   1. Runtime types (Action, Condition, CompiledPattern, ScriptState, ExecCtx)
-//   2. Compile pass: JSON → typed AST + Hyperscan databases
+//   2. Compile pass: JSON → typed AST + Vectorscan databases
 //   3. Substitution helpers (`$VAR` resolution to RuntimeValue / string)
 //   4. Action interpreter and condition evaluator
 //   5. Per-file scan loop, phase orchestration, and `run_script` entry point.
@@ -871,7 +871,7 @@ bool compile_action_list(const json::Value &arr, std::vector<Action> &out,
 bool compile_pattern(const json::Value &pv, size_t idx, CompiledPattern &out,
                      std::string &err);
 
-// Build a Hyperscan-backed matcher from a list of compiled patterns. Returns
+// Build a Vectorscan-backed matcher from a list of compiled patterns. Returns
 // nullptr-and-err if compilation fails.
 std::shared_ptr<Matcher> build_matcher(const std::vector<CompiledPattern> &cps,
                                        std::string &err) {

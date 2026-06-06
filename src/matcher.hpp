@@ -1,11 +1,11 @@
-// Thin wrapper over Hyperscan's hs_compile_multi + hs_scan.
+// Thin wrapper over Vectorscan's hs_compile_multi + hs_scan.
 //
 // Compiles a vector of Patterns into a single block-mode database with
 // HS_FLAG_SOM_LEFTMOST (so we get accurate match start offsets) plus
 // per-pattern HS_FLAG_CASELESS when requested. Word-boundary patterns
 // are handled by wrapping the regex as \b(?:...)\b before compile.
 //
-// Hyperscan reports overlapping/repeated matches eagerly. Most grep-like
+// Vectorscan reports overlapping/repeated matches eagerly. Most grep-like
 // tools want one hit per (pattern, position) so callers can dedupe; for
 // the MVP we report every match the engine emits and let the output
 // layer collapse as needed.
@@ -24,7 +24,7 @@
 namespace hpr {
 
 struct CompileError {
-    std::string message;     // human-readable error from Hyperscan
+    std::string message;     // human-readable error from Vectorscan
     int pattern_index = -1;  // -1 if not attributable to a single pattern
 };
 
@@ -40,7 +40,7 @@ public:
     bool compile(const std::vector<Pattern> &patterns, CompileError *err);
 
     // Scan a buffer and invoke `cb` for every match. Return false from cb
-    // to stop scanning early (Hyperscan returns HS_SCAN_TERMINATED).
+    // to stop scanning early (Vectorscan returns HS_SCAN_TERMINATED).
     using MatchCb = std::function<bool(const Match &)>;
     bool scan(std::string_view buf, const MatchCb &cb);
 

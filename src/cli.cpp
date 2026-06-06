@@ -35,7 +35,7 @@ bool set_output_mode(Cli &cli, OutputMode mode) {
 
 void print_help(FILE *out) {
     std::fprintf(out,
-"hprscript — multi-pattern PCRE search powered by Hyperscan\n"
+"hprscript — multi-pattern PCRE search powered by Vectorscan\n"
 "\n"
 "Usage:\n"
 "  hprscript -p <pattern> [options] [files/dirs...]\n"

@@ -236,7 +236,7 @@ int run_search(const Cli &cli) {
             }
         }
 
-        // Hyperscan reports every accepting position, so a regex like
+        // Vectorscan reports every accepting position, so a regex like
         // `func\w+` against "func main" yields matches at to=5,6,7…10.
         // Collect raw matches and post-process to leftmost-longest
         // non-overlapping per pattern (grep-style).
