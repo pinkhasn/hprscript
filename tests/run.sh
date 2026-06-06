@@ -936,7 +936,7 @@ done
 # 5 files × 3 matches = 15 total. -sample 5 should return one per file.
 OUT=$("$BIN" -p TODO -sample 5 -format '$FILE:$LINE' "$SAMP_FIX"/file_*.go)
 expect_lines "sample 5: exactly 5 records" 5 "$OUT"
-COUNT=$(printf '%s\n' "$OUT" | awk -F: '{print $1}' | sort -u | wc -l)
+COUNT=$(printf '%s\n' "$OUT" | awk -F: '{print $1}' | sort -u | awk 'END{print NR}')
 [[ "$COUNT" == "5" ]] && report ok "sample 5: 5 distinct files" || report fail "sample 5: distinct files (got $COUNT)"
 
 # Sample > total → return all matches available.
