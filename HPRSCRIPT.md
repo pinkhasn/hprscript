@@ -4,7 +4,7 @@
 
 Because hprscript reads content from stdin when no files/globs are given, it slots naturally into bash pipelines — `curl … | hprscript`, `cat … | hprscript`, `kubectl logs … | hprscript`, etc.
 
-It is a single self-contained binary with no runtime dependencies beyond libc/libm. Built for Linux x86-64.
+It is a single self-contained binary with no runtime dependencies beyond the platform C library. Builds for Linux (x86-64, ARM64) and macOS (Apple Silicon / Intel).
 
 ---
 
@@ -1689,7 +1689,7 @@ make install    # copies to ~/.local/bin/hprscript
 
 Requires a Vectorscan install at `/opt/vectorscan` (override with `VECTORSCAN_PREFIX=...`). See [README → Build from source](README.md#build-from-source) for the one-time Vectorscan build recipe.
 
-The binary depends only on `libc`, `libm`, `libpthread`, and `ld-linux` — verify with `ldd hprscript`. Works on x86-64 and ARM64.
+The binary depends only on the platform C library — on Linux verify with `ldd hprscript` (`libc`, `libm`, `libpthread`, `ld-linux`), on macOS with `otool -L hprscript` (`libSystem`, `libc++`). Builds for Linux (x86-64, ARM64) and macOS (Apple Silicon / Intel).
 
 ---
 

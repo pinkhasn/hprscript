@@ -5,9 +5,12 @@
 #
 # Static linking strategy:
 #   - libhs.a               (Vectorscan, statically linked)
-#   - libstdc++, libgcc     (statically linked via -static-libstdc++ -static-libgcc)
-#   - glibc                 (kept dynamic — fully -static breaks NSS resolution)
-# Resulting binary runs on any modern Linux host without any extra packages.
+#   - libstdc++, libgcc     (Linux only — statically linked via
+#                            -static-libstdc++ -static-libgcc)
+#   - libc                  (kept dynamic — fully -static breaks NSS resolution
+#                            on Linux; on macOS libSystem is always dynamic)
+# Builds on Linux (x86-64, ARM64) and macOS (Apple Silicon / Intel). The
+# resulting binary runs without extra packages on a matching host.
 
 VECTORSCAN_PREFIX ?= /opt/vectorscan
 
@@ -23,9 +26,21 @@ WARN      ?= -Wall -Wextra -Wno-unused-parameter
 CXXFLAGS  ?= $(CXXSTD) $(OPT) $(WARN) -pthread -Isrc -I$(VECTORSCAN_PREFIX)/include
 CXXFLAGS  += -DHPRSCRIPT_VERSION='"$(VERSION)"'
 
-# Static-link Vectorscan (.a) and libstdc++/libgcc; keep libc dynamic.
+UNAME_S := $(shell uname -s)
+
+# Static-link Vectorscan (.a) and keep libc dynamic. Platform differences:
+#   - Linux/GCC: also statically link libstdc++/libgcc so the binary runs on
+#     hosts without a matching toolchain runtime.
+#   - macOS/clang: libc++ ships with the OS and is ABI-stable, so it links
+#     dynamically; Apple clang has no -static-libstdc++/-static-libgcc flags.
 HS_STATIC = $(VECTORSCAN_PREFIX)/lib/libhs.a
-LDFLAGS  ?= -static-libstdc++ -static-libgcc -pthread
+ifeq ($(UNAME_S),Darwin)
+  LDFLAGS ?= -pthread
+  LDD     := otool -L
+else
+  LDFLAGS ?= -static-libstdc++ -static-libgcc -pthread
+  LDD     := ldd
+endif
 LDLIBS   ?= $(HS_STATIC) -lm
 
 BIN       = hprscript
@@ -44,7 +59,7 @@ $(BIN): $(OBJS)
 	$(CXX) $(CXXFLAGS) -o $@ $(OBJS) $(LDFLAGS) $(LDLIBS)
 	@echo
 	@echo "Built $@. Dependencies (only libc/libm/libpthread should be dynamic):"
-	@ldd $@ || true
+	@$(LDD) $@ || true
 
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.cpp | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) -MMD -MP -c $< -o $@
