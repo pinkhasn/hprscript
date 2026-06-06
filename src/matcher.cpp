@@ -20,7 +20,7 @@ int hs_event_handler(unsigned int id, unsigned long long from,
     m.to = to;
     if (!(*ctx->cb)(m)) {
         ctx->stopped = true;
-        return 1; // non-zero asks Hyperscan to stop scanning.
+        return 1; // non-zero asks Vectorscan to stop scanning.
     }
     return 0;
 }
@@ -37,7 +37,7 @@ bool Matcher::compile(const std::vector<Pattern> &patterns, CompileError *err) {
         return false;
     }
 
-    // Hyperscan needs raw arrays. Build them; keep the wrapped strings alive
+    // Vectorscan needs raw arrays. Build them; keep the wrapped strings alive
     // until after hs_compile_multi returns.
     std::vector<std::string> wrapped;
     wrapped.reserve(patterns.size());
@@ -75,7 +75,7 @@ bool Matcher::compile(const std::vector<Pattern> &patterns, CompileError *err) {
     if (rc != HS_SUCCESS) {
         if (err) {
             err->message = hs_err && hs_err->message ? hs_err->message
-                                                     : "hyperscan compile failed";
+                                                     : "vectorscan compile failed";
             err->pattern_index = hs_err ? hs_err->expression : -1;
         }
         if (hs_err) hs_free_compile_error(hs_err);

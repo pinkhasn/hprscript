@@ -66,7 +66,7 @@ bool MappedFile::open(const std::string &path) {
     if (p == MAP_FAILED) {
         return false;
     }
-    // Hint sequential access — Hyperscan walks the buffer once start to end.
+    // Hint sequential access — Vectorscan walks the buffer once start to end.
     ::posix_madvise(p, static_cast<size_t>(st.st_size), POSIX_MADV_SEQUENTIAL);
     data_ = static_cast<const char *>(p);
     size_ = static_cast<size_t>(st.st_size);

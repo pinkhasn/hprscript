@@ -11,11 +11,17 @@
 
 VECTORSCAN_PREFIX ?= /opt/vectorscan
 
+# Version stamped into the binary (shown by `--version`). Derived from git
+# tags so it tracks releases automatically; falls back for tarball builds
+# with no git metadata. `--dirty` flags a build with uncommitted changes.
+VERSION   := $(shell git describe --tags --always --dirty 2>/dev/null || echo v0.2.1)
+
 CXX       ?= g++
 CXXSTD    ?= -std=c++17
 OPT       ?= -O2
 WARN      ?= -Wall -Wextra -Wno-unused-parameter
 CXXFLAGS  ?= $(CXXSTD) $(OPT) $(WARN) -pthread -Isrc -I$(VECTORSCAN_PREFIX)/include
+CXXFLAGS  += -DHPRSCRIPT_VERSION='"$(VERSION)"'
 
 # Static-link Vectorscan (.a) and libstdc++/libgcc; keep libc dynamic.
 HS_STATIC = $(VECTORSCAN_PREFIX)/lib/libhs.a
@@ -42,6 +48,12 @@ $(BIN): $(OBJS)
 
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.cpp | $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) -MMD -MP -c $< -o $@
+
+# main.o embeds the git-derived VERSION; always rebuild it so the stamped
+# version stays current between tags without requiring a full `make clean`.
+$(BUILD_DIR)/main.o: .FORCE
+.FORCE:
+.PHONY: .FORCE
 
 $(BUILD_DIR):
 	@mkdir -p $(BUILD_DIR)

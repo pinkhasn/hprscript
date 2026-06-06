@@ -1,6 +1,6 @@
 // Capture-group extraction (`extract_names` on a Pattern).
 //
-// Hyperscan ignores `(...)` groups, so we run the same regex with std::regex
+// Vectorscan ignores `(...)` groups, so we run the same regex with std::regex
 // (ECMAScript flavor) over each match's $MATCH text to pull groups out. The
 // table is built once after compilation and consulted on every emission.
 #pragma once

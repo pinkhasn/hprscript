@@ -76,7 +76,7 @@ bool ScopeIndex::build(std::string_view buf, const ScopeConfig &cfg,
     if (cfg.anchor_regex.empty() || cfg.open.empty() || cfg.close.empty())
         return true;
 
-    // Anchor scan via Hyperscan (fast multi-pattern engine, even for one
+    // Anchor scan via Vectorscan (fast multi-pattern engine, even for one
     // pattern — gives us the same UTF-8/multiline semantics as the rest of
     // the tool).
     Pattern p;
@@ -107,7 +107,7 @@ bool ScopeIndex::build(std::string_view buf, const ScopeConfig &cfg,
         return true;
     });
 
-    // Hyperscan reports every accepting position; same dedup as the main
+    // Vectorscan reports every accepting position; same dedup as the main
     // scanner: keep leftmost-longest per pattern.
     std::sort(raw.begin(), raw.end(), [](const Match &a, const Match &b) {
         if (a.from != b.from) return a.from < b.from;

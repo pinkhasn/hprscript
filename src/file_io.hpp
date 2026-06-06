@@ -1,7 +1,7 @@
 // File slurping helpers.
 //
 // MappedFile uses mmap for regular files (zero-copy view, OS-managed paging),
-// which is the fastest way to feed a buffer into Hyperscan. read_stdin reads
+// which is the fastest way to feed a buffer into Vectorscan. read_stdin reads
 // stdin into a heap-grown string.
 #pragma once
 

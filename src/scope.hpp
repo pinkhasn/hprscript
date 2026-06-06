@@ -1,7 +1,7 @@
 // Enclosing-scope annotation: per-match identification of the nearest
 // containing function/class/struct.
 //
-// Approach: a small Hyperscan + std::regex anchor pre-pass identifies each
+// Approach: a small Vectorscan + std::regex anchor pre-pass identifies each
 // scope's signature, then `find_balanced_block` walks forward to find the
 // body's closing delimiter. Each match's $LINE/$FROM is then binary-searched
 // against this sorted set of ranges to find the innermost containing scope.
@@ -41,7 +41,7 @@ struct ScopeConfig {
 class ScopeIndex {
 public:
     // Build a sorted list of scope ranges by anchor-scanning `buf`. Returns
-    // false if the anchor regex fails to compile (Hyperscan or std::regex
+    // false if the anchor regex fails to compile (Vectorscan or std::regex
     // side); err is populated. Empty result is *not* an error.
     bool build(std::string_view buf, const ScopeConfig &cfg,
                const LineIndex &idx, std::string *err);

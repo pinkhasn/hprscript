@@ -1,4 +1,4 @@
-// hprscript — multi-pattern PCRE search powered by Hyperscan.
+// hprscript — multi-pattern PCRE search powered by Vectorscan.
 //
 // Entry point. Parses the CLI and dispatches to either:
 //   - run_search(): -p quick-search mode
@@ -14,6 +14,12 @@
 #include <cstdio>
 #include <hs/hs.h>
 
+// Version is injected at build time from `git describe` (see Makefile).
+// The fallback keeps a direct compile of this file working without the -D.
+#ifndef HPRSCRIPT_VERSION
+#define HPRSCRIPT_VERSION "v0.2.1"
+#endif
+
 int main(int argc, char **argv) {
     hpr::Cli cli = hpr::parse_cli(argc, argv);
 
@@ -24,7 +30,7 @@ int main(int argc, char **argv) {
     }
     if (cli.show_help) { hpr::print_help(stdout); return 0; }
     if (cli.show_version) {
-        std::printf("hprscript 0.1.0 (hyperscan %s)\n", hs_version());
+        std::printf("hprscript %s (vectorscan %s)\n", HPRSCRIPT_VERSION, hs_version());
         return 0;
     }
 
