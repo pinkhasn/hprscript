@@ -996,6 +996,7 @@ hprscript -p '\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b'
 
 ```bash
 hprscript -pi '(password|passwd|pwd|secret|api_key|apikey)\s*[:=]\s*["\x27][^"\x27]{4,}["\x27]' \
+  -extract kind -format '$FILE:$LINE  [$EXTRACT_KIND]  $CONTEXT' \
   -glob '**/*.{py,js,ts,go,rs,java,rb,php,yaml,yml,env}' -exclude vendor -exclude node_modules
 ```
 
@@ -1515,6 +1516,7 @@ hprscript -pi '\bmd5\s*\(' -pi '\bsha1\s*\(' -pi '\bdes\s*\(' -pi '\brc4\s*\(' -
 
 ```bash
 hprscript -pi '\b(api_?key|secret|token|password|passwd)\s*[:=]\s*["\x27][A-Za-z0-9_\-./+]{12,}["\x27]' \
+  -extract kind -format '$FILE:$LINE  [$EXTRACT_KIND]  $CONTEXT' \
   -glob '**/*.{py,js,ts,go,java,rb,php,yaml,yml}' -exclude tests -exclude vendor
 ```
 
@@ -1800,9 +1802,13 @@ hprscript -p 'Copyright|SPDX-License-Identifier' -absent \
 **Input:** `package.json`, `Cargo.toml`, `requirements.txt`.
 
 ```bash
-hprscript -pi '"license":\s*"(GPL|AGPL|LGPL|SSPL)' -glob '**/package.json'
-hprscript -pi '^license\s*=\s*"(GPL|AGPL|LGPL|SSPL)' -glob '**/Cargo.toml'
+hprscript -pi '"license":\s*"(GPL|AGPL|LGPL|SSPL)' -extract lic \
+  -format '$FILE  $EXTRACT_LIC' -glob '**/package.json'
+hprscript -pi '^license\s*=\s*"(GPL|AGPL|LGPL|SSPL)' -extract lic \
+  -format '$FILE  $EXTRACT_LIC' -glob '**/Cargo.toml'
 ```
+
+*Which* family matters — AGPL and LGPL carry very different obligations — so don't let the alternation swallow the answer. The variant is already a capture group, so `-extract lic` surfaces it directly (cleaner here than splitting into four full `-pi` patterns, since they share the `"license":` prefix). If you'd rather have per-license match IDs, split instead: `-pi '"license":\s*"GPL' -pi '"license":\s*"AGPL'` … and read `$PAT_ID`.
 
 ### 16.3 Pinned vs floating versions
 

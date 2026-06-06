@@ -40,6 +40,8 @@ Cheapness ladder when you don't need the match text: `-f` / `-absent` / `-c` ≪
 - `-pi <pat>` — case-insensitive pattern (Unicode-folding; repeatable; mix freely with `-p`).
 - `-w` — whole-word (`\b(?:…)\b`). Or write `\b…\b` inline for per-alternative control.
 
+**Split alternations into separate `-p` patterns when you want to know *which* branch matched *where*.** Every match is tagged with the id of the pattern that produced it — `pat` in `-j`, a `[p0]`/`[p1]` prefix in `-llm`, `$PAT_ID` in `-format`/scripts. With one alternation (`-p 'alpha|beta|gamma'`) every hit collapses to `p0` — you lose attribution. Split it (`-p alpha -p beta -p gamma`) and each hit reports `p0`/`p1`/`p2`, so you see exactly which term fired on each line. Since adding patterns is free, **default to splitting**; keep an alternation only when the branches are one concept you don't need to tell apart, or must share a single `-near`/`-far` operand. In `-s` scripts give each pattern a meaningful `"id"` (`"auth"`, `"db"`) and it shows up verbatim as `$PAT_ID` instead of `p3`.
+
 **Targeting**
 - `-glob '<glob>'` — e.g. `'**/*.go'`, `'src/**/*.{ts,tsx}'`, absolute `'/var/log/**/*.log'` (repeatable).
 - `-exclude <rule>` — glob (`'*.min.js'`), bare dir name (`vendor` skips any `vendor/`), or path prefix (`'src/generated/'`). Repeatable.
@@ -262,8 +264,8 @@ hprscript -p '^import\s+"net/http"' -f -glob '**/*.go'
 # Files MISSING a license header
 hprscript -p 'Copyright|SPDX-License-Identifier' -absent -glob '**/*.go'
 
-# Multi-language TODO/FIXME sweep with context
-hprscript -pi 'TODO|FIXME|XXX' -C 1 -glob '**/*.{go,py,js,ts,rs,c,cpp,h}'
+# Multi-language TODO/FIXME sweep — split so each hit reports which tag fired (pat=p0/p1/p2)
+hprscript -pi 'TODO' -pi 'FIXME' -pi 'XXX' -C 1 -llm -glob '**/*.{go,py,js,ts,rs,c,cpp,h}'
 
 # API surface: every function signature with file:line
 hprscript -p 'func\s+\w+\s*\(' -format '$FILE:$LINE  $MATCH' -glob '**/*.go'
@@ -284,6 +286,7 @@ curl -s https://example.com | hprscript -p 'href="([^"]+)"' -extract url -o
 ## Anti-patterns
 
 - ❌ Multiple sequential `hprscript` calls for different patterns → ✅ one call, many `-p`/`-pi` (free).
+- ❌ Cramming terms you want to tell apart into one alternation (`-p 'a|b|c'`) — every hit reports `pat=p0`, so you can't see which matched → ✅ split into separate `-p` and read the `pat`/`[p0]`/`$PAT_ID` tag per match.
 - ❌ Falling back to grep/rg because a lookaround/backref won't compile → ✅ restructure, or split into a `-s` phase.
 - ❌ `-s '{…}'` when a flag set fits → ✅ flag mode is easier to read/verify.
 - ❌ Piping output through `grep`/`jq` for trivial filtering → ✅ use `-f`/`-c`/`-o`/`-format`/`-absent`, or `group_by`/`rank` in a script.

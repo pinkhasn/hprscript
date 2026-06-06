@@ -207,6 +207,8 @@ hprscript -p '\bError\b' -pi 'todo|fixme' -glob '**/*.go'
 
 The match record's `pat` field tells you which pattern matched (`p0`, `p1`, …), so downstream code can route findings differently per pattern.
 
+Because of this, **prefer separate `-p` patterns over a single alternation whenever you care which branch matched.** `-p 'alpha|beta|gamma'` tags every hit `pat=p0` — the alternation is opaque, you can't tell `alpha` from `gamma`. Split it into `-p alpha -p beta -p gamma` and each hit carries its own id (`p0`/`p1`/`p2`), surfaced as `pat` in `-j`, a `[p0]` prefix in `-llm`, and `$PAT_ID` in `-format`. Adding patterns is free (all compile into one Hyperscan database and match in the same pass), so splitting costs nothing. Keep an alternation only when the branches are genuinely one signal you never need to distinguish — e.g. a single ranking weight, or one operand of a `-near`/`-far` relation. In script mode, set each pattern's `"id"` to a meaningful label (`"auth"`, `"db"`) so `$PAT_ID` reads as that label instead of `p3`.
+
 Folding is **Unicode-aware** by default (UTF-8 mode is on), so `-pi 'café'` matches `CAFÉ`, and `-pi 'привет'` matches `ПРИВЕТ`. See [UTF-8 / Unicode](#utf-8--unicode-support) for the details.
 
 ### Equivalents in other modes
