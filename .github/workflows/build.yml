@@ -69,6 +69,8 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release \
             -DBUILD_STATIC_LIBS=ON -DBUILD_SHARED_LIBS=OFF \
             -DFAT_RUNTIME=OFF \
+            -DBUILD_TOOLS=OFF -DBUILD_UNIT=OFF \
+            -DBUILD_EXAMPLES=OFF -DBUILD_BENCHMARKS=OFF \
             -DCMAKE_INSTALL_PREFIX=/opt/vectorscan
           cmake --build /tmp/vectorscan/build -j"$jobs"
           sudo cmake --install /tmp/vectorscan/build

@@ -120,6 +120,8 @@ git clone --depth 1 --recurse-submodules https://github.com/VectorCamp/vectorsca
 cmake -S vectorscan -B vectorscan/build \
       -DCMAKE_BUILD_TYPE=Release \
       -DBUILD_STATIC_LIBS=ON -DBUILD_SHARED_LIBS=OFF \
+      -DBUILD_TOOLS=OFF -DBUILD_UNIT=OFF \
+      -DBUILD_EXAMPLES=OFF -DBUILD_BENCHMARKS=OFF \
       -DCMAKE_INSTALL_PREFIX=/opt/vectorscan
 cmake --build vectorscan/build -j"$(getconf _NPROCESSORS_ONLN)"
 sudo cmake --install vectorscan/build
