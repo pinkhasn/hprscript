@@ -4,7 +4,7 @@
 
 `hprscript` is a command-line search tool built on [Vectorscan](https://github.com/VectorCamp/vectorscan), the portable open-source fork of Intel's [Hyperscan](https://www.hyperscan.io/) regex engine. It scans any input — files, recursive globs, or arbitrary data piped on **stdin** — and matches **all patterns simultaneously**. One invocation of `hprscript` replaces N sequential `grep`/`rg` calls.
 
-It is a single self-contained binary with no runtime dependencies beyond `libc`/`libm`/`libpthread`. Built for Linux on x86-64 and ARM64.
+It is a single self-contained binary with no runtime dependencies beyond the platform C library. Builds for Linux (x86-64, ARM64) and macOS (Apple Silicon / Intel).
 
 ---
 
@@ -76,32 +76,54 @@ Default per-match record:
 
 ### Download a prebuilt binary
 
-A prebuilt Linux x86-64 binary is attached to every tagged release:
+Prebuilt binaries for **Linux** (x86-64, ARM64) and **macOS** (Apple Silicon) are attached to every tagged release:
 
 > **https://github.com/pinkhasn/hprscript/releases/latest**
 
-Download `hprscript`, mark it executable, and drop it in your `PATH`:
+Mark the binary executable and drop it in your `PATH`:
 
 ```bash
+# Linux x86-64
 curl -L -o hprscript https://github.com/pinkhasn/hprscript/releases/latest/download/hprscript
+
+# Linux ARM64 (aarch64)
+curl -L -o hprscript https://github.com/pinkhasn/hprscript/releases/latest/download/hprscript-linux-arm64
+
+# macOS Apple Silicon (arm64)
+curl -L -o hprscript https://github.com/pinkhasn/hprscript/releases/latest/download/hprscript-macos-arm64
+
 chmod +x hprscript
 mv hprscript ~/.local/bin/
 ```
 
+> On macOS, Gatekeeper quarantines downloaded binaries. If the OS blocks it, clear the
+> quarantine attribute with `xattr -d com.apple.quarantine hprscript` (or build from source).
+
 ### Build from source
 
-Requires `g++` (C++17), `make`, and a Vectorscan install at `/opt/vectorscan` (override with `VECTORSCAN_PREFIX=...`).
+Requires a C++17 compiler (`g++` or clang), `make`, and a Vectorscan install at `/opt/vectorscan` (override with `VECTORSCAN_PREFIX=...`).
 
-Most Linux distros don't yet package Vectorscan, so build it once from source:
+Neither most Linux distros nor Homebrew package Vectorscan, so build it once from source. Install the build dependencies for your platform:
 
 ```bash
+# Linux (Debian/Ubuntu)
 sudo apt install -y build-essential cmake ragel pkg-config libboost-dev libsimde-dev
+
+# macOS (Homebrew)
+brew install cmake ragel pkg-config boost simde
+```
+
+Then build and install Vectorscan:
+
+```bash
 git clone --depth 1 --recurse-submodules https://github.com/VectorCamp/vectorscan.git
 cmake -S vectorscan -B vectorscan/build \
       -DCMAKE_BUILD_TYPE=Release \
       -DBUILD_STATIC_LIBS=ON -DBUILD_SHARED_LIBS=OFF \
+      -DBUILD_TOOLS=OFF -DBUILD_UNIT=OFF \
+      -DBUILD_EXAMPLES=OFF -DBUILD_BENCHMARKS=OFF \
       -DCMAKE_INSTALL_PREFIX=/opt/vectorscan
-cmake --build vectorscan/build -j"$(nproc)"
+cmake --build vectorscan/build -j"$(getconf _NPROCESSORS_ONLN)"
 sudo cmake --install vectorscan/build
 ```
 
@@ -112,9 +134,9 @@ make                                    # builds ./hprscript
 make install                            # copies to ~/.local/bin/hprscript
 ```
 
-The build statically links Vectorscan and `libstdc++` so the resulting binary runs on any modern Linux host without extra packages. Verify with `ldd hprscript` — only `libc`, `libm`, `libpthread`, and `ld-linux` should appear.
+The build statically links Vectorscan so the binary needs no Vectorscan package at runtime. On Linux it also statically links `libstdc++`/`libgcc` (verify with `ldd hprscript` — only `libc`, `libm`, `libpthread`, and `ld-linux` should appear); on macOS `libc++` is part of the OS and links dynamically (inspect with `otool -L hprscript`). The Makefile auto-detects the platform via `uname`.
 
-The same recipe works on x86-64 (SSE/AVX2) and ARM64 (NEON/SVE) — Vectorscan auto-targets the host's SIMD.
+The same recipe works on Linux x86-64 (SSE/AVX2), Linux/macOS ARM64 (NEON/SVE), and Intel macOS — Vectorscan auto-targets the host's SIMD.
 
 ### Run the test suite
 
