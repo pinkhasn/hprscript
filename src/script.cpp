@@ -24,6 +24,7 @@
 #include "block.hpp"
 #include "common.hpp"
 #include "file_io.hpp"
+#include "git.hpp"
 #include "json.hpp"
 #include "line_index.hpp"
 #include "matcher.hpp"
@@ -34,10 +35,12 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <chrono>
 #include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <map>
 #include <memory>
@@ -294,6 +297,14 @@ struct ScriptState {
     uint64_t max_output_bytes = 0;
     uint64_t bytes_written = 0;
     bool output_truncated = false;
+
+    // Scan accounting for -summary / -diagnostics / -require-complete.
+    // Totals accumulate across all phases (a two-phase script that reads a
+    // file twice counts it twice).
+    ScanStats scan_stats;
+    bool opt_summary = false;
+    bool opt_diagnostics = false;
+    bool opt_require_complete = false;
 
     // Enclosing-scope detection (script-level). When `scope_lang` is non-empty
     // (e.g. "go", "auto") OR `scope_custom` has a complete pattern+open+close,
@@ -1939,6 +1950,7 @@ void run_phase(const CompiledPhase &phase, ScriptState &state,
                LineIndex *unused_idx,
                const std::vector<Action> &script_on_file_end,
                const std::vector<std::string> &override_scan,
+               const std::vector<std::string> &override_literals,
                bool reading_stdin_content,
                const std::string &stdin_label,
                std::string_view stdin_content) {
@@ -2052,6 +2064,8 @@ void run_phase(const CompiledPhase &phase, ScriptState &state,
             }
         }
 
+        state.scan_stats.matches_seen += raw.size();
+
         std::set<uint32_t> matched_pat_idx;
 
         state.stop_file = false;
@@ -2158,13 +2172,15 @@ void run_phase(const CompiledPhase &phase, ScriptState &state,
 
     // Decide inputs.
     if (reading_stdin_content) {
+        ++state.scan_stats.files_scanned;
         scan_buf(stdin_label, stdin_content);
         return;
     }
 
     Walker walker;
-    if (!override_scan.empty()) {
+    if (!override_scan.empty() || !override_literals.empty()) {
         for (const auto &p : override_scan) walker.add_scan(p);
+        for (const auto &p : override_literals) walker.add_literal(p);
     } else {
         for (const auto &g : phase.scan_globs) walker.add_scan(g);
     }
@@ -2174,10 +2190,21 @@ void run_phase(const CompiledPhase &phase, ScriptState &state,
         if (state.stop_all) return false;
         MappedFile mf;
         if (!mf.open(it.path)) {
-            std::fprintf(stderr, "hprscript: cannot read %s\n", it.path.c_str());
+            ++state.scan_stats.files_failed;
+            if (state.opt_diagnostics) {
+                emit_warning_record("read_error", it.path);
+            } else {
+                std::fprintf(stderr, "hprscript: cannot read %s\n",
+                             it.path.c_str());
+            }
             return true;
         }
-        if (looks_binary(mf.view())) return true;
+        if (looks_binary(mf.view())) {
+            ++state.scan_stats.files_binary;
+            if (state.opt_diagnostics) emit_warning_record("binary_skip", it.path);
+            return true;
+        }
+        ++state.scan_stats.files_scanned;
         return scan_buf(it.path, mf.view());
     });
 }
@@ -2383,6 +2410,13 @@ void flush_rank(ScriptState &state) {
 } // namespace
 
 int run_script(const Cli &cli) {
+    const auto t_start = std::chrono::steady_clock::now();
+    if (cli.git_added_lines) {
+        std::fprintf(stderr,
+                     "hprscript: -git-added-lines works in -p quick mode "
+                     "only\n");
+        return 2;
+    }
     // 1. Resolve script source.
     std::string script_text;
     if (!cli.script_inline.empty()) {
@@ -2406,6 +2440,14 @@ int run_script(const Cli &cli) {
             return 2;
         }
     } else if (!isatty(fileno(stdin))) {
+        for (const auto &fl : cli.file_lists) {
+            if (fl.path == "-") {
+                std::fprintf(stderr,
+                             "hprscript: cannot read both the script and a "
+                             "-files-from list from stdin\n");
+                return 2;
+            }
+        }
         if (!slurp_stdin(script_text)) {
             std::fprintf(stderr, "hprscript: failed to read script from stdin\n");
             return 2;
@@ -2439,6 +2481,20 @@ int run_script(const Cli &cli) {
     }
 
     ScriptState state;
+    state.opt_summary = cli.summary;
+    state.opt_diagnostics = cli.diagnostics;
+    state.opt_require_complete = cli.require_complete;
+
+    // Scan-accounting toggles can also come from the script itself.
+    if (auto it = root.find("summary"); it != root.end() && it->second.is_bool())
+        state.opt_summary = state.opt_summary || it->second.as_bool();
+    if (auto it = root.find("diagnostics");
+        it != root.end() && it->second.is_bool())
+        state.opt_diagnostics = state.opt_diagnostics || it->second.as_bool();
+    if (auto it = root.find("require_complete");
+        it != root.end() && it->second.is_bool())
+        state.opt_require_complete =
+            state.opt_require_complete || it->second.as_bool();
 
     // Variables.
     if (auto it = root.find("variables"); it != root.end() && it->second.is_object()) {
@@ -2710,8 +2766,62 @@ int run_script(const Cli &cli) {
         }
     }
 
+    // File-list inputs override the script's scan the same way positional
+    // paths do. Entries are literal (never glob-interpreted); missing ones
+    // warn but don't fail (git diff lists contain deleted files).
+    std::vector<std::string> override_literals;
+    for (const auto &fl : cli.file_lists) {
+        std::vector<std::string> paths;
+        std::string lerr;
+        if (!read_path_list(fl.path, fl.nul, paths, &lerr)) {
+            std::fprintf(stderr, "hprscript: %s\n", lerr.c_str());
+            return 2;
+        }
+        for (auto &p : paths) {
+            std::error_code ec;
+            if (!std::filesystem::exists(p, ec)) {
+                ++state.scan_stats.missing_paths;
+                if (state.opt_diagnostics) {
+                    emit_warning_record("missing_path", p);
+                } else {
+                    std::fprintf(stderr,
+                                 "hprscript: files-from: cannot access %s\n",
+                                 p.c_str());
+                }
+                continue;
+            }
+            override_literals.push_back(std::move(p));
+        }
+    }
+
+    // Git-selected files join the overrides the same way.
+    GitSelection gsel{cli.git_changed, cli.git_staged, cli.git_untracked,
+                      cli.git_ranges};
+    if (gsel.any()) {
+        std::vector<std::string> gpaths;
+        std::string gerr;
+        if (!git_select_files(gsel, gpaths, gerr)) {
+            std::fprintf(stderr, "hprscript: git: %s\n", gerr.c_str());
+            return 2;
+        }
+        for (auto &p : gpaths) {
+            std::error_code ec;
+            if (!std::filesystem::exists(p, ec)) {
+                ++state.scan_stats.missing_paths;
+                if (state.opt_diagnostics) {
+                    emit_warning_record("missing_path", p);
+                } else {
+                    std::fprintf(stderr, "hprscript: git: cannot access %s\n",
+                                 p.c_str());
+                }
+                continue;
+            }
+            override_literals.push_back(std::move(p));
+        }
+    }
+
     // Decide stdin mode.
-    bool any_scan_set = !override_scan.empty();
+    bool any_scan_set = !override_scan.empty() || !override_literals.empty();
     if (!any_scan_set) {
         for (const auto &ph : phases) {
             if (!ph.scan_globs.empty()) { any_scan_set = true; break; }
@@ -2733,7 +2843,8 @@ int run_script(const Cli &cli) {
         bool last_phase = (pi + 1 == phases.size());
         run_phase(ph, state, nullptr,
                   last_phase ? top_on_file_end : std::vector<Action>{},
-                  override_scan, reading_stdin, "<stdin>", stdin_content);
+                  override_scan, override_literals, reading_stdin, "<stdin>",
+                  stdin_content);
         // Phase-level on_complete runs after each phase.
         if (!ph.on_complete.empty()) {
             ExecCtx ec;
@@ -2763,7 +2874,29 @@ int run_script(const Cli &cli) {
         std::fprintf(stdout, "{\"info\":\"output_truncated\",\"emitted\":%lld}\n",
                      (long long)state.emitted);
     }
+    if (state.opt_summary) {
+        if (state.output_truncated)
+            state.scan_stats.stop_reason = "output_budget";
+        else if (state.stop_all)
+            state.scan_stats.stop_reason = "limit";
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                           std::chrono::steady_clock::now() - t_start)
+                           .count();
+        emit_summary_record(state.scan_stats,
+                            static_cast<uint64_t>(state.emitted),
+                            static_cast<uint64_t>(elapsed));
+    }
     std::fflush(stdout);
+    if (state.opt_require_complete &&
+        (state.scan_stats.files_failed > 0 ||
+         state.scan_stats.missing_paths > 0)) {
+        std::fprintf(stderr,
+                     "hprscript: incomplete scan: %llu unreadable file(s), "
+                     "%llu missing listed path(s)\n",
+                     (unsigned long long)state.scan_stats.files_failed,
+                     (unsigned long long)state.scan_stats.missing_paths);
+        return 2;
+    }
     bool any_output = state.emitted > 0 || !state.rank_per_file.empty();
     return any_output ? 0 : 1;
 }

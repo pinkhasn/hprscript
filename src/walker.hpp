@@ -27,6 +27,12 @@ class Walker {
 public:
     // scan = literal paths (file or dir) or globs (with *, **, ?, [...]).
     void add_scan(const std::string &item) { scan_.push_back(item); }
+    // literal = a path taken verbatim (from -files-from / -files0-from):
+    // never glob-interpreted, so names containing *, {, [ stay literal.
+    // Regular files are offered (exclude rules still apply); directories are
+    // walked recursively; anything else is ignored — callers validate and
+    // warn about missing entries before adding.
+    void add_literal(const std::string &path) { literal_.push_back(path); }
     void add_exclude(const std::string &rule) { exclude_.push_back(rule); }
 
     // Walk all scan items; visit each candidate file after exclude rules and
@@ -37,6 +43,7 @@ private:
     bool is_excluded(std::string_view path, bool is_dir) const;
 
     std::vector<std::string> scan_;
+    std::vector<std::string> literal_;
     std::vector<std::string> exclude_;
 };
 

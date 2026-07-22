@@ -1109,6 +1109,318 @@ expect_lines "explicitly named hidden base is scanned" 1 "$OUT"
 rm -rf "$HID_FIX"
 
 # ---------------------------------------------------------------------------
+section "file-list input (-files-from / -files0-from)"
+FL_FIX="$HERE/_tmp_fileslist"
+mkdir -p "$FL_FIX"
+printf 'needle a\n' > "$FL_FIX/a.txt"
+printf 'needle b\n' > "$FL_FIX/b.txt"
+printf 'needle c\n' > "$FL_FIX/c.txt"
+printf 'needle s\n' > "$FL_FIX/has space.txt"
+printf 'needle br\n' > "$FL_FIX/lit{x}.txt"
+
+printf '%s\n%s\n' "$FL_FIX/a.txt" "$FL_FIX/b.txt" > "$FL_FIX/list.txt"
+OUT=$("$BIN" -p needle -f -files-from "$FL_FIX/list.txt")
+expect_lines "newline list scans only listed files" 2 "$OUT"
+expect_not_contains "unlisted file not scanned" "c.txt" "$OUT"
+
+OUT=$(printf '%s\n' "$FL_FIX/a.txt" | "$BIN" -p needle -f -files-from -)
+expect_lines "list read from stdin" 1 "$OUT"
+
+OUT=$(printf '%s\0%s\0' "$FL_FIX/has space.txt" "$FL_FIX/lit{x}.txt" | "$BIN" -p needle -f -files0-from -)
+expect_lines "NUL list: space + brace filenames" 2 "$OUT"
+expect_contains "brace filename stays literal (no glob)" "lit{x}.txt" "$OUT"
+
+printf '%s\r\n' "$FL_FIX/a.txt" > "$FL_FIX/crlf.txt"
+OUT=$("$BIN" -p needle -f -files-from "$FL_FIX/crlf.txt")
+expect_lines "CRLF list: trailing CR stripped" 1 "$OUT"
+
+OUT=$("$BIN" -p needle -f -files-from "$FL_FIX/list.txt" -exclude 'b.txt')
+expect_lines "-exclude applies to listed files" 1 "$OUT"
+
+ERR=$(printf '%s\n%s\n' "$FL_FIX/a.txt" "$FL_FIX/missing.txt" | "$BIN" -p needle -f -files-from - 2>&1 >/dev/null)
+OUT=$(printf '%s\n%s\n' "$FL_FIX/a.txt" "$FL_FIX/missing.txt" | "$BIN" -p needle -f -files-from - 2>/dev/null) ; RC=$?
+expect_contains "missing listed path warns on stderr" "cannot access" "$ERR"
+expect_lines "missing path skipped, scan continues" 1 "$OUT"
+[[ "$RC" == "0" ]] && report ok "missing path doesn't affect exit code" || report fail "missing path exit (got $RC)"
+
+# Script mode: the list overrides the script's scan, like positional paths.
+cat > "$FL_FIX/s.hpr" <<'EOF'
+{"scan":["/nonexistent/**/*.zz"],"patterns":[{"id":"n","regexp":"needle"}]}
+EOF
+OUT=$("$BIN" -script "$FL_FIX/s.hpr" -files-from "$FL_FIX/list.txt")
+expect_lines "script mode: list overrides scan" 2 "$OUT"
+
+# Two stdin lists can't both be read.
+OUT=$(printf 'x' | "$BIN" -p needle -files-from - -files0-from - 2>&1) ; RC=$?
+expect_contains "double stdin list rejected" "may read from stdin" "$OUT"
+[[ "$RC" == "2" ]] && report ok "double stdin list exit 2" || report fail "double stdin list exit (got $RC)"
+
+rm -rf "$FL_FIX"
+
+# ---------------------------------------------------------------------------
+section "named patterns (-name)"
+NP_FIX="$HERE/_tmp_name"
+mkdir -p "$NP_FIX"
+printf 'WARN a\nERROR b\nx\nx\nWARN c\n' > "$NP_FIX/log.txt"
+
+OUT=$("$BIN" -p WARN -name warn -p ERROR -name err -format '$PAT_ID:$LINE' "$NP_FIX/log.txt")
+expect_contains "named id in \$PAT_ID" "warn:1" "$OUT"
+expect_contains "second named id" "err:2" "$OUT"
+
+OUT=$("$BIN" -p WARN -name warn -p ERROR -name err -near warn:err:1 -format '$PAT_ID:$LINE' "$NP_FIX/log.txt")
+expect_contains "relation by name keeps warn:1" "warn:1" "$OUT"
+expect_not_contains "relation by name drops warn:5" "warn:5" "$OUT"
+
+OUT=$("$BIN" -p WARN -name x -p ERROR -name x "$NP_FIX/log.txt" 2>&1) ; RC=$?
+expect_contains "duplicate name rejected" "duplicate pattern id" "$OUT"
+[[ "$RC" == "2" ]] && report ok "duplicate name exit 2" || report fail "duplicate name exit (got $RC)"
+
+OUT=$("$BIN" -p WARN -p ERROR -name p0 "$NP_FIX/log.txt" 2>&1) ; RC=$?
+expect_contains "auto-id collision rejected" "duplicate pattern id 'p0'" "$OUT"
+
+OUT=$("$BIN" -p WARN -name warn -p ERROR -name err -llm "$NP_FIX/log.txt")
+expect_contains "-llm shows the name tag" "[warn]" "$OUT"
+rm -rf "$NP_FIX"
+
+# ---------------------------------------------------------------------------
+section "fixed strings (-F / -Fi / -patterns-from)"
+FS_FIX="$HERE/_tmp_fixed"
+mkdir -p "$FS_FIX"
+printf 'call foo[0].bar() now\nWARN mixed\nwarn lower\n' > "$FS_FIX/src.txt"
+
+OUT=$("$BIN" -F 'foo[0].bar()' -o "$FS_FIX/src.txt")
+expect_eq "-F literal with regex metachars" "foo[0].bar()" "$OUT"
+OUT=$("$BIN" -F 'f.o' "$FS_FIX/src.txt") ; RC=$?
+[[ "$RC" == "1" ]] && report ok "-F stays literal ('f.o' no match)" || report fail "-F literal-ness (got rc $RC)"
+OUT=$("$BIN" -Fi 'WARN' -o "$FS_FIX/src.txt")
+expect_lines "-Fi case-insensitive: 2 hits" 2 "$OUT"
+
+cat > "$FS_FIX/rules.jsonl" <<'EOF'
+# comment line
+{"id":"brackets","literal":"foo[0].bar()"}
+{"id":"warnish","regexp":"\\bWARN\\b"}
+EOF
+OUT=$("$BIN" -patterns-from "$FS_FIX/rules.jsonl" -format '$PAT_ID:$LINE' "$FS_FIX/src.txt")
+expect_contains "patterns-from literal entry" "brackets:1" "$OUT"
+expect_contains "patterns-from regexp entry" "warnish:2" "$OUT"
+
+printf '{"literal":"a","regexp":"b"}\n' > "$FS_FIX/bad.jsonl"
+OUT=$("$BIN" -patterns-from "$FS_FIX/bad.jsonl" "$FS_FIX/src.txt" 2>&1) ; RC=$?
+expect_contains "bad entry cites file:line" "bad.jsonl:1" "$OUT"
+[[ "$RC" == "2" ]] && report ok "bad entry exit 2" || report fail "bad entry exit (got $RC)"
+
+printf '{"literal":"a","bogus":1}\n' > "$FS_FIX/unk.jsonl"
+OUT=$("$BIN" -patterns-from "$FS_FIX/unk.jsonl" "$FS_FIX/src.txt" 2>&1)
+expect_contains "unknown field rejected" "unknown field 'bogus'" "$OUT"
+
+OUT=$("$BIN" -patterns-from "$FS_FIX/rules.jsonl" -s '{"patterns":[{"id":"x","regexp":"y"}]}' 2>&1) ; RC=$?
+expect_contains "patterns-from + -s rejected" "cannot be combined" "$OUT"
+[[ "$RC" == "2" ]] && report ok "patterns-from + -s exit 2" || report fail "patterns-from + -s exit (got $RC)"
+rm -rf "$FS_FIX"
+
+# ---------------------------------------------------------------------------
+section "per-file filter (-file-where)"
+FW_FIX="$HERE/_tmp_where"
+mkdir -p "$FW_FIX"
+printf 'ERROR one\nrecovered\n' > "$FW_FIX/ok.log"
+printf 'ERROR two\nstill bad\n' > "$FW_FIX/bad.log"
+printf 'quiet\n' > "$FW_FIX/calm.log"
+
+OUT=$("$BIN" -p ERROR -name err -pi recovered -name rec -file-where 'err AND NOT rec' -f "$FW_FIX"/*.log)
+expect_lines "err AND NOT rec selects one file" 1 "$OUT"
+expect_contains "the unrecovered file" "bad.log" "$OUT"
+
+OUT=$("$BIN" -p ERROR -name err -pi recovered -name rec -file-where '(err) && !rec' -f "$FW_FIX"/*.log)
+expect_contains "symbol operators work" "bad.log" "$OUT"
+
+OUT=$("$BIN" -p ERROR -name err -pi recovered -name rec -file-where 'err OR rec' -f "$FW_FIX"/*.log)
+expect_lines "OR selects both matching files" 2 "$OUT"
+
+OUT=$("$BIN" -p ERROR -file-where 'zzz' "$FW_FIX/ok.log" 2>&1)
+expect_contains "unknown id in -file-where" "unknown pattern 'zzz'" "$OUT"
+OUT=$("$BIN" -p ERROR -file-where 'AND x' "$FW_FIX/ok.log" 2>&1) ; RC=$?
+[[ "$RC" == "2" ]] && report ok "bad -file-where syntax exit 2" || report fail "bad -file-where syntax exit (got $RC)"
+OUT=$("$BIN" -p ERROR -file-where 'p0' -absent "$FW_FIX/ok.log" 2>&1)
+expect_contains "-file-where + -absent rejected" "cannot combine with -absent" "$OUT"
+rm -rf "$FW_FIX"
+
+# ---------------------------------------------------------------------------
+section "scope relations (-same-scope / -not-same-scope)"
+SR_FIX="$HERE/_tmp_scoperel"
+mkdir -p "$SR_FIX"
+printf 'void f() {\n  lock();\n  unlock();\n}\nvoid g() {\n  lock();\n}\n' > "$SR_FIX/locks.c"
+
+OUT=$("$BIN" -p '\block\(\)' -name lk -p '\bunlock\(\)' -name ul -same-scope lk:ul -scope c -format '$PAT_ID:$ENCLOSING_NAME' "$SR_FIX/locks.c")
+expect_contains "same-scope keeps lock in f" "lk:f" "$OUT"
+expect_not_contains "same-scope drops lock in g" "lk:g" "$OUT"
+
+OUT=$("$BIN" -p '\block\(\)' -name lk -p '\bunlock\(\)' -name ul -not-same-scope lk:ul -scope c -format '$PAT_ID:$ENCLOSING_NAME' "$SR_FIX/locks.c")
+expect_contains "not-same-scope keeps lock in g" "lk:g" "$OUT"
+expect_not_contains "not-same-scope drops lock in f" "lk:f" "$OUT"
+
+printf 'void h() {\n  probe();\n  probe();\n}\nvoid i() {\n  probe();\n}\n' > "$SR_FIX/pair.c"
+OUT=$("$BIN" -p '\bprobe\(\)' -name pr -same-scope pr:pr -scope c -format '$ENCLOSING_NAME:$LINE' "$SR_FIX/pair.c")
+expect_lines "a==b needs a second occurrence" 2 "$OUT"
+expect_not_contains "a==b drops the singleton scope" "i:" "$OUT"
+
+OUT=$("$BIN" -p a -p b -same-scope p0:p1 "$SR_FIX/locks.c" 2>&1) ; RC=$?
+expect_contains "scope relation without -scope rejected" "require an active -scope" "$OUT"
+[[ "$RC" == "2" ]] && report ok "scope relation without -scope exit 2" || report fail "scope relation exit (got $RC)"
+rm -rf "$SR_FIX"
+
+# ---------------------------------------------------------------------------
+section "record-level absence (-records line)"
+RCD_FIX="$HERE/_tmp_records"
+mkdir -p "$RCD_FIX"
+printf '{"user_id":1}\n{"other":2}\n\n{"user_id":3}\n{"other":4}\n' > "$RCD_FIX/d.jsonl"
+
+OUT=$("$BIN" -p '"user_id"' -absent -records line "$RCD_FIX/d.jsonl")
+expect_lines "two records flagged" 2 "$OUT"
+expect_contains "record text included" '"line":2,"record":"{\"other\":2}"' "$OUT"
+expect_contains "second miss at line 5" '"line":5' "$OUT"
+expect_not_contains "blank line skipped" '"line":3' "$OUT"
+
+OUT=$("$BIN" -p x -records line "$RCD_FIX/d.jsonl" 2>&1) ; RC=$?
+expect_contains "-records without -absent rejected" "requires -absent" "$OUT"
+[[ "$RC" == "2" ]] && report ok "-records without -absent exit 2" || report fail "-records exit (got $RC)"
+
+OUT=$("$BIN" -p x -p y -near p0:p1:1 -absent -records line "$RCD_FIX/d.jsonl" 2>&1)
+expect_contains "-records + relations rejected" "cannot combine with" "$OUT"
+
+OUT=$("$BIN" -p '"user_id"' -absent -records line -limit 1 "$RCD_FIX/d.jsonl")
+expect_lines "-limit caps absent records" 1 "$OUT"
+rm -rf "$RCD_FIX"
+
+# ---------------------------------------------------------------------------
+section "deterministic traversal order"
+DT_FIX="$HERE/_tmp_order"
+mkdir -p "$DT_FIX/bdir"
+# Created deliberately out of order; output must be sorted pre-order.
+printf 'needle\n' > "$DT_FIX/zz.txt"
+printf 'needle\n' > "$DT_FIX/aa.txt"
+printf 'needle\n' > "$DT_FIX/bdir/inner.txt"
+printf 'needle\n' > "$DT_FIX/mm.txt"
+OUT=$("$BIN" -p needle -f -glob "$DT_FIX/**/*.txt")
+EXPECTED="$DT_FIX/aa.txt
+$DT_FIX/bdir/inner.txt
+$DT_FIX/mm.txt
+$DT_FIX/zz.txt"
+expect_eq "sorted lexicographic pre-order" "$EXPECTED" "$OUT"
+OUT2=$("$BIN" -p needle -f -glob "$DT_FIX/**/*.txt")
+expect_eq "identical order across runs" "$OUT" "$OUT2"
+rm -rf "$DT_FIX"
+
+# ---------------------------------------------------------------------------
+section "scan accounting (-summary / -diagnostics / -require-complete)"
+SA_FIX="$HERE/_tmp_accounting"
+mkdir -p "$SA_FIX"
+printf 'needle one\n' > "$SA_FIX/a.txt"
+printf 'needle two\n' > "$SA_FIX/b.txt"
+printf 'bin\x00needle\n' > "$SA_FIX/c.dat"
+
+OUT=$("$BIN" -p needle -summary -glob "$SA_FIX/*" | tail -1)
+expect_contains "summary record type" '"type":"summary"' "$OUT"
+expect_contains "summary counts scanned files" '"files_scanned":2' "$OUT"
+expect_contains "summary counts binary skip" '"files_skipped_binary":1' "$OUT"
+expect_contains "summary counts matches" '"matches":2' "$OUT"
+expect_contains "clean run is complete" '"complete":true' "$OUT"
+expect_not_contains "no stop_reason when complete" '"stop_reason"' "$OUT"
+
+OUT=$("$BIN" -p needle -summary -limit 1 -glob "$SA_FIX/*.txt" | tail -1)
+expect_contains "limit run incomplete" '"complete":false' "$OUT"
+expect_contains "limit stop_reason" '"stop_reason":"limit"' "$OUT"
+
+OUT=$("$BIN" -p needle -diagnostics -f -glob "$SA_FIX/*")
+expect_contains "binary_skip diagnostic on stdout" '"code":"binary_skip"' "$OUT"
+
+ERR=$(printf '%s\n%s\n' "$SA_FIX/a.txt" "$SA_FIX/gone.txt" | "$BIN" -p needle -f -files-from - -require-complete 2>&1 >/dev/null) ; RC=$?
+expect_contains "require-complete reports the gap" "incomplete scan" "$ERR"
+[[ "$RC" == "2" ]] && report ok "require-complete exit 2 on missing path" || report fail "require-complete exit (got $RC)"
+
+OUT=$("$BIN" -p needle -require-complete -f -glob "$SA_FIX/*.txt") ; RC=$?
+[[ "$RC" == "0" ]] && report ok "require-complete clean run exit 0" || report fail "require-complete clean exit (got $RC)"
+
+OUT=$(printf '%s\n%s\n' "$SA_FIX/a.txt" "$SA_FIX/gone.txt" | "$BIN" -p needle -diagnostics -f -files-from - 2>/dev/null)
+expect_contains "missing_path diagnostic" '"code":"missing_path"' "$OUT"
+
+if [[ "$EUID" -ne 0 ]]; then
+    printf 'needle locked\n' > "$SA_FIX/locked.txt"
+    chmod 000 "$SA_FIX/locked.txt"
+    OUT=$("$BIN" -p needle -summary -glob "$SA_FIX/*.txt" 2>/dev/null | tail -1)
+    expect_contains "read failure counted" '"files_failed":1' "$OUT"
+    expect_contains "read failure breaks completeness" '"complete":false' "$OUT"
+    OUT=$("$BIN" -p needle -diagnostics -f -glob "$SA_FIX/*.txt")
+    expect_contains "read_error diagnostic" '"code":"read_error"' "$OUT"
+    "$BIN" -p needle -require-complete -f -glob "$SA_FIX/*.txt" >/dev/null 2>&1 ; RC=$?
+    [[ "$RC" == "2" ]] && report ok "require-complete exit 2 on read failure" || report fail "require-complete read-failure exit (got $RC)"
+    chmod 644 "$SA_FIX/locked.txt"
+fi
+
+OUT=$("$BIN" -s "{\"summary\":true,\"scan\":[\"$SA_FIX/*.txt\"],\"patterns\":[{\"id\":\"n\",\"regexp\":\"needle\"}]}" | tail -1)
+expect_contains "script-mode summary field" '"type":"summary"' "$OUT"
+expect_contains "script-mode summary complete" '"complete":true' "$OUT"
+rm -rf "$SA_FIX"
+
+# ---------------------------------------------------------------------------
+section "git-aware selection (-git-changed / -git-staged / -git-range / -git-added-lines)"
+if command -v git >/dev/null 2>&1; then
+    GA_FIX="$HERE/_tmp_gitaware"
+    rm -rf "$GA_FIX"; mkdir -p "$GA_FIX"
+    git -C "$GA_FIX" init -q -b main 2>/dev/null || git -C "$GA_FIX" init -q
+    git -C "$GA_FIX" -c user.email=t@t -c user.name=t commit -q --allow-empty -m base --no-gpg-sign
+    printf 'line one\nline two\nline three\n' > "$GA_FIX/committed.txt"
+    git -C "$GA_FIX" add committed.txt
+    git -C "$GA_FIX" -c user.email=t@t -c user.name=t commit -q -m add --no-gpg-sign
+    printf 'line one\nline two TODO new\nline three\n' > "$GA_FIX/committed.txt"
+    printf 'staged TODO\n' > "$GA_FIX/staged.txt"
+    git -C "$GA_FIX" add staged.txt
+    printf 'untracked TODO\n' > "$GA_FIX/untracked.txt"
+
+    OUT=$(cd "$GA_FIX" && "$BIN" -p TODO -git-changed -f)
+    expect_lines "git-changed: modified + staged" 2 "$OUT"
+    expect_contains "git-changed sees the unstaged edit" "committed.txt" "$OUT"
+    expect_contains "git-changed sees the staged file" "staged.txt" "$OUT"
+    expect_not_contains "git-changed excludes untracked" "untracked.txt" "$OUT"
+
+    OUT=$(cd "$GA_FIX" && "$BIN" -p TODO -git-staged -f)
+    expect_eq "git-staged: staged file only" "staged.txt" "$OUT"
+
+    OUT=$(cd "$GA_FIX" && "$BIN" -p TODO -git-untracked -f)
+    expect_eq "git-untracked: untracked file only" "untracked.txt" "$OUT"
+
+    OUT=$(cd "$GA_FIX" && "$BIN" -p 'line' -git-range 'HEAD~1..HEAD' -c)
+    expect_eq "git-range scans the range's files" "committed.txt:3" "$OUT"
+
+    OUT=$(cd "$GA_FIX" && "$BIN" -p 'line' -git-changed -git-added-lines -format '$FILE:$LINE')
+    expect_eq "added-lines keeps only the modified line" "committed.txt:2" "$OUT"
+
+    OUT=$(cd "$GA_FIX" && "$BIN" -p TODO -git-changed -git-untracked -git-added-lines -format '$FILE:$LINE')
+    expect_lines "added-lines + untracked whole-file" 3 "$OUT"
+    expect_contains "untracked line counts as added" "untracked.txt:1" "$OUT"
+
+    OUT=$(cd "$GA_FIX" && "$BIN" -p x -git-untracked -git-added-lines 2>&1) ; RC=$?
+    expect_contains "added-lines needs a diff-based flag" "requires -git-changed" "$OUT"
+    [[ "$RC" == "2" ]] && report ok "added-lines flag validation exit 2" || report fail "added-lines validation exit (got $RC)"
+
+    OUT=$(cd "$GA_FIX" && "$BIN" -p x -git-changed -git-added-lines -glob '*.txt' 2>&1) ; RC=$?
+    expect_contains "added-lines rejects mixed inputs" "from git alone" "$OUT"
+
+    OUT=$(cd "$GA_FIX" && "$BIN" -s '{"patterns":[{"id":"t","regexp":"TODO"}]}' -git-staged)
+    expect_contains "script mode: git selection overrides scan" '"file":"staged.txt"' "$OUT"
+
+    OUT=$(cd "$GA_FIX" && "$BIN" -s '{"patterns":[{"id":"t","regexp":"x"}]}' -git-changed -git-added-lines 2>&1) ; RC=$?
+    expect_contains "script mode rejects added-lines" "quick mode" "$OUT"
+
+    OUT=$(cd /tmp && "$BIN" -p x -git-changed 2>&1) ; RC=$?
+    expect_contains "outside a repo: git's error surfaces" "not a git repository" "$OUT"
+    [[ "$RC" == "2" ]] && report ok "outside a repo exit 2" || report fail "outside a repo exit (got $RC)"
+
+    rm -rf "$GA_FIX"
+else
+    report ok "git not available — section skipped"
+fi
+
+# ---------------------------------------------------------------------------
 section "summary"
 TOTAL=$((PASS + FAIL))
 if [[ "$FAIL" -eq 0 ]]; then

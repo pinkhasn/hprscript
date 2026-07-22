@@ -81,6 +81,42 @@ std::string json_escape(std::string_view s) {
     return out;
 }
 
+void emit_warning_record(const char *code, const std::string &path) {
+    std::string s = "{\"type\":\"warning\",\"code\":\"";
+    s += code;
+    s += "\",\"file\":\"";
+    json_escape_to(s, path);
+    s += "\"}\n";
+    std::fwrite(s.data(), 1, s.size(), stdout);
+}
+
+void emit_summary_record(const ScanStats &st, uint64_t emitted,
+                         uint64_t elapsed_ms) {
+    std::string s = "{\"type\":\"summary\",\"files_scanned\":";
+    s += std::to_string(st.files_scanned);
+    s += ",\"files_skipped_binary\":";
+    s += std::to_string(st.files_binary);
+    s += ",\"files_failed\":";
+    s += std::to_string(st.files_failed);
+    s += ",\"missing_paths\":";
+    s += std::to_string(st.missing_paths);
+    s += ",\"matches\":";
+    s += std::to_string(st.matches_seen);
+    s += ",\"emitted\":";
+    s += std::to_string(emitted);
+    s += ",\"complete\":";
+    s += st.complete() ? "true" : "false";
+    if (!st.stop_reason.empty()) {
+        s += ",\"stop_reason\":\"";
+        s += st.stop_reason;
+        s += '"';
+    }
+    s += ",\"elapsed_ms\":";
+    s += std::to_string(elapsed_ms);
+    s += "}\n";
+    std::fwrite(s.data(), 1, s.size(), stdout);
+}
+
 namespace {
 
 void append_uint(std::string &out, uint64_t v) {
@@ -134,6 +170,32 @@ void Formatter::refresh_pattern_cache(const Pattern &pattern) {
     cached_pat_ = &pattern;
     cached_pat_id_esc_.clear();
     json_escape_to(cached_pat_id_esc_, pattern.id);
+}
+
+void Formatter::on_record_absent(const std::string &file,
+                                 const Pattern &pattern, uint32_t line,
+                                 std::string_view text) {
+    if (opts_.mode != OutputMode::Absent) return;
+    refresh_file_cache(file);
+    refresh_pattern_cache(pattern);
+    bool rec_trunc = false;
+    std::string_view rec =
+        truncate_safe(text, opts_.max_context_bytes, &rec_trunc);
+    auto &s = scratch_;
+    s.clear();
+    s += "{\"file\":\"";
+    s += cached_file_esc_;
+    s += "\",\"pat\":\"";
+    s += cached_pat_id_esc_;
+    s += "\",\"line\":";
+    append_uint32(s, line);
+    s += ",\"record\":\"";
+    json_escape_to(s, rec);
+    s += '"';
+    if (rec_trunc) s += ",\"record_truncated\":true,\"truncated\":true";
+    s += "}\n";
+    write_out(s.data(), s.size());
+    ++emitted_;
 }
 
 std::string_view Formatter::context_block(std::string_view buf,

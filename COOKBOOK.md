@@ -1025,40 +1025,48 @@ hprscript -p '^[A-Z][A-Z0-9_]+=[^\s\x23][^\s]{8,}$' \
 
 ### 8.1 Known-bad IPs from a threat feed
 
-**Problem:** Sweep logs for any IP in an IOC list. Hyperscan compiles many literal alternatives into one efficient DFA, so even a feed with thousands of IPs runs in one pass.
+**Problem:** Sweep logs for any IP in an IOC list. Hyperscan compiles thousands of literals into one DFA, so the whole feed runs in one pass — and `-patterns-from` takes the feed as *literals*, so there's no regex-escaping, no shell alternation-building, and no argv-length limit.
 
 **Input:** Logs; IOC list as a file of IPs.
 
 ```bash
-PAT=$(paste -sd'|' iocs.txt | sed 's/\./\\./g')
-hprscript -p "\\b($PAT)\\b" -C 1 -glob '**/*.log'
+# One-time: wrap each IP in a JSONL pattern entry (literals are never
+# regex-interpreted, so the dots need no escaping).
+sed 's/.*/{"literal":"&"}/' iocs.txt > iocs.jsonl
+
+hprscript -patterns-from iocs.jsonl -w -C 1 -glob '**/*.log'
 ```
 
 ### 8.2 Suspicious domains in DNS logs
 
-**Problem:** Match log lines against a domain IOC list.
+**Problem:** Match log lines against a domain IOC list, case-insensitively.
 
 **Input:** DNS query logs.
 
 ```bash
-PAT=$(paste -sd'|' bad-domains.txt | sed 's/\./\\./g')
-hprscript -pi "\\b($PAT)\\b" -glob '**/dns*.log'
+sed 's/.*/{"literal":"&","case_insensitive":true}/' bad-domains.txt > domains.jsonl
+hprscript -patterns-from domains.jsonl -w -glob '**/dns*.log'
 ```
 
-### 8.3 Hash IOC matching — split by hash family
+### 8.3 Hash IOCs — match the known-bad list directly
 
-**Problem:** Find file-hash references and label which algorithm each one is. MD5, SHA-1, and SHA-256 differ in length (32, 40, 64 hex chars); naming each pattern lets the report group by algorithm without re-parsing the matches.
+**Problem:** Find references to specific known-bad file hashes. The hash list itself becomes the pattern set — every hit is attributed to the exact IOC entry that fired, with no post-filtering pipe.
 
-**Input:** Reports, logs, EDR exports.
+**Input:** Reports, logs, EDR exports; a file of hex hashes.
+
+```bash
+sed 's/.*/{"literal":"&","case_insensitive":true}/' known-bad-hashes.txt > hashes.jsonl
+hprscript -patterns-from hashes.jsonl -w -format '$FILE:$LINE  $MATCH' -glob '**/*'
+```
+
+To inventory hash-*shaped* strings by family instead (unknown feed), name one pattern per length:
 
 ```bash
 hprscript \
-  -p '\b[0-9a-f]{32}\b' \
-  -p '\b[0-9a-f]{40}\b' \
-  -p '\b[0-9a-f]{64}\b' \
-  -format '$PAT_ID  $FILE:$LINE  $MATCH' -glob '**/*' \
-  | grep -F -f known-bad-hashes.txt
-# →  p0 = MD5    p1 = SHA-1    p2 = SHA-256
+  -p '\b[0-9a-f]{32}\b' -name md5    \
+  -p '\b[0-9a-f]{40}\b' -name sha1   \
+  -p '\b[0-9a-f]{64}\b' -name sha256 \
+  -format '$PAT_ID  $FILE:$LINE  $MATCH' -glob '**/*'
 ```
 
 ### 8.4 Tor exit-node patterns
@@ -1600,15 +1608,15 @@ hprscript -p '\boldDeprecatedCall\s*\(' -scope auto \
 
 ```bash
 hprscript \
-  -p '\bconsole\.log\s*\(' \
-  -p 'allow-console'        \
-  -far p0:p1:0 \
+  -p '\bconsole\.log\s*\(' -name console \
+  -p 'allow-console'       -name allow   \
+  -far console:allow:0 \
   -glob '**/*.{js,ts}' -exclude tests -exclude '*.test.*'
 
 hprscript \
-  -p '\bprint\s*\(' \
-  -p 'allow-print'   \
-  -far p0:p1:0 \
+  -p '\bprint\s*\(' -name print \
+  -p 'allow-print'  -name allow \
+  -far print:allow:0 \
   -glob '**/*.py' -exclude tests
 ```
 
@@ -1696,6 +1704,54 @@ hprscript -s '{
 ```
 
 **Why hprscript:** Two phases share the variable store, and `set_difference` collapses what would otherwise be `for_each` + `lookup` with `on_miss` into one declarative action. `set_intersection` and `set_union` are useful in the same shape — e.g., "endpoints documented in OpenAPI but not implemented" is a `set_difference` of `documented` and `implemented` map keysets. Operands can be lists or maps; maps are coerced to their keysets, and the output `target` is a deduped, insertion-ordered list of strings.
+
+### 14.8 Review only the changes on a branch
+
+**Problem:** Lint the diff, not the repo — and ideally only the lines the branch *added*, so pre-existing debt doesn't drown the new findings.
+
+**Input:** A git branch.
+
+```bash
+# Files changed on the branch (built-in git selection)
+hprscript -git-range origin/main...HEAD \
+  -p '\bconsole\.log\s*\(' -name console \
+  -p '\bdebugger\b'        -name debugger \
+  -pi 'TODO|FIXME'         -name todo \
+  -llm
+
+# Only matches on lines the branch ADDED — the true review question
+hprscript -git-range origin/main...HEAD -git-added-lines \
+  -p '\bconsole\.log\s*\(' -name console \
+  -pi 'TODO|FIXME'         -name todo \
+  -llm
+
+# Uncommitted work: changed + untracked, added lines only
+hprscript -git-changed -git-untracked -git-added-lines \
+  -pi 'TODO|FIXME' -format '$FILE:$LINE  $MATCH'
+```
+
+**Why hprscript:** No pipeline, no `xargs`, no quoting hazards — hprscript asks git itself and treats the paths literally. `-git-added-lines` answers "did *this change* introduce it?" instead of "does the changed file contain it somewhere?". For non-git producers (`find -print0`, build manifests), `-files0-from -` / `-files-from list.txt` take the same role:
+
+```bash
+git diff --name-only -z --diff-filter=d origin/main...HEAD |
+  hprscript -files0-from - -pi 'TODO|FIXME' -c
+```
+
+### 14.9 Locks without unlocks in the same function
+
+**Problem:** A `Lock()` whose `Unlock()` lives in a *different* function is a leak candidate. Line distance can't express this — `-not-same-scope` checks structural containment: emit `lk` matches only when no `ul` match falls inside the same innermost enclosing function.
+
+**Input:** Go source (any `-scope` pack or custom anchor works).
+
+```bash
+hprscript \
+  -p '\bmu\.Lock\(\)'   -name lk \
+  -p '\bmu\.Unlock\(\)' -name ul \
+  -not-same-scope lk:ul \
+  -scope go -llm -glob '**/*.go'
+```
+
+**Why hprscript:** The scope index built for `-scope` annotation doubles as the containment oracle, so "X without Y in the same function" is one flag instead of a script. The same shape finds handlers doing DB access without an authorization call (`-not-same-scope db:authz`), or `eval` in the same function as request input (`-same-scope ev:input`).
 
 ---
 
@@ -2231,9 +2287,16 @@ hprscript -p '^(.{10})(.{20})(.{10})' -extract id,name,amount \
 
 ### 21.1 JSONL records missing a required field
 
-**Problem:** Find the individual JSONL records that lack `"user_id"`. Plain `-absent` can't do this — it fires only when a whole *file* contains no `"user_id"` anywhere. Instead, match every record line and use `submatch` with an absent sub-pattern to flag the lines where the field is missing.
+**Problem:** Find the individual JSONL records that lack `"user_id"`. Plain `-absent` fires only when a whole *file* contains no `"user_id"` anywhere; `-records line` refines it to record granularity — one JSON record per line missing the field:
 
 **Input:** `*.jsonl`.
+
+```bash
+hprscript -p '"user_id"' -absent -records line -glob '**/*.jsonl'
+# → {"file":"data.jsonl","pat":"p0","line":2,"record":"{\"other\": 2}"}
+```
+
+The script-mode equivalent (useful when the check is part of a larger script) matches every record line and uses `submatch` with an absent sub-pattern:
 
 ```bash
 hprscript -s '{
@@ -2245,7 +2308,7 @@ hprscript -s '{
 }'
 ```
 
-For the coarser question — which *files* have no `"user_id"` at all — `-absent` is the right primitive:
+For the coarser question — which *files* have no `"user_id"` at all — plain `-absent` remains the right primitive:
 
 ```bash
 hprscript -p '"user_id"' -absent -glob '**/*.jsonl'

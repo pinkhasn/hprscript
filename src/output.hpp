@@ -53,7 +53,7 @@ struct OutputOptions {
     int context_after = 0;
 
     // When both are set, each match is paired with its balanced block
-    // (starting at match-end). Affects every output mode that emits per-match
+    // (searched from match-start). Affects every output mode that emits per-match
     // records: -o prints `$BLOCK_FULL` instead of just `$MATCH`; the default
     // JSONL output gains `block` / `block_full` / `block_start` / `block_end`
     // / `block_line_start` / `block_line_end` fields; -format gains the
@@ -85,6 +85,13 @@ public:
     void on_match(const std::string &file, const Pattern &pattern,
                   const Match &m, std::string_view buf, const LineIndex &idx,
                   const ScopeIndex *scope = nullptr);
+
+    // Record-level absence (-records line with -absent): emit one JSON line
+    // for a record (line) of `file` that lacks `pattern`. Only meaningful in
+    // Absent mode; `text` is the record's content (truncated to
+    // max_context_bytes).
+    void on_record_absent(const std::string &file, const Pattern &pattern,
+                          uint32_t line, std::string_view text);
 
     // Called after a file's scan finishes. Required for FilesOnly when
     // there were no matches (-absent), and lets Counts emit one row.
@@ -156,5 +163,30 @@ private:
 std::string json_escape(std::string_view s);
 // Append the JSON-escaped form of s to out (no surrounding quotes).
 void json_escape_to(std::string &out, std::string_view s);
+
+// Scan accounting shared by -p and script mode, driving -summary /
+// -diagnostics / -require-complete.
+struct ScanStats {
+    uint64_t files_scanned = 0;  // files whose content was actually scanned
+    uint64_t files_binary = 0;   // skipped: NUL byte in the first 512 bytes
+    uint64_t files_failed = 0;   // open/mmap failures
+    uint64_t missing_paths = 0;  // -files-from entries that didn't exist
+    uint64_t matches_seen = 0;   // matches surviving dedup + relations
+    std::string stop_reason;     // "", "limit", "output_budget"
+
+    bool complete() const {
+        return stop_reason.empty() && files_failed == 0 && missing_paths == 0;
+    }
+};
+
+// One {"type":"warning","code":...,"file":...} JSON line on stdout
+// (-diagnostics mode).
+void emit_warning_record(const char *code, const std::string &path);
+
+// The trailing {"type":"summary",...} record (-summary mode). `emitted` is
+// the number of output records actually written; stop_reason is emitted
+// only when non-empty.
+void emit_summary_record(const ScanStats &st, uint64_t emitted,
+                         uint64_t elapsed_ms);
 
 } // namespace hpr

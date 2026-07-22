@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace hpr {
 
@@ -38,5 +39,13 @@ private:
 };
 
 bool read_stdin(std::string &out);
+
+// Read a list of literal file paths from `src` (`"-"` = stdin): one path per
+// line, or NUL-separated when `nul` is true. Blank entries are dropped; in
+// newline mode a trailing '\r' is stripped so CRLF lists work. Entries are
+// appended to `out` verbatim — no glob interpretation. Returns false (with
+// `err` populated) when the source can't be read.
+bool read_path_list(const std::string &src, bool nul,
+                    std::vector<std::string> &out, std::string *err);
 
 } // namespace hpr

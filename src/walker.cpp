@@ -2,6 +2,7 @@
 
 #include "glob.hpp"
 
+#include <algorithm>
 #include <filesystem>
 #include <unordered_set>
 
@@ -83,58 +84,87 @@ void Walker::walk(const std::function<bool(const WalkItem &)> &visit) {
             if (!is_excluded(base, false)) offer(base);
             return;
         }
-        // Recursive walk; we manage the stack so we can skip dirs efficiently.
-        fs::recursive_directory_iterator it(
-            base, fs::directory_options::skip_permission_denied, ec);
-        fs::recursive_directory_iterator end;
-        while (it != end && !stop) {
-            const auto &entry = *it;
-            std::string raw = to_forward(entry.path());
-            // Strip leading "./" if base is "."; otherwise display as-is.
-            std::string disp = raw;
-            if (disp.size() >= 2 && disp[0] == '.' && disp[1] == '/')
-                disp.erase(0, 2);
+        // Deterministic DFS: each directory's entries are sorted by name
+        // before visiting, so output order is lexicographic pre-order and
+        // identical across runs, machines, and filesystems (raw readdir
+        // order is arbitrary). Recursion depth = directory depth.
+        std::function<void(const std::string &)> walk_one =
+            [&](const std::string &dir) {
+                std::error_code dec;
+                fs::directory_iterator it(
+                    dir, fs::directory_options::skip_permission_denied, dec);
+                if (dec) return;
+                std::vector<fs::directory_entry> entries;
+                fs::directory_iterator dend;
+                while (it != dend) {
+                    entries.push_back(*it);
+                    it.increment(dec);
+                    if (dec) break;
+                }
+                std::sort(entries.begin(), entries.end(),
+                          [](const fs::directory_entry &a,
+                             const fs::directory_entry &b) {
+                              return a.path().filename() < b.path().filename();
+                          });
+                for (const auto &entry : entries) {
+                    if (stop) return;
+                    std::string raw = to_forward(entry.path());
+                    // Strip leading "./" if base is "."; otherwise as-is.
+                    std::string disp = raw;
+                    if (disp.size() >= 2 && disp[0] == '.' && disp[1] == '/')
+                        disp.erase(0, 2);
 
-            std::string fname = entry.path().filename().string();
-            bool is_dir = entry.is_directory(ec);
+                    std::string fname = entry.path().filename().string();
+                    std::error_code sec;
+                    bool is_dir = entry.is_directory(sec);
 
-            // Hidden files/dirs (leading '.') are always skipped, except the
-            // base dir itself which is not "." here (we already strip "./").
-            if (!fname.empty() && fname[0] == '.' && fname != "." && fname != "..") {
-                if (is_dir) it.disable_recursion_pending();
-                it.increment(ec);
-                continue;
-            }
+                    // Hidden files/dirs (leading '.') are always skipped
+                    // during recursive descent (explicitly named hidden
+                    // bases were handled before we got here).
+                    if (!fname.empty() && fname[0] == '.' && fname != "." &&
+                        fname != "..")
+                        continue;
+                    if (is_excluded(disp, is_dir)) continue;
 
-            if (is_excluded(disp, is_dir)) {
-                if (is_dir) it.disable_recursion_pending();
-                it.increment(ec);
-                continue;
-            }
-
-            if (!is_dir && entry.is_regular_file(ec)) {
-                bool match = suffix.empty();
-                if (!match) {
-                    // Compute path relative to base for matching against suffix.
-                    std::string rel;
-                    if (base == ".") {
-                        rel = disp;
-                    } else if (starts_with(disp, base + "/")) {
-                        rel = disp.substr(base.size() + 1);
-                    } else if (disp == base) {
-                        rel = entry.path().filename().string();
-                    } else {
-                        rel = disp;
+                    if (is_dir) {
+                        walk_one(raw);
+                        continue;
                     }
-                    match = glob_match(suffix, rel);
+                    if (!entry.is_regular_file(sec)) continue;
+                    bool match = suffix.empty();
+                    if (!match) {
+                        // Path relative to base for matching against suffix.
+                        std::string rel;
+                        if (base == ".") {
+                            rel = disp;
+                        } else if (starts_with(disp, base + "/")) {
+                            rel = disp.substr(base.size() + 1);
+                        } else if (disp == base) {
+                            rel = entry.path().filename().string();
+                        } else {
+                            rel = disp;
+                        }
+                        match = glob_match(suffix, rel);
+                    }
+                    if (match) {
+                        if (!offer(disp)) return;
+                    }
                 }
-                if (match) {
-                    if (!offer(disp)) return;
-                }
-            }
-            it.increment(ec);
-        }
+            };
+        walk_one(base);
     };
+
+    // Literal paths (file lists) first: taken verbatim, never run through
+    // split_glob, so glob metacharacters in the names stay literal.
+    for (const auto &item : literal_) {
+        if (stop) break;
+        std::error_code ec;
+        if (fs::is_regular_file(item, ec)) {
+            if (!is_excluded(item, false)) offer(item);
+        } else if (fs::is_directory(item, ec)) {
+            walk_dir(item, "");
+        }
+    }
 
     for (const auto &item : scan_) {
         if (stop) break;

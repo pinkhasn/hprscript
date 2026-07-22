@@ -90,4 +90,33 @@ bool read_stdin(std::string &out) {
     return true;
 }
 
+bool read_path_list(const std::string &src, bool nul,
+                    std::vector<std::string> &out, std::string *err) {
+    std::string content;
+    if (src == "-") {
+        if (!read_stdin(content)) {
+            if (err) *err = "failed to read file list from stdin";
+            return false;
+        }
+    } else {
+        MappedFile mf;
+        if (!mf.open(src)) {
+            if (err) *err = "cannot read file list: " + src;
+            return false;
+        }
+        content.assign(mf.view().data(), mf.view().size());
+    }
+    const char sep = nul ? '\0' : '\n';
+    size_t start = 0;
+    for (size_t i = 0; i <= content.size(); ++i) {
+        if (i == content.size() || content[i] == sep) {
+            size_t len = i - start;
+            if (!nul && len > 0 && content[start + len - 1] == '\r') --len;
+            if (len > 0) out.emplace_back(content, start, len);
+            start = i + 1;
+        }
+    }
+    return true;
+}
+
 } // namespace hpr
