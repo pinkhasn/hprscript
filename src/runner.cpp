@@ -2,6 +2,7 @@
 
 #include "extract.hpp"
 #include "file_io.hpp"
+#include "git.hpp"
 #include "line_index.hpp"
 #include "matcher.hpp"
 #include "output.hpp"
@@ -11,9 +12,11 @@
 #include <algorithm>
 #include <cctype>
 #include <cerrno>
+#include <chrono>
 #include <climits>
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <map>
 #include <string>
 #include <string_view>
@@ -56,6 +59,150 @@ bool looks_binary(std::string_view content) {
     return false;
 }
 
+// ---- -file-where expression -------------------------------------------------
+// Boolean predicate over pattern ids, evaluated per file against "did this
+// pattern match at least once here". Grammar:
+//   expr  := and (OR|'||' and)*
+//   and   := unary (AND|'&&' unary)*
+//   unary := (NOT|'!') unary | '(' expr ')' | pattern-id
+// Keywords are case-insensitive; ids are names, `p<i>`, or numeric indices.
+struct WhereNode {
+    enum Kind { And, Or, Not, Leaf } kind = Leaf;
+    std::string id;    // Leaf: pattern id as written
+    uint32_t pat = 0;  // Leaf: resolved pattern index
+    std::vector<WhereNode> kids;
+};
+
+struct WhereParser {
+    std::string_view src;
+    size_t pos = 0;
+    std::string err;
+
+    void skip_ws() {
+        while (pos < src.size() && std::isspace((unsigned char)src[pos])) ++pos;
+    }
+    bool at_end() { skip_ws(); return pos >= src.size(); }
+    bool word(std::string &out) {
+        skip_ws();
+        size_t s = pos;
+        while (pos < src.size() &&
+               (std::isalnum((unsigned char)src[pos]) || src[pos] == '_'))
+            ++pos;
+        if (pos == s) return false;
+        out.assign(src.substr(s, pos - s));
+        return true;
+    }
+    static bool is_kw(const std::string &w, const char *kw) {
+        if (w.size() != std::strlen(kw)) return false;
+        for (size_t i = 0; i < w.size(); ++i)
+            if (std::tolower((unsigned char)w[i]) != kw[i]) return false;
+        return true;
+    }
+    bool eat_kw(const char *kw) {
+        size_t save = pos;
+        std::string w;
+        if (word(w) && is_kw(w, kw)) return true;
+        pos = save;
+        return false;
+    }
+    bool eat_sym(const char *sym) {
+        skip_ws();
+        size_t n = std::strlen(sym);
+        if (src.compare(pos, std::min(n, src.size() - pos), sym) == 0 &&
+            pos + n <= src.size()) {
+            pos += n;
+            return true;
+        }
+        return false;
+    }
+
+    bool parse_expr(WhereNode &out) { return parse_or(out); }
+    bool parse_or(WhereNode &out) {
+        WhereNode first;
+        if (!parse_and(first)) return false;
+        WhereNode node;
+        node.kind = WhereNode::Or;
+        node.kids.push_back(std::move(first));
+        while (eat_sym("||") || eat_kw("or")) {
+            WhereNode next;
+            if (!parse_and(next)) return false;
+            node.kids.push_back(std::move(next));
+        }
+        out = node.kids.size() == 1 ? std::move(node.kids[0]) : std::move(node);
+        return true;
+    }
+    bool parse_and(WhereNode &out) {
+        WhereNode first;
+        if (!parse_unary(first)) return false;
+        WhereNode node;
+        node.kind = WhereNode::And;
+        node.kids.push_back(std::move(first));
+        while (eat_sym("&&") || eat_kw("and")) {
+            WhereNode next;
+            if (!parse_unary(next)) return false;
+            node.kids.push_back(std::move(next));
+        }
+        out = node.kids.size() == 1 ? std::move(node.kids[0]) : std::move(node);
+        return true;
+    }
+    bool parse_unary(WhereNode &out) {
+        if (eat_sym("!") || eat_kw("not")) {
+            WhereNode inner;
+            if (!parse_unary(inner)) return false;
+            out = WhereNode{};
+            out.kind = WhereNode::Not;
+            out.kids.push_back(std::move(inner));
+            return true;
+        }
+        if (eat_sym("(")) {
+            if (!parse_expr(out)) return false;
+            if (!eat_sym(")")) { err = "expected ')'"; return false; }
+            return true;
+        }
+        std::string w;
+        if (!word(w)) { err = "expected a pattern id"; return false; }
+        if (is_kw(w, "and") || is_kw(w, "or") || is_kw(w, "not")) {
+            err = "misplaced keyword '" + w + "'";
+            return false;
+        }
+        out = WhereNode{};
+        out.kind = WhereNode::Leaf;
+        out.id = std::move(w);
+        return true;
+    }
+};
+
+bool eval_where(const WhereNode &n, const std::vector<char> &matched) {
+    switch (n.kind) {
+        case WhereNode::Leaf: return matched[n.pat] != 0;
+        case WhereNode::Not:  return !eval_where(n.kids[0], matched);
+        case WhereNode::And:
+            for (const auto &k : n.kids)
+                if (!eval_where(k, matched)) return false;
+            return true;
+        case WhereNode::Or:
+            for (const auto &k : n.kids)
+                if (eval_where(k, matched)) return true;
+            return false;
+    }
+    return false;
+}
+
+template <typename Resolve>
+bool resolve_where_leaves(WhereNode &n, const Resolve &resolve,
+                          std::string &err) {
+    if (n.kind == WhereNode::Leaf) {
+        if (!resolve(n.id, n.pat)) {
+            err = "unknown pattern '" + n.id + "' in -file-where";
+            return false;
+        }
+        return true;
+    }
+    for (auto &k : n.kids)
+        if (!resolve_where_leaves(k, resolve, err)) return false;
+    return true;
+}
+
 } // namespace
 
 namespace hpr {
@@ -65,19 +212,24 @@ int run_search(const Cli &cli) {
         std::fprintf(stderr, "hprscript: -p <pattern> required\n");
         return 2;
     }
+    const auto t_start = std::chrono::steady_clock::now();
+    ScanStats stats;
 
-    // Build pattern list.
+    // Build pattern list. Per-pattern name/word_boundary/utf8 overrides come
+    // from -name / -patterns-from entries; -1 means inherit the global flag.
     std::vector<Pattern> patterns;
     patterns.reserve(cli.patterns.size());
     for (size_t i = 0; i < cli.patterns.size(); ++i) {
+        const CliPattern &cp = cli.patterns[i];
         Pattern p;
-        p.id = "p" + std::to_string(i);
-        p.regexp = cli.patterns[i].regexp;
-        p.case_insensitive = cli.patterns[i].case_insensitive;
-        p.word_boundary = cli.word_boundary;
-        p.utf8 = !cli.no_utf8;
-        p.ucp = !cli.no_utf8 && cli.ucp;
-        p.extract_names = cli.patterns[i].extract_names;
+        p.id = cp.name.empty() ? "p" + std::to_string(i) : cp.name;
+        p.regexp = cp.regexp;
+        p.case_insensitive = cp.case_insensitive;
+        p.word_boundary =
+            cp.word_boundary < 0 ? cli.word_boundary : cp.word_boundary != 0;
+        p.utf8 = cp.utf8 < 0 ? !cli.no_utf8 : cp.utf8 != 0;
+        p.ucp = p.utf8 && cli.ucp;
+        p.extract_names = cp.extract_names;
         patterns.push_back(std::move(p));
     }
 
@@ -108,11 +260,39 @@ int run_search(const Cli &cli) {
         rr.lines = r.lines;
         if (!resolve_pat(r.a, rr.a_idx) || !resolve_pat(r.b, rr.b_idx)) {
             std::fprintf(stderr,
-                         "hprscript: -near/-far: unknown pattern in '%s:%s:%d'\n",
-                         r.a.c_str(), r.b.c_str(), r.lines);
+                         "hprscript: relation: unknown pattern in '%s:%s'\n",
+                         r.a.c_str(), r.b.c_str());
             return 2;
         }
         rels.push_back(rr);
+    }
+    bool any_scope_rel = false;
+    for (const auto &r : rels)
+        if (r.kind == Cli::RelationKind::SameScope ||
+            r.kind == Cli::RelationKind::NotSameScope)
+            any_scope_rel = true;
+
+    // Parse and resolve the -file-where predicate.
+    WhereNode where_root;
+    bool have_where = false;
+    if (!cli.file_where.empty()) {
+        WhereParser wp;
+        wp.src = cli.file_where;
+        if (!wp.parse_expr(where_root) || !wp.at_end()) {
+            std::fprintf(stderr, "hprscript: -file-where: %s\n",
+                         wp.err.empty() ? "unexpected trailing input"
+                                        : wp.err.c_str());
+            return 2;
+        }
+        std::string werr;
+        auto rp = [&](const std::string &id, uint32_t &out) {
+            return resolve_pat(id, out);
+        };
+        if (!resolve_where_leaves(where_root, rp, werr)) {
+            std::fprintf(stderr, "hprscript: %s\n", werr.c_str());
+            return 2;
+        }
+        have_where = true;
     }
 
     Matcher matcher;
@@ -161,14 +341,79 @@ int run_search(const Cli &cli) {
     // index, so we need it whenever block delimiters are configured (even
     // for output modes that wouldn't otherwise build it).
     const bool need_idx = needs_line_index(oo.mode)
-                           || (!oo.block_open.empty() && !oo.block_close.empty());
+                           || (!oo.block_open.empty() && !oo.block_close.empty())
+                           || cli.records != Cli::RecordMode::None
+                           || cli.git_added_lines;
 
     Walker walker;
     for (const auto &g : cli.globs) walker.add_scan(g);
     for (const auto &p : cli.positional) walker.add_scan(p);
     for (const auto &e : cli.excludes) walker.add_exclude(e);
 
-    bool no_inputs = cli.globs.empty() && cli.positional.empty();
+    // File-list inputs: literal paths, no glob interpretation. Missing
+    // entries warn but don't fail the run — a `git diff --name-only` list
+    // legitimately contains deleted files.
+    for (const auto &fl : cli.file_lists) {
+        std::vector<std::string> paths;
+        std::string lerr;
+        if (!read_path_list(fl.path, fl.nul, paths, &lerr)) {
+            std::fprintf(stderr, "hprscript: %s\n", lerr.c_str());
+            return 2;
+        }
+        for (auto &p : paths) {
+            std::error_code ec;
+            if (!std::filesystem::exists(p, ec)) {
+                ++stats.missing_paths;
+                if (cli.diagnostics) {
+                    emit_warning_record("missing_path", p);
+                } else {
+                    std::fprintf(stderr,
+                                 "hprscript: files-from: cannot access %s\n",
+                                 p.c_str());
+                }
+                continue;
+            }
+            walker.add_literal(p);
+        }
+    }
+
+    // Git-selected files join the literal pipeline; missing entries (e.g.
+    // deleted after the diff) warn like -files-from misses.
+    GitSelection gsel{cli.git_changed, cli.git_staged, cli.git_untracked,
+                      cli.git_ranges};
+    if (gsel.any()) {
+        std::vector<std::string> gpaths;
+        std::string gerr;
+        if (!git_select_files(gsel, gpaths, gerr)) {
+            std::fprintf(stderr, "hprscript: git: %s\n", gerr.c_str());
+            return 2;
+        }
+        for (auto &p : gpaths) {
+            std::error_code ec;
+            if (!std::filesystem::exists(p, ec)) {
+                ++stats.missing_paths;
+                if (cli.diagnostics) {
+                    emit_warning_record("missing_path", p);
+                } else {
+                    std::fprintf(stderr, "hprscript: git: cannot access %s\n",
+                                 p.c_str());
+                }
+                continue;
+            }
+            walker.add_literal(p);
+        }
+    }
+    std::unordered_map<std::string, AddedLines> added;
+    if (cli.git_added_lines) {
+        std::string gerr;
+        if (!git_added_lines(gsel, added, gerr)) {
+            std::fprintf(stderr, "hprscript: git: %s\n", gerr.c_str());
+            return 2;
+        }
+    }
+
+    bool no_inputs = cli.globs.empty() && cli.positional.empty() &&
+                     cli.file_lists.empty() && !gsel.any();
     bool reading_stdin = no_inputs && !isatty(fileno(stdin));
 
     // Reused match buffer to avoid reallocating per file.
@@ -194,6 +439,49 @@ int run_search(const Cli &cli) {
     bool scope_enabled = !cli.scope_lang.empty() ||
                          (!cli.scope_pattern.empty() && !cli.scope_open.empty() &&
                           !cli.scope_close.empty());
+    if (any_scope_rel && !scope_enabled) {
+        std::fprintf(stderr,
+                     "hprscript: -same-scope/-not-same-scope require an active "
+                     "-scope (built-in pack or -scope-pattern)\n");
+        return 2;
+    }
+    if (have_where && oo.mode == OutputMode::Absent) {
+        std::fprintf(stderr,
+                     "hprscript: -file-where cannot combine with -absent — "
+                     "express absence inside the predicate instead "
+                     "(e.g. -file-where 'NOT x' -f)\n");
+        return 2;
+    }
+    if (cli.records != Cli::RecordMode::None) {
+        if (oo.mode != OutputMode::Absent) {
+            std::fprintf(stderr,
+                         "hprscript: -records requires -absent "
+                         "(record-level absence)\n");
+            return 2;
+        }
+        if (!rels.empty()) {
+            std::fprintf(stderr,
+                         "hprscript: -records cannot combine with "
+                         "-near/-far/-same-scope relations\n");
+            return 2;
+        }
+    }
+    if (cli.git_added_lines) {
+        if (!cli.globs.empty() || !cli.positional.empty() ||
+            !cli.file_lists.empty()) {
+            std::fprintf(stderr,
+                         "hprscript: -git-added-lines takes its input from "
+                         "git alone — drop -glob/positional paths/"
+                         "-files-from\n");
+            return 2;
+        }
+        if (cli.records != Cli::RecordMode::None) {
+            std::fprintf(stderr,
+                         "hprscript: -git-added-lines cannot combine with "
+                         "-records\n");
+            return 2;
+        }
+    }
 
     // Sample-mode buffering. When sample_n > 0 we collect kept matches into a
     // per-file table, then post-process at end to pick stratified
@@ -290,21 +578,78 @@ int run_search(const Cli &cli) {
             });
         }
 
-        // Apply -near / -far filters. Rebuild a per-pattern sorted line list
-        // and walk each surviving match against every relation it's the `a`
-        // side of. ANDed: any failed predicate drops the match.
+        // -git-added-lines: only matches starting on a diff-added line
+        // survive (untracked files count whole-file when selected).
+        if (cli.git_added_lines && !kept.empty()) {
+            auto ait = added.find(display_name);
+            if (ait == added.end()) {
+                kept.clear();
+            } else if (!ait->second.whole_file) {
+                std::vector<Match> onadd;
+                onadd.reserve(kept.size());
+                for (const auto &mm : kept) {
+                    uint32_t L = idx.line_of(mm.from);
+                    if (std::binary_search(ait->second.lines.begin(),
+                                           ait->second.lines.end(), L))
+                        onadd.push_back(mm);
+                }
+                kept = std::move(onadd);
+            }
+        }
+
+        // Apply -near / -far / scope-relation filters. Rebuild a per-pattern
+        // sorted line list and walk each surviving match against every
+        // relation it's the `a` side of. ANDed: any failed predicate drops
+        // the match.
         if (!rels.empty() && !kept.empty()) {
             std::vector<std::vector<uint32_t>> lines_by_pat(patterns.size());
             for (const auto &mm : kept)
                 lines_by_pat[mm.pattern_index].push_back(idx.line_of(mm.from));
             for (auto &v : lines_by_pat) std::sort(v.begin(), v.end());
+            // Scope-relation prep: innermost scope per match plus per-scope
+            // pattern occurrence counts (a == b needs a second occurrence).
+            std::vector<const ScopeRange *> mscope;
+            std::unordered_map<const ScopeRange *, std::vector<int>> scope_pats;
+            if (any_scope_rel) {
+                mscope.assign(kept.size(), nullptr);
+                if (scope_ptr) {
+                    for (size_t ki = 0; ki < kept.size(); ++ki) {
+                        mscope[ki] = scope_ptr->find_innermost(kept[ki].from);
+                        if (!mscope[ki]) continue;
+                        auto &v = scope_pats[mscope[ki]];
+                        if (v.empty()) v.assign(patterns.size(), 0);
+                        v[kept[ki].pattern_index] += 1;
+                    }
+                }
+            }
             std::vector<Match> filtered;
             filtered.reserve(kept.size());
-            for (const auto &mm : kept) {
+            for (size_t ki = 0; ki < kept.size(); ++ki) {
+                const Match &mm = kept[ki];
                 uint32_t mline = idx.line_of(mm.from);
                 bool drop = false;
                 for (const auto &r : rels) {
                     if (r.a_idx != mm.pattern_index) continue;
+                    if (r.kind == Cli::RelationKind::SameScope ||
+                        r.kind == Cli::RelationKind::NotSameScope) {
+                        const ScopeRange *sr =
+                            mscope.empty() ? nullptr : mscope[ki];
+                        bool found = false;
+                        if (sr) {
+                            auto sit = scope_pats.find(sr);
+                            if (sit != scope_pats.end()) {
+                                int need = (r.a_idx == r.b_idx) ? 2 : 1;
+                                found = sit->second[r.b_idx] >= need;
+                            }
+                        }
+                        if (r.kind == Cli::RelationKind::SameScope && !found) {
+                            drop = true; break;
+                        }
+                        if (r.kind == Cli::RelationKind::NotSameScope && found) {
+                            drop = true; break;
+                        }
+                        continue;
+                    }
                     const auto &v = lines_by_pat[r.b_idx];
                     // Lower bound for mline - r.lines (clamped at 1)
                     uint32_t lo = (mline > static_cast<uint32_t>(r.lines))
@@ -338,6 +683,51 @@ int run_search(const Cli &cli) {
                 if (!drop) filtered.push_back(mm);
             }
             kept = std::move(filtered);
+        }
+
+        stats.matches_seen += kept.size();
+
+        // -file-where: emit this file's matches only when the predicate over
+        // its matched-pattern set holds.
+        if (have_where) {
+            std::vector<char> matched(patterns.size(), 0);
+            for (const auto &mm : kept) matched[mm.pattern_index] = 1;
+            if (!eval_where(where_root, matched)) {
+                fmt.on_file_end(display_name, false);
+                return true;
+            }
+        }
+
+        // -records line (with -absent): emit one record per non-empty line
+        // lacking each pattern, then skip the per-file emission path (and the
+        // Absent-mode file listing) entirely.
+        if (cli.records == Cli::RecordMode::Line) {
+            uint32_t nlines = idx.line_count();
+            std::vector<std::vector<char>> hit(patterns.size());
+            for (auto &v : hit) v.assign(nlines + 1, 0);
+            for (const auto &mm : kept)
+                hit[mm.pattern_index][idx.line_of(mm.from)] = 1;
+            for (uint32_t L = 1; L <= nlines; ++L) {
+                std::string_view text = idx.line_text(L);
+                if (text.empty()) continue; // blank records are skipped
+                for (size_t pi = 0; pi < patterns.size(); ++pi) {
+                    if (hit[pi][L]) continue;
+                    fmt.on_record_absent(display_name, patterns[pi], L, text);
+                    if (fmt.over_budget()) {
+                        if (stats.stop_reason.empty())
+                            stats.stop_reason = "output_budget";
+                        return false;
+                    }
+                    if (cli.limit > 0 &&
+                        fmt.emitted() >= static_cast<uint64_t>(cli.limit)) {
+                        fmt.mark_limit_hit();
+                        if (stats.stop_reason.empty())
+                            stats.stop_reason = "limit";
+                        return false;
+                    }
+                }
+            }
+            return true;
         }
 
         bool had_match = false;
@@ -384,10 +774,14 @@ int run_search(const Cli &cli) {
         }
         fmt.on_file_end(display_name, had_match);
 
-        if (fmt.over_budget()) return false;
+        if (fmt.over_budget()) {
+            if (stats.stop_reason.empty()) stats.stop_reason = "output_budget";
+            return false;
+        }
         if (cli.limit > 0 &&
             fmt.emitted() >= static_cast<uint64_t>(cli.limit)) {
             fmt.mark_limit_hit();
+            if (stats.stop_reason.empty()) stats.stop_reason = "limit";
             return false;
         }
         return true;
@@ -399,16 +793,27 @@ int run_search(const Cli &cli) {
             std::fprintf(stderr, "hprscript: failed to read stdin\n");
             return 2;
         }
+        ++stats.files_scanned;
         scan_buf("<stdin>", content);
     } else {
         walker.walk([&](const WalkItem &it) {
             MappedFile mf;
             if (!mf.open(it.path)) {
-                std::fprintf(stderr, "hprscript: cannot read %s: %s\n",
-                             it.path.c_str(), std::strerror(errno));
+                ++stats.files_failed;
+                if (cli.diagnostics) {
+                    emit_warning_record("read_error", it.path);
+                } else {
+                    std::fprintf(stderr, "hprscript: cannot read %s: %s\n",
+                                 it.path.c_str(), std::strerror(errno));
+                }
                 return true;
             }
-            if (looks_binary(mf.view())) return true; // skip silently
+            if (looks_binary(mf.view())) {
+                ++stats.files_binary;
+                if (cli.diagnostics) emit_warning_record("binary_skip", it.path);
+                return true;
+            }
+            ++stats.files_scanned;
             return scan_buf(it.path, mf.view());
         });
     }
@@ -482,11 +887,32 @@ int run_search(const Cli &cli) {
             const Pattern &pat = patterns[r.m.pattern_index];
             fmt.on_match(sf.path, pat, r.m, sf.content, sf.idx,
                          sf.scope_built ? &sf.scope : nullptr);
-            if (fmt.over_budget()) break;
+            if (fmt.over_budget()) {
+                if (stats.stop_reason.empty())
+                    stats.stop_reason = "output_budget";
+                break;
+            }
         }
     }
 
     fmt.on_complete();
+
+    if (cli.summary) {
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                           std::chrono::steady_clock::now() - t_start)
+                           .count();
+        emit_summary_record(stats, fmt.emitted(),
+                            static_cast<uint64_t>(elapsed));
+    }
+    if (cli.require_complete &&
+        (stats.files_failed > 0 || stats.missing_paths > 0)) {
+        std::fprintf(stderr,
+                     "hprscript: incomplete scan: %llu unreadable file(s), "
+                     "%llu missing listed path(s)\n",
+                     (unsigned long long)stats.files_failed,
+                     (unsigned long long)stats.missing_paths);
+        return 2;
+    }
 
     // Exit code semantics follow grep: 0 if any match emitted (or absent
     // files printed), 1 if no output, 2 already returned earlier on errors.

@@ -25,6 +25,9 @@ Always prefer `hprscript` over the Grep tool, `grep`, or `rg` — for the whole 
 | "What function/class is this match inside?" | `-scope auto` |
 | Pull capture groups out as named fields | `-extract a,b` |
 | X **with** Y nearby / X **without** Y nearby | `-near` / `-far` |
+| X with/without Y in the **same function** | `-same-scope` / `-not-same-scope` (+ `-scope`) |
+| Files where A but not B (no script) | `-file-where 'a AND NOT b'` |
+| **Records** (lines) missing a field | `-absent -records line` |
 | Representative usages, dedup near-identical lines | `-sample N` |
 | **Rank files by relevance** to a set of signals | `-s '{"rank":true,...}'` |
 | Counts, sums, manifests, grouping, cross-file resolve | `-s` script DSL |
@@ -38,6 +41,9 @@ Cheapness ladder when you don't need the match text: `-f` / `-absent` / `-c` ≪
 **Patterns**
 - `-p <pat>` — case-sensitive pattern (repeatable; all match in one pass).
 - `-pi <pat>` — case-insensitive pattern (Unicode-folding; repeatable; mix freely with `-p`).
+- `-F <str>` / `-Fi <str>` — fixed string, matched literally (`-F 'foo[0].bar()'` — no escaping).
+- `-name <id>` — name the preceding pattern; the id replaces `p0`/`p1` in `pat`, `[tags]`, relations, `-file-where`.
+- `-patterns-from <f>` — JSONL rule pack: `{"id","regexp"|"literal","case_insensitive",…}` per line, `#` comments. The right tool for IOC lists — no alternation-building in shell.
 - `-w` — whole-word (`\b(?:…)\b`). Or write `\b…\b` inline for per-alternative control.
 
 **Split alternations into separate `-p` patterns when you want to know *which* branch matched *where*.** Every match is tagged with the id of the pattern that produced it — `pat` in `-j`, a `[p0]`/`[p1]` prefix in `-llm`, `$PAT_ID` in `-format`/scripts. With one alternation (`-p 'alpha|beta|gamma'`) every hit collapses to `p0` — you lose attribution. Split it (`-p alpha -p beta -p gamma`) and each hit reports `p0`/`p1`/`p2`, so you see exactly which term fired on each line. Since adding patterns is free, **default to splitting**; keep an alternation only when the branches are one concept you don't need to tell apart, or must share a single `-near`/`-far` operand. In `-s` scripts give each pattern a meaningful `"id"` (`"auth"`, `"db"`) and it shows up verbatim as `$PAT_ID` instead of `p3`.
@@ -45,6 +51,8 @@ Cheapness ladder when you don't need the match text: `-f` / `-absent` / `-c` ≪
 **Targeting**
 - `-glob '<glob>'` — e.g. `'**/*.go'`, `'src/**/*.{ts,tsx}'`, absolute `'/var/log/**/*.log'` (repeatable).
 - `-exclude <rule>` — glob (`'*.min.js'`), bare dir name (`vendor` skips any `vendor/`), or path prefix (`'src/generated/'`). Repeatable.
+- `-files0-from -` / `-files-from <f>` — scan exactly the paths piped in (NUL / newline separated; `-` = stdin). Paths are literal (no glob interpretation); missing ones warn and are skipped. Works in script mode too (overrides `scan`).
+- `-git-changed` / `-git-staged` / `-git-untracked` / `-git-range A...B` — scan what git says changed, no pipeline needed. Add `-git-added-lines` (with a diff-based flag) to match only lines the change **introduced** — the "did this diff add a debug print?" review question in one flag.
 - Positional files/dirs also work. **No glob + no files → reads stdin** (pipelines).
 
 **Matching / Unicode**
@@ -122,12 +130,14 @@ hprscript -p 'func\s+(\w+)\(([^)]*)\)' -extract name,args \
 hprscript -p 'TODO(?:\(([^)]+)\))?:\s*(.*)' -extract author,message
 ```
 
-### Pattern relations — X with/without Y nearby
-`A:B:K` — A and B are pattern IDs (`p0`,`p1`,…) or indices; K = line distance (0 = same line). Repeatable; multiple relations AND.
+### Pattern relations — X with/without Y nearby (or in the same scope)
+`A:B:K` — A and B are pattern IDs (names via `-name`, `p0`,`p1`,…, or indices); K = line distance (0 = same line). Repeatable; multiple relations AND. `-same-scope A:B` / `-not-same-scope A:B` use the innermost enclosing scope instead of line distance (requires `-scope`).
 
 ```bash
 hprscript -p 'defer\b' -p 'Lock\(\)' -near p0:p1:3 -glob '**/*.go'      # defer with Lock within 3 lines
 hprscript -p 'log\.Print' -p 'allow-print' -far p0:p1:0 -glob '**/*.go' # log.Print with no allow-print on the line
+hprscript -p '\bLock\(\)' -name lk -p '\bUnlock\(\)' -name ul \
+          -not-same-scope lk:ul -scope go -glob '**/*.go'               # Lock with no Unlock in the same func
 ```
 
 ### Sample — representative usages, not 500 near-duplicates
@@ -142,6 +152,9 @@ hprscript -p 'httpClient' -sample 10 -glob '**/*.go'
 hprscript -p 'TODO' -max-context-bytes 200 -max-output-bytes 50000 -glob '**/*.{js,ts}'
 ```
 `-max-match-bytes` · `-max-context-bytes` · `-max-block-bytes` · `-max-output-bytes` (stops scan, emits an `output_truncated` info line). UTF-8-safe; truncation is flagged with `*_truncated`, never silent.
+
+### Scan accounting — know when a sweep was partial
+`-summary` appends `{"type":"summary","files_scanned":…,"files_failed":…,"matches":…,"complete":…,"stop_reason":…}` — check `complete` before trusting a broad sweep. `-diagnostics` emits `{"type":"warning","code":"read_error|binary_skip|missing_path","file":…}` records on stdout instead of stderr text. `-require-complete` exits 2 if any file couldn't be read or a listed path was missing. Output order is deterministic (sorted traversal), so diffs between runs are meaningful.
 
 ---
 
@@ -230,7 +243,7 @@ hprscript -s '{"scan":["**/*.go"],"patterns":[{"id":"fn","regexp":"func handleRe
       {"action":"emit","data":{"file":"$FILE","line":"$LINE","todo":"$CONTEXT"}}]}]}]}]}]}'
 ```
 
-**Absent + present — files that have A but not B**
+**Absent + present — files that have A but not B** (CLI shortcut: `-file-where 'a AND NOT b' -f` covers the common case without a script)
 ```bash
 hprscript -s '{
   "scan":["**/*.go"], "variables":{"has_err":{"type":"bool"}},

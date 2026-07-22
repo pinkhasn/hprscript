@@ -18,9 +18,17 @@ namespace hpr {
 struct CliPattern {
     std::string regexp;
     bool case_insensitive = false; // set by -pi instead of -p
+    // Pattern id override (set by `-name` on the most recently declared
+    // `-p`/`-pi`, or by `id` in a -patterns-from file). Empty → auto `p<i>`.
+    // Shown as `pat`/$PAT_ID and usable as the A/B side of relations.
+    std::string name;
     // Comma-separated capture group names (set by `-extract` on the most
     // recently declared `-p`/`-pi`). Maps capture group i+1 → names[i].
     std::vector<std::string> extract_names;
+    // Tri-state per-pattern overrides used by -patterns-from entries:
+    // -1 = inherit the global flag (-w / -no-utf8), 0/1 = explicit.
+    int word_boundary = -1;
+    int utf8 = -1;
 };
 
 struct Cli {
@@ -29,6 +37,40 @@ struct Cli {
     std::vector<std::string> globs;
     std::vector<std::string> excludes;
     std::vector<std::string> positional;
+
+    // File-list inputs (-files-from / -files0-from): each names a list file
+    // ("-" = stdin) of literal paths to scan — newline-delimited, or
+    // NUL-delimited when `nul` is set. Entries are never glob-interpreted,
+    // so filenames containing *, {, [ are safe. Works in both -p and script
+    // mode (in script mode the list overrides the script's `scan`, like
+    // positional paths do).
+    struct FileList {
+        std::string path;
+        bool nul = false;
+    };
+    std::vector<FileList> file_lists;
+
+    // Git-aware input selection (-git-changed / -git-staged / -git-untracked
+    // / -git-range). Selected files join the literal-path pipeline exactly
+    // like -files-from entries. -git-added-lines further restricts matches
+    // to lines added by the selected diffs (quick mode only; requires a
+    // diff-based selection flag).
+    bool git_changed = false;
+    bool git_staged = false;
+    bool git_untracked = false;
+    std::vector<std::string> git_ranges;
+    bool git_added_lines = false;
+
+    // Pattern-file inputs (-patterns-from): JSONL rule files, one pattern
+    // object per line ({id, regexp | literal, case_insensitive,
+    // word_boundary, utf8}); `#` lines and blank lines are ignored. Loaded
+    // by load_patterns_from() after parsing; entries append to `patterns`.
+    std::vector<std::string> patterns_from;
+
+    // Per-file boolean predicate (-file-where): expression over pattern ids
+    // (AND/OR/NOT, &&/||/!, parens). A file's matches are emitted only when
+    // the predicate holds over the set of patterns that matched in it.
+    std::string file_where;
     bool word_boundary = false;
     bool no_utf8 = false;        // -no-utf8: byte-mode matching
     bool ucp = false;            // -ucp: enable Unicode \w/\d/\s (opt-in)
@@ -75,9 +117,15 @@ struct Cli {
     // Pattern relations (`-near` / `-far`). Filters matches of pattern `a` by
     // proximity to matches of pattern `b` within `lines` lines (0 = same
     // line). Multiple relations AND together. Both `a` and `b` are pattern
-    // identifiers (`p0`, `p1`, …) or zero-based indices ("0", "1", …),
+    // identifiers (names, `p0`, `p1`, …) or zero-based indices ("0", "1", …),
     // resolved against the final pattern list at runtime.
-    enum class RelationKind { Near, Far };
+    //
+    // SameScope / NotSameScope (`-same-scope` / `-not-same-scope`) test for a
+    // `b` match inside the same innermost enclosing scope instead of a line
+    // distance (`lines` is unused). They require an active -scope config;
+    // `a` matches outside any recognized scope are dropped by SameScope and
+    // kept by NotSameScope. When a == b, "same scope" needs a *second* match.
+    enum class RelationKind { Near, Far, SameScope, NotSameScope };
     struct Relation {
         RelationKind kind = RelationKind::Near;
         std::string a;
@@ -85,6 +133,12 @@ struct Cli {
         int lines = 0;
     };
     std::vector<Relation> relations;
+
+    // Record mode (-records). v1 supports `line`: combined with -absent,
+    // emit one record per non-empty line lacking each pattern (record-level
+    // absence) instead of the per-file file list.
+    enum class RecordMode { None, Line };
+    RecordMode records = RecordMode::None;
 
     // Sample mode (`-sample N`): collect matches across all files, then
     // emit ≤N representatives stratified by file and by a canonicalised
@@ -96,6 +150,18 @@ struct Cli {
     std::string script_inline;   // -s '<json>'
     std::string script_path;     // -script <path>
 
+    // Scan accounting (work in both -p and script mode).
+    // -summary: emit a trailing {"type":"summary",...} record with scan
+    // accounting (files scanned/skipped/failed, matches, completeness).
+    bool summary = false;
+    // -diagnostics: emit {"type":"warning","code":...,"file":...} records on
+    // stdout for read errors, binary skips, and missing file-list paths
+    // (replaces the stderr text for those cases).
+    bool diagnostics = false;
+    // -require-complete: exit 2 when any file could not be read or a listed
+    // path was missing — silent partial results become hard failures.
+    bool require_complete = false;
+
     // Misc.
     bool show_version = false;
     bool show_help = false;
@@ -105,6 +171,14 @@ struct Cli {
 
 // Parse argv into Cli. Never exits — error/help are reported via flags.
 Cli parse_cli(int argc, char **argv);
+
+// Load -patterns-from files into cli.patterns (JSONL entries; `#` comments).
+// Returns false with cli.error set on the first malformed entry.
+bool load_patterns_from(Cli &cli);
+
+// Check final pattern ids (explicit names + auto p<i>) for duplicates.
+// Returns false with cli.error set on collision.
+bool validate_pattern_ids(Cli &cli);
 
 void print_help(FILE *out);
 

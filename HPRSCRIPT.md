@@ -81,8 +81,18 @@ Positional file/dir args after `-s`/`-script` (or after a positional script file
 |---|---|
 | `-p <pattern>` | Case-sensitive search pattern (repeatable for multi-pattern, all match in one pass) |
 | `-pi <pattern>` | Case-insensitive search pattern (HS `CASELESS`; folds Unicode by default; repeatable, mixable with `-p`) |
+| `-F <string>` / `-Fi <string>` | Fixed-string pattern (case-sensitive / -insensitive) — matched literally, no regex interpretation. Repeatable, mixable with `-p`/`-pi`. |
+| `-name <id>` | Name the preceding `-p`/`-pi`/`-F`/`-Fi`: the id (`[A-Za-z_]\w*`) replaces the auto `p<i>` in `pat`, `$PAT_ID`, `-llm` tags, relations, and `-file-where`. |
+| `-patterns-from <f>` | Load additional patterns from a JSONL rule file — one `{"id","regexp"\|"literal","case_insensitive","word_boundary","utf8"}` object per line, `#` comments allowed. Repeatable. See [Fixed strings & pattern files](#fixed-strings--pattern-files--f--fi--patterns-from). |
+| `-file-where <expr>` | Per-file predicate over pattern ids (`'err AND NOT recovery'`). See [Per-file conditions](#per-file-conditions--file-where). |
+| `-records line` | With `-absent`: record-level absence — one JSON record per non-empty line lacking each pattern. See [Record-level absence](#record-level-absence--records-line). |
 | `-glob <glob>` | Scan glob (e.g. `"**/*.go"`; repeatable). Brace alternation is supported (`"src/**/*.{ts,tsx}"`), and absolute bases work too (`"/var/log/**/*.log"`). |
 | `-exclude <pat>` | Exclude rule (repeatable). Three forms: glob (`"*.log"`), bare directory name (`"vendor"` skips any `vendor/` dir), path prefix with `/` (`"src/generated/"`). |
+| `-files-from <f>` | Scan the literal paths listed in `f`, one per line (`-` = stdin). Repeatable. See [File-list input](#file-list-input--files-from---files0-from). |
+| `-files0-from <f>` | Same, NUL-separated — safe for any filename (`find -print0`, `git diff --name-only -z`). |
+| `-git-changed` / `-git-staged` / `-git-untracked` | Scan the files git reports as changed vs HEAD / staged / untracked. See [Git-aware selection](#git-aware-selection--git-changed---git-staged---git-untracked---git-range---git-added-lines). |
+| `-git-range <r>` | Scan the files changed in a diff range (`origin/main...HEAD`). Repeatable. |
+| `-git-added-lines` | Restrict matches to lines **added** by the selected diffs (quick mode; needs `-git-changed`/`-git-staged`/`-git-range`). |
 | `-w` | Whole-word matching (wraps the pattern as `\b(?:expr)\b`) |
 | `-no-utf8` | Disable UTF-8 mode (byte-level matching — see [UTF-8 / Unicode](#utf-8--unicode-support)) |
 | `-ucp` | Enable Unicode property classes for `\w`/`\d`/`\s` (opt-in; may reject some patterns) |
@@ -99,11 +109,16 @@ Positional file/dir args after `-s`/`-script` (or after a positional script file
 | `-scope-open <s>` / `-scope-close <s>` / `-scope-kind <s>` | Custom scope delimiters and emitted `kind` label (default `func`). |
 | `-near A:B:K` | Emit pattern `A`'s matches with a `B`-match within `K` lines (repeatable). See [Pattern relations](#pattern-relations--near---far). |
 | `-far A:B:K` | Emit `A`'s matches with **no** `B`-match within `K` lines (repeatable, ANDs with other relations). |
+| `-same-scope A:B` | Emit `A`'s matches that share their innermost enclosing scope with a `B`-match. Requires `-scope`. |
+| `-not-same-scope A:B` | Emit `A`'s matches with **no** `B`-match in the same enclosing scope (e.g. `Lock` without `Unlock` in the same function). |
 | `-sample <n>` | Buffer all matches, emit `n` representatives stratified by file and surrounding-line shape. See [Sample mode](#sample-mode). |
 | `-max-match-bytes <n>` | UTF-8-safe truncation of `$MATCH` at `n` bytes. See [Byte budgets](#byte-budgets). |
 | `-max-context-bytes <n>` | Truncate `$CONTEXT` (and `$CONTEXT_BEFORE`/`$CONTEXT_AFTER`) at `n` bytes. |
 | `-max-block-bytes <n>` | Truncate `$BLOCK` / `$BLOCK_FULL` at `n` bytes. |
 | `-max-output-bytes <n>` | Stop scanning once total stdout exceeds `n` bytes; emit a final `output_truncated` info record. |
+| `-summary` | Emit a trailing `{"type":"summary",...}` record with scan accounting. See [Scan accounting](#scan-accounting--summary---diagnostics---require-complete). |
+| `-diagnostics` | Emit `{"type":"warning",...}` records on stdout for read errors, binary skips, and missing list paths (replaces the stderr text for those). |
+| `-require-complete` | Exit 2 when any file couldn't be read or a listed path was missing — partial results become hard failures. |
 
 ### Output modes (mutually exclusive)
 
@@ -192,6 +207,88 @@ journalctl -u nginx --since "1 hour ago" | hprscript -pi 'timeout|refused' -o
 
 ---
 
+## File-list input (`-files-from` / `-files0-from`)
+
+Scan exactly the files another tool selected — `git diff`, `find`, a build
+manifest — instead of describing them with globs:
+
+```bash
+# Only the files changed on this branch
+git diff --name-only -z --diff-filter=d origin/main...HEAD |
+  hprscript -files0-from - -p 'console\.log' -p '\bdebugger\b'
+
+# Only files find selected
+find src -name '*.go' -newer build.stamp -print0 |
+  hprscript -files0-from - -p 'TODO'
+
+# From a saved manifest, one path per line
+hprscript -files-from manifest.txt -pi 'copyright'
+```
+
+Semantics:
+
+- Entries are **literal paths**, never glob-interpreted — filenames
+  containing `*`, `{`, `[` stay literal. `-files0-from` (NUL separators) is
+  safe for *any* filename, including spaces and newlines; prefer it whenever
+  the producer offers `-z` / `-print0`.
+- `-` reads the list from stdin. At most one list may use stdin, and not
+  while the script itself is being piped on stdin. When a file list is
+  given, stdin is never treated as content to scan.
+- `-exclude` rules still apply to listed files. Directories in the list are
+  walked recursively. Blank entries are ignored; in newline mode a trailing
+  `\r` is stripped, so CRLF lists work.
+- Missing entries print a warning to stderr and are skipped — a
+  `git diff --name-only` list legitimately names deleted files (add
+  `--diff-filter=d` to drop them at the source). The exit code is not
+  affected.
+- Works in script mode too: the list overrides the script's `scan`, exactly
+  like positional paths do. Repeatable, and combinable with `-glob` and
+  positional paths (the union is scanned).
+
+---
+
+## Git-aware selection (`-git-changed` / `-git-staged` / `-git-untracked` / `-git-range` / `-git-added-lines`)
+
+The `git diff | hprscript -files0-from -` pipeline, built in — hprscript
+shells out to `git` for the file list itself:
+
+```bash
+hprscript -p 'console\.log' -git-changed            # changed vs HEAD (staged + unstaged)
+hprscript -pi 'TODO|FIXME'  -git-staged             # about to be committed
+hprscript -p 'password'     -git-untracked          # new, not yet tracked
+hprscript -p '\bdebugger\b' -git-range origin/main...HEAD   # the whole branch
+```
+
+Selection flags union when combined (`-git-changed -git-untracked` ≈ "my
+working tree view") and compose with everything else — patterns, relations,
+`-file-where`, `-summary`, script mode. Selected paths behave exactly like
+`-files-from` entries: literal, exclude-filtered, missing ones warn and are
+skipped (deleted files are already dropped via `--diff-filter=d`). Paths are
+prefixed with the repository toplevel when you run from a subdirectory, so
+they always resolve. Git errors (not a repository, bad range) exit 2 with
+git's message.
+
+**`-git-added-lines`** goes one step further: instead of scanning the whole
+changed file, only matches whose line was **added** by the selected diffs
+survive — the "did *this change* introduce a debug print / banned API /
+TODO?" question:
+
+```bash
+# Debug statements introduced on this branch — not pre-existing ones
+hprscript -p '\bconsole\.log\s*\(' -name console -pi 'TODO|FIXME' -name todo \
+          -git-range origin/main...HEAD -git-added-lines -llm
+```
+
+Semantics: line tables come from `git diff -U0`; a match survives when its
+start line is an added line. Untracked files (with `-git-untracked`) count
+whole-file. Line numbers refer to the diff's new side, so results are exact
+when the working tree matches the diff target (always true for
+`-git-changed`/`-git-staged`; for historical ranges, re-run from the target
+checkout). Quick mode only; requires a diff-based selection flag and takes
+its input from git alone (no `-glob`/positional/`-files-from` mixing).
+
+---
+
 ## Case-insensitive matching (`-pi`)
 
 `-pi <pattern>` is a sibling of `-p` that compiles its pattern with Hyperscan's `CASELESS` flag. **The flag is per-pattern**, so a single invocation can mix case-sensitive and case-insensitive patterns:
@@ -208,7 +305,7 @@ hprscript -p '\bError\b' -pi 'todo|fixme' -glob '**/*.go'
 
 The match record's `pat` field tells you which pattern matched (`p0`, `p1`, …), so downstream code can route findings differently per pattern.
 
-Because of this, **prefer separate `-p` patterns over a single alternation whenever you care which branch matched.** `-p 'alpha|beta|gamma'` tags every hit `pat=p0` — the alternation is opaque, you can't tell `alpha` from `gamma`. Split it into `-p alpha -p beta -p gamma` and each hit carries its own id (`p0`/`p1`/`p2`), surfaced as `pat` in `-j`, a `[p0]` prefix in `-llm`, and `$PAT_ID` in `-format`. Adding patterns is free (all compile into one Hyperscan database and match in the same pass), so splitting costs nothing. Keep an alternation only when the branches are genuinely one signal you never need to distinguish — e.g. a single ranking weight, or one operand of a `-near`/`-far` relation. In script mode, set each pattern's `"id"` to a meaningful label (`"auth"`, `"db"`) so `$PAT_ID` reads as that label instead of `p3`.
+Because of this, **prefer separate `-p` patterns over a single alternation whenever you care which branch matched.** `-p 'alpha|beta|gamma'` tags every hit `pat=p0` — the alternation is opaque, you can't tell `alpha` from `gamma`. Split it into `-p alpha -p beta -p gamma` and each hit carries its own id (`p0`/`p1`/`p2`), surfaced as `pat` in `-j`, a `[p0]` prefix in `-llm`, and `$PAT_ID` in `-format`. Adding patterns is free (all compile into one Hyperscan database and match in the same pass), so splitting costs nothing. Keep an alternation only when the branches are genuinely one signal you never need to distinguish — e.g. a single ranking weight, or one operand of a `-near`/`-far` relation. In script mode, set each pattern's `"id"` to a meaningful label (`"auth"`, `"db"`) so `$PAT_ID` reads as that label instead of `p3`. In CLI mode, [`-name`](#named-patterns--name) does the same: `-p 'auth|token' -name auth`.
 
 Folding is **Unicode-aware** by default (UTF-8 mode is on), so `-pi 'café'` matches `CAFÉ`, and `-pi 'привет'` matches `ПРИВЕТ`. See [UTF-8 / Unicode](#utf-8--unicode-support) for the details.
 
@@ -221,6 +318,64 @@ Folding is **Unicode-aware** by default (UTF-8 mode is on), so `-pi 'café'` mat
 | Script mode | `{"id": "x", "regexp": "...", "case_insensitive": true}` |
 
 The inline `(?i)` form is handy when you want to scope case-insensitivity to part of a larger pattern (`(?i)error|warn` folds both, `(?i:error)|warn` folds only `error`).
+
+---
+
+## Named patterns (`-name`)
+
+`-name <id>` names the most recently declared pattern (like `-extract`, it's a
+postfix modifier). The id replaces the auto-assigned `p<i>` everywhere the
+pattern id surfaces — the `pat` field, `$PAT_ID`, `-llm`'s `[tag]`, relation
+operands, and `-file-where`:
+
+```bash
+hprscript \
+  -p  'WARN'  -name warn \
+  -p  'ERROR' -name err  \
+  -near warn:err:3 \
+  -format '$PAT_ID  $FILE:$LINE  $MATCH' -glob '**/*.log'
+```
+
+Names must be identifiers (`[A-Za-z_][A-Za-z0-9_]*`) and unique — a collision
+with another name or with a different pattern's auto id (`p0`, `p1`, …) is
+rejected at startup.
+
+---
+
+## Fixed strings & pattern files (`-F` / `-Fi` / `-patterns-from`)
+
+`-F <string>` (and case-insensitive `-Fi`) matches its argument **literally** —
+no regex interpretation, so `foo[0].bar()` needs no escaping. Fixed strings
+compile into the same one-pass database and mix freely with `-p`/`-pi`:
+
+```bash
+hprscript -F 'foo[0].bar()' -p '\bTODO\b' -glob '**/*.ts'
+```
+
+`-patterns-from <file>` loads a pattern pack from a JSONL rule file — one JSON
+object per line; blank lines and `#` comments are ignored:
+
+```jsonl
+# ioc-pack.jsonl — literal entries are never regex-interpreted
+{"id": "bad_ip",   "literal": "192.0.2.10", "word_boundary": true}
+{"id": "bad_host", "literal": "evil.example.com", "case_insensitive": true}
+{"id": "eval",     "regexp": "\\beval\\s*\\("}
+```
+
+```bash
+hprscript -patterns-from ioc-pack.jsonl -C 1 -glob '**/*.log'
+```
+
+Each entry takes exactly one of `regexp` or `literal`, plus optional `id`
+(same rules as `-name`), `case_insensitive`, `word_boundary`, and `utf8`
+(the latter two default to the global `-w` / `-no-utf8` flags). Unknown
+fields are rejected with the file and line number. `-patterns-from` is
+repeatable, appends to any `-p`/`-F` patterns, and cannot be combined with
+`-s`/`-script` (scripts declare their own patterns).
+
+This replaces the fragile "build one giant alternation in shell" pattern for
+IOC lists: no regex-escaping bugs, no argv-length limits, and every hit is
+attributed to the entry (`pat`) that produced it.
 
 ---
 
@@ -282,8 +437,13 @@ A script is a JSON object that describes a multi-pattern scan plus the actions t
 | `rank_rich_clusters` | `bool` | Opt-in: scale the proximity bonus by the number of distinct pattern IDs in each cluster. Default `false`. See [Match ranking](#match-ranking-rank). |
 | `on_file_end` | `action[]` | Actions to run after every file is fully scanned. |
 | `on_complete` | `action[]` | Actions to run after all files (and all phases) are processed. |
+| `summary` | `bool` | Emit a trailing `{"type":"summary",...}` record (same as the `-summary` flag). Default `false`. |
+| `diagnostics` | `bool` | Structured `{"type":"warning",...}` records instead of stderr text for read errors / binary skips / missing list paths. Default `false`. |
+| `require_complete` | `bool` | Exit 2 when any file couldn't be read or a listed path was missing. Default `false`. |
 
 Hidden files and directories (leading `.`) are skipped **during recursive traversal** — but a scan item or glob that explicitly names a hidden path is honored: `.github/workflows/*.yml` scans the workflows, `.env` as a literal path is read, and `**` descends normally *below* an explicitly named hidden base. The skip applies to hidden entries *discovered* while recursing, never to paths you asked for. Files containing a NUL byte in their first 512 bytes are treated as binary and skipped.
+
+Traversal order is **deterministic**: each directory's entries are visited in sorted (lexicographic) order, depth-first, so identical inputs produce identically ordered output on every filesystem and every run. File-list inputs (`-files-from`) keep the producer's order.
 
 ### Pattern object
 
@@ -1572,6 +1732,79 @@ In script mode:
 ]}
 ```
 
+### Scope relations (`-same-scope` / `-not-same-scope`)
+
+Line distance is a proxy; structural containment is often what you mean.
+`-same-scope A:B` keeps `A`'s matches only when a `B`-match lies inside the
+**same innermost enclosing scope**; `-not-same-scope A:B` keeps them only when
+none does. Both require an active `-scope` (built-in pack or custom anchor):
+
+```bash
+# Locks with no unlock in the same function — the classic leak sweep.
+hprscript -p '\block\(\)' -name lk -p '\bunlock\(\)' -name ul \
+          -not-same-scope lk:ul -scope c -glob '**/*.c'
+
+# eval() calls in the same function as request input
+hprscript -p '\beval\(' -name ev -p '\$_(GET|POST|REQUEST)' -name in \
+          -same-scope ev:in -scope-pattern 'function\s+(\w+)' \
+          -scope-open '{' -scope-close '}' -glob '**/*.php'
+```
+
+Details: scope relations AND with any `-near`/`-far` relations; when
+`A == B`, "same scope" requires a *second* occurrence; `A`-matches outside
+any recognized scope (or in files the scope pack doesn't map) are dropped by
+`-same-scope` and kept by `-not-same-scope`. B-side matches are not filtered —
+restrict output to the A side by `pat` if needed. CLI-only in v1 (script mode
+can express the same via `$ENCLOSING_*` and variables).
+
+---
+
+## Per-file conditions (`-file-where`)
+
+`-file-where <expr>` gates a file's **entire output** on a boolean predicate
+over which patterns matched in it. Operators: `AND`/`OR`/`NOT`
+(case-insensitive) or `&&`/`||`/`!`, plus parentheses; operands are pattern
+ids (names, `p0`/`p1`, or numeric indices):
+
+```bash
+# Files with unrecovered errors — no script, no variables
+hprscript -p 'ERROR|FATAL' -name err -pi 'recovered|retried' -name rec \
+          -file-where 'err AND NOT rec' -f -glob '**/*.log'
+
+# Mixed migration state: old API present, new API missing
+hprscript -p '\boldClient\.' -name old -p '\bnewClient\.' -name new \
+          -file-where 'old && !new' -c -glob '**/*.go'
+```
+
+The predicate is evaluated once per file after relations are applied; files
+that fail it emit nothing (in any output mode) and don't count toward
+`-limit`. `-file-where` composes with `-f`/`-c`/default/`-llm`/`-sample`, but
+not with `-absent` — express absence inside the predicate instead
+(`-file-where 'NOT x' -f` is exactly `grep -L`). This replaces the
+script-mode "has A but not B" variable boilerplate for the common cases.
+
+---
+
+## Record-level absence (`-records line`)
+
+`-absent` answers "which **files** lack the pattern". `-records line` refines
+it to "which **records** (lines) lack it" — the JSONL/CSV/log-line question
+`-absent` alone can't answer:
+
+```bash
+# Every JSONL record missing a required field — file, line, and the record
+hprscript -p '"user_id"' -absent -records line -glob '**/*.jsonl'
+# → {"file":"data.jsonl","pat":"p0","line":2,"record":"{\"other\": 2}"}
+```
+
+Semantics: one JSON record per non-empty line lacking each pattern (blank
+lines are skipped; a line "contains" a pattern when a match **starts** on
+it). `record` is truncated to `-max-context-bytes` (flagged
+`record_truncated`). Multiple patterns are checked independently — name them
+to tell the misses apart. `-limit` and `-max-output-bytes` apply. v1
+requires `-absent`, supports `line` records only, and cannot combine with
+relations.
+
 ---
 
 ## Sample mode
@@ -1628,6 +1861,43 @@ In script mode, the same names are top-level fields:
 
 ```json
 {"max_match_bytes": 200, "max_context_bytes": 500, "max_output_bytes": 200000}
+```
+
+---
+
+## Scan accounting (`-summary` / `-diagnostics` / `-require-complete`)
+
+Three opt-in switches (CLI flags in both modes; also script booleans
+`summary` / `diagnostics` / `require_complete`) that turn silent gaps into
+explicit signals:
+
+**`-summary`** appends one typed record after all output:
+
+```json
+{"type":"summary","files_scanned":840,"files_skipped_binary":3,
+ "files_failed":1,"missing_paths":0,"matches":131,"emitted":50,
+ "complete":false,"stop_reason":"limit","elapsed_ms":210}
+```
+
+- `files_scanned` — files whose content was actually scanned; `files_skipped_binary` — NUL-detected skips; `files_failed` — open/read failures; `missing_paths` — nonexistent `-files-from` entries.
+- `matches` — matches surviving dedup and relations; `emitted` — output records actually written (differs under `-limit`, `-m`, `-f`, grouping…).
+- `complete` — `true` iff nothing failed, nothing was missing, and no early stop occurred. `stop_reason` (only when stopped early): `"limit"` or `"output_budget"`. An explicit `-limit` therefore reports `complete:false` — informative, not an error.
+- In multi-phase scripts, counters accumulate across phases (a file scanned by two phases counts twice).
+
+The summary is the only record carrying a `type` field, so it never collides with match records.
+
+**`-diagnostics`** re-routes the per-file warnings as structured records on **stdout** (instead of stderr text), so agents parse a single stream:
+
+```json
+{"type":"warning","code":"read_error","file":"secrets/locked.env"}
+{"type":"warning","code":"binary_skip","file":"assets/logo.png"}
+{"type":"warning","code":"missing_path","file":"deleted-in-diff.go"}
+```
+
+**`-require-complete`** makes partial results a hard failure: exit 2 (with a stderr message) when `files_failed > 0` or `missing_paths > 0`. Explicit caps (`-limit`, `-max-output-bytes`) and by-design binary skips do **not** trip it — it guards against the scans you *didn't know* were partial. Typical belt-and-braces sweep:
+
+```bash
+hprscript -p 'BEGIN.*PRIVATE KEY' -summary -diagnostics -require-complete -glob '**/*'
 ```
 
 ---

@@ -23,6 +23,17 @@
 int main(int argc, char **argv) {
     hpr::Cli cli = hpr::parse_cli(argc, argv);
 
+    if (!cli.error && !cli.patterns_from.empty()) {
+        if (!cli.script_inline.empty() || !cli.script_path.empty()) {
+            cli.error = true;
+            cli.error_message = "-patterns-from cannot be combined with "
+                                "-s/-script (use the script's patterns array)";
+        } else {
+            hpr::load_patterns_from(cli);
+        }
+    }
+    if (!cli.error) hpr::validate_pattern_ids(cli);
+
     if (cli.error) {
         std::fprintf(stderr, "hprscript: %s\n", cli.error_message.c_str());
         std::fprintf(stderr, "  run 'hprscript --help' for usage\n");

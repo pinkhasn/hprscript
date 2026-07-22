@@ -1,7 +1,11 @@
 #include "cli.hpp"
 
+#include "json.hpp"
+
+#include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 
 namespace hpr {
 
@@ -18,6 +22,28 @@ const char *take(int &i, int argc, char **argv, const char *flag, Cli &cli) {
         return nullptr;
     }
     return argv[++i];
+}
+
+// Regex-escape a fixed string so it can join the normal compile path (-F).
+// Only ASCII metacharacters are escaped — UTF-8 bytes pass through intact.
+std::string escape_literal(const char *s) {
+    static const char specials[] = "\\^$.[]|()?*+{}";
+    std::string out;
+    out.reserve(std::strlen(s) + 8);
+    for (; *s; ++s) {
+        if (std::strchr(specials, *s)) out += '\\';
+        out += *s;
+    }
+    return out;
+}
+
+// A pattern name must look like an identifier so `$PAT_ID`, `[name]` tags
+// and the A:B relation syntax stay unambiguous.
+bool valid_pattern_name(const char *s) {
+    if (!*s || (!std::isalpha((unsigned char)*s) && *s != '_')) return false;
+    for (; *s; ++s)
+        if (!std::isalnum((unsigned char)*s) && *s != '_') return false;
+    return true;
 }
 
 bool set_output_mode(Cli &cli, OutputMode mode) {
@@ -46,9 +72,25 @@ void print_help(FILE *out) {
 "Search flags (with -p):\n"
 "  -p <pattern>     Search pattern (PCRE; repeatable for multi-pattern)\n"
 "  -pi <pattern>    Case-insensitive search pattern (repeatable)\n"
+"  -F <string>      Fixed-string pattern — no regex interpretation (repeatable)\n"
+"  -Fi <string>     Case-insensitive fixed-string pattern\n"
+"  -name <id>       Name the preceding pattern (shown as pat/$PAT_ID, usable\n"
+"                   as the A/B side of relations and in -file-where)\n"
+"  -patterns-from <f>  Load patterns from a JSONL rule file: one object per\n"
+"                   line {id, regexp|literal, case_insensitive, word_boundary,\n"
+"                   utf8}; '#' comment lines allowed (repeatable)\n"
 "  -extract n1,n2,…  Re-extract capture groups from the preceding -p/-pi\n"
 "  -glob <glob>     Scan glob (e.g. \"**/*.go\"; repeatable)\n"
 "  -exclude <pat>   Exclude rule: glob, bare dir name, or path prefix (repeatable)\n"
+"  -files-from <f>  Scan the literal paths listed in f, one per line ('-' = stdin)\n"
+"  -files0-from <f> Same, NUL-separated — safe for any filename (find -print0,\n"
+"                   git diff --name-only -z). No glob interpretation. Repeatable.\n"
+"  -git-changed     Scan files changed vs HEAD (staged + unstaged)\n"
+"  -git-staged      Scan files staged for commit (diff --cached)\n"
+"  -git-untracked   Scan untracked files (ls-files -o --exclude-standard)\n"
+"  -git-range <r>   Scan files changed in a diff range (e.g. main...HEAD)\n"
+"  -git-added-lines Restrict matches to lines ADDED by the selected diffs\n"
+"                   (needs -git-changed/-staged/-range; -p mode only)\n"
 "  -w               Whole-word match (\\b…\\b)\n"
 "  -no-utf8         Disable UTF-8 mode (byte-level matching)\n"
 "  -ucp             Enable Unicode \\w/\\d/\\s (may reject some patterns)\n"
@@ -67,6 +109,8 @@ void print_help(FILE *out) {
 "                   ($BLOCK / $BLOCK_FULL / $BLOCK_START / $BLOCK_END\n"
 "                   / $BLOCK_LINE_START / $BLOCK_LINE_END when block-extracting)\n"
 "  -absent          Files where pattern is NOT found (like grep -L)\n"
+"  -records line    With -absent: one JSON record per non-empty line lacking\n"
+"                   each pattern (record-level absence, e.g. JSONL fields)\n"
 "  -llm             Token-efficient text for LLM consumption (auto-detects\n"
 "                   block/scope; dedupes file paths; prints a 'limit reached'\n"
 "                   footer when -limit or -max-output-bytes truncates output)\n"
@@ -84,9 +128,17 @@ void print_help(FILE *out) {
 "Sample mode:\n"
 "  -sample <n>      Buffer & return n diverse matches (file/shape-stratified)\n"
 "\n"
-"Pattern relations (filter matches by proximity, repeatable):\n"
+"Pattern relations (filter matches by proximity/containment, repeatable):\n"
 "  -near A:B:K      Emit pattern A's matches with a B-match within K lines\n"
 "  -far  A:B:K      Emit A's matches with NO B-match within K lines (K=0=same)\n"
+"  -same-scope A:B      Emit A's matches with a B-match inside the same\n"
+"                       enclosing scope (requires -scope)\n"
+"  -not-same-scope A:B  Emit A's matches with NO B-match in the same scope\n"
+"\n"
+"Per-file filter:\n"
+"  -file-where <expr>   Emit a file's matches only when the predicate over\n"
+"                       matched patterns holds: 'err AND NOT recovery',\n"
+"                       AND/OR/NOT or &&/||/!, parentheses, ids or p0/p1…\n"
 "\n"
 "Enclosing-scope annotation (with -p):\n"
 "  -scope <lang|auto>       Built-in pack (auto, go, rust, c, cpp, java, js, ts)\n"
@@ -98,6 +150,14 @@ void print_help(FILE *out) {
 "Script mode:\n"
 "  -s <json>        Inline script\n"
 "  -script <path>   Script file\n"
+"\n"
+"Scan accounting (work in -p and script mode):\n"
+"  -summary            Emit a trailing {\"type\":\"summary\",...} record with\n"
+"                      files scanned/skipped/failed, matches, completeness\n"
+"  -diagnostics        Emit {\"type\":\"warning\",...} records on stdout for\n"
+"                      read errors, binary skips, missing list paths\n"
+"  -require-complete   Exit 2 when any file couldn't be read or a listed\n"
+"                      path was missing (partial results become failures)\n"
 "\n"
 "Misc:\n"
 "  --version        Show version\n"
@@ -121,6 +181,23 @@ Cli parse_cli(int argc, char **argv) {
             const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
             CliPattern p; p.regexp = v; p.case_insensitive = true;
             cli.patterns.push_back(std::move(p));
+            continue;
+        }
+        if (eq(a, "-F")) {
+            const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
+            CliPattern p; p.regexp = escape_literal(v);
+            cli.patterns.push_back(std::move(p));
+            continue;
+        }
+        if (eq(a, "-Fi")) {
+            const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
+            CliPattern p; p.regexp = escape_literal(v); p.case_insensitive = true;
+            cli.patterns.push_back(std::move(p));
+            continue;
+        }
+        if (eq(a, "-patterns-from") || eq(a, "--patterns-from")) {
+            const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
+            cli.patterns_from.emplace_back(v);
             continue;
         }
         if (eq(a, "-extract")) {
@@ -160,6 +237,27 @@ Cli parse_cli(int argc, char **argv) {
             last.extract_names.push_back(std::move(cur));
             continue;
         }
+        if (eq(a, "-name")) {
+            const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
+            if (cli.patterns.empty()) {
+                cli.error = true;
+                cli.error_message = "-name must follow a -p/-pi/-F/-Fi";
+                return cli;
+            }
+            if (!cli.patterns.back().name.empty()) {
+                cli.error = true;
+                cli.error_message = "-name repeated for the same pattern";
+                return cli;
+            }
+            if (!valid_pattern_name(v)) {
+                cli.error = true;
+                cli.error_message = std::string("-name: invalid pattern name '")
+                                    + v + "' (use [A-Za-z_][A-Za-z0-9_]*)";
+                return cli;
+            }
+            cli.patterns.back().name = v;
+            continue;
+        }
         if (eq(a, "-glob")) {
             const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
             cli.globs.emplace_back(v);
@@ -168,6 +266,47 @@ Cli parse_cli(int argc, char **argv) {
         if (eq(a, "-exclude")) {
             const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
             cli.excludes.emplace_back(v);
+            continue;
+        }
+        if (eq(a, "-files-from") || eq(a, "--files-from")) {
+            const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
+            cli.file_lists.push_back({v, false});
+            continue;
+        }
+        if (eq(a, "-files0-from") || eq(a, "--files0-from")) {
+            const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
+            cli.file_lists.push_back({v, true});
+            continue;
+        }
+        if (eq(a, "-git-changed") || eq(a, "--git-changed")) {
+            cli.git_changed = true;
+            continue;
+        }
+        if (eq(a, "-git-staged") || eq(a, "--git-staged")) {
+            cli.git_staged = true;
+            continue;
+        }
+        if (eq(a, "-git-untracked") || eq(a, "--git-untracked")) {
+            cli.git_untracked = true;
+            continue;
+        }
+        if (eq(a, "-git-range") || eq(a, "--git-range")) {
+            const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
+            cli.git_ranges.emplace_back(v);
+            continue;
+        }
+        if (eq(a, "-git-added-lines") || eq(a, "--git-added-lines")) {
+            cli.git_added_lines = true;
+            continue;
+        }
+        if (eq(a, "-file-where") || eq(a, "--file-where")) {
+            const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
+            if (!cli.file_where.empty()) {
+                cli.error = true;
+                cli.error_message = "-file-where given twice";
+                return cli;
+            }
+            cli.file_where = v;
             continue;
         }
         if (eq(a, "-w")) { cli.word_boundary = true; continue; }
@@ -308,6 +447,54 @@ Cli parse_cli(int argc, char **argv) {
             continue;
         }
 
+        if (eq(a, "-same-scope") || eq(a, "-not-same-scope")) {
+            const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
+            // Parse A:B (no distance — containment, not proximity).
+            const char *colon = std::strchr(v, ':');
+            if (!colon || std::strchr(colon + 1, ':')) {
+                cli.error = true;
+                cli.error_message = std::string(a) + ": expected A:B";
+                return cli;
+            }
+            Cli::Relation r;
+            r.kind = eq(a, "-same-scope") ? Cli::RelationKind::SameScope
+                                          : Cli::RelationKind::NotSameScope;
+            r.a.assign(v, colon - v);
+            r.b.assign(colon + 1);
+            if (r.a.empty() || r.b.empty()) {
+                cli.error = true;
+                cli.error_message = std::string(a) + ": invalid A:B";
+                return cli;
+            }
+            cli.relations.push_back(std::move(r));
+            continue;
+        }
+
+        if (eq(a, "-summary") || eq(a, "--summary")) {
+            cli.summary = true;
+            continue;
+        }
+        if (eq(a, "-diagnostics") || eq(a, "--diagnostics")) {
+            cli.diagnostics = true;
+            continue;
+        }
+        if (eq(a, "-require-complete") || eq(a, "--require-complete")) {
+            cli.require_complete = true;
+            continue;
+        }
+        if (eq(a, "-records")) {
+            const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
+            if (eq(v, "line") || eq(v, "lines")) {
+                cli.records = Cli::RecordMode::Line;
+            } else {
+                cli.error = true;
+                cli.error_message = std::string("-records: unsupported mode '")
+                                    + v + "' (supported: line)";
+                return cli;
+            }
+            continue;
+        }
+
         if (eq(a, "-s")) {
             const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
             cli.script_inline = v;
@@ -340,7 +527,114 @@ Cli parse_cli(int argc, char **argv) {
         cli.error = true;
         cli.error_message = "-p/-pi cannot be combined with -s or -script";
     }
+    if (cli.git_added_lines && !cli.git_changed && !cli.git_staged &&
+        cli.git_ranges.empty()) {
+        cli.error = true;
+        cli.error_message = "-git-added-lines requires -git-changed, "
+                            "-git-staged, or -git-range";
+        return cli;
+    }
+    int stdin_lists = 0;
+    for (const auto &fl : cli.file_lists) if (fl.path == "-") ++stdin_lists;
+    if (stdin_lists > 1) {
+        cli.error = true;
+        cli.error_message =
+            "only one -files-from/-files0-from may read from stdin";
+    }
     return cli;
+}
+
+bool load_patterns_from(Cli &cli) {
+    for (const auto &path : cli.patterns_from) {
+        std::ifstream in(path);
+        if (!in) {
+            cli.error = true;
+            cli.error_message = "cannot read patterns file: " + path;
+            return false;
+        }
+        std::string line;
+        size_t lineno = 0;
+        auto fail = [&](const std::string &msg) {
+            cli.error = true;
+            cli.error_message =
+                path + ":" + std::to_string(lineno) + ": " + msg;
+            return false;
+        };
+        while (std::getline(in, line)) {
+            ++lineno;
+            if (!line.empty() && line.back() == '\r') line.pop_back();
+            size_t ws = line.find_first_not_of(" \t");
+            if (ws == std::string::npos) continue;   // blank line
+            if (line[ws] == '#') continue;           // comment
+            auto pr = json::parse(line);
+            if (!pr.ok) return fail("JSON parse error: " + pr.error);
+            if (!pr.value.is_object())
+                return fail("pattern entry must be a JSON object");
+            for (const auto &kv : pr.value.as_object()) {
+                if (kv.first != "id" && kv.first != "regexp" &&
+                    kv.first != "literal" && kv.first != "case_insensitive" &&
+                    kv.first != "word_boundary" && kv.first != "utf8")
+                    return fail("unknown field '" + kv.first + "'");
+            }
+            const json::Value *re = pr.value.find("regexp");
+            const json::Value *lit = pr.value.find("literal");
+            if ((re && lit) || (!re && !lit))
+                return fail("need exactly one of 'regexp' or 'literal'");
+            CliPattern p;
+            if (re) {
+                if (!re->is_string()) return fail("'regexp' must be a string");
+                p.regexp = re->as_string();
+            } else {
+                if (!lit->is_string()) return fail("'literal' must be a string");
+                p.regexp = escape_literal(lit->as_string().c_str());
+            }
+            if (const json::Value *v = pr.value.find("id")) {
+                if (!v->is_string() ||
+                    !valid_pattern_name(v->as_string().c_str()))
+                    return fail("'id' must be an identifier "
+                                "([A-Za-z_][A-Za-z0-9_]*)");
+                p.name = v->as_string();
+            }
+            if (const json::Value *v = pr.value.find("case_insensitive")) {
+                if (!v->is_bool())
+                    return fail("'case_insensitive' must be a boolean");
+                p.case_insensitive = v->as_bool();
+            }
+            if (const json::Value *v = pr.value.find("word_boundary")) {
+                if (!v->is_bool())
+                    return fail("'word_boundary' must be a boolean");
+                p.word_boundary = v->as_bool() ? 1 : 0;
+            }
+            if (const json::Value *v = pr.value.find("utf8")) {
+                if (!v->is_bool()) return fail("'utf8' must be a boolean");
+                p.utf8 = v->as_bool() ? 1 : 0;
+            }
+            cli.patterns.push_back(std::move(p));
+        }
+    }
+    return true;
+}
+
+// Final pattern ids must be unique — a `-name`d pattern may otherwise
+// collide with another pattern's name or auto `p<i>` id, making relations
+// and `pat` attribution ambiguous. Called after -patterns-from loading.
+bool validate_pattern_ids(Cli &cli) {
+    std::vector<std::string> ids;
+    ids.reserve(cli.patterns.size());
+    for (size_t i = 0; i < cli.patterns.size(); ++i) {
+        const std::string &n = cli.patterns[i].name;
+        ids.push_back(n.empty() ? "p" + std::to_string(i) : n);
+    }
+    for (size_t i = 0; i < ids.size(); ++i) {
+        for (size_t j = i + 1; j < ids.size(); ++j) {
+            if (ids[i] == ids[j]) {
+                cli.error = true;
+                cli.error_message = "duplicate pattern id '" + ids[i] + "'";
+                return false;
+            }
+        }
+    }
+    return true;
 }
 
 } // namespace hpr
