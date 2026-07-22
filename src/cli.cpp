@@ -319,6 +319,13 @@ Cli parse_cli(int argc, char **argv) {
             continue;
         }
 
+        // `--` ends flag parsing; the rest is positional. Documented for
+        // -script usage: `hprscript -script find_funcs.hpr -- src/foo.go`.
+        if (eq(a, "--")) {
+            for (++i; i < argc; ++i) cli.positional.emplace_back(argv[i]);
+            break;
+        }
+
         // Unknown flag (starts with '-' but isn't bare '-' for stdin).
         if (a[0] == '-' && a[1] != '\0') {
             cli.error = true;

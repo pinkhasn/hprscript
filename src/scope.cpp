@@ -14,13 +14,16 @@ namespace {
 // Built-in language packs. Anchor regexes are intentionally simple: anything
 // fancy goes through the user's `-scope-pattern`. Each pack's first capture
 // group is the scope name.
-const ScopeConfig PACK_GO    = { "func\\s+(?:\\([^)]*\\)\\s+)?(\\w+)\\s*\\(",        "{", "}", "func"   };
-const ScopeConfig PACK_RUST  = { "fn\\s+(\\w+)",                                       "{", "}", "fn"     };
-const ScopeConfig PACK_C     = { "\\b([a-zA-Z_]\\w*)\\s*\\([^;{}]*\\)\\s*\\{",          "{", "}", "func"   };
-const ScopeConfig PACK_CPP   = { "\\b([a-zA-Z_]\\w*)\\s*\\([^;{}]*\\)\\s*(?:const|noexcept|override|final|[\\s])*\\{", "{", "}", "func" };
-const ScopeConfig PACK_JAVA  = { "\\b([a-zA-Z_]\\w*)\\s*\\([^;{}]*\\)\\s*(?:throws[^{]*)?\\{", "{", "}", "method" };
-const ScopeConfig PACK_JS    = { "(?:function\\s+(\\w+)|class\\s+(\\w+))",             "{", "}", "func"   };
-const ScopeConfig PACK_TS    = { "(?:function\\s+(\\w+)|class\\s+(\\w+)|method\\s+(\\w+))", "{", "}", "func" };
+const ScopeConfig PACK_GO    = { "func\\s+(?:\\([^)]*\\)\\s+)?(\\w+)\\s*\\(",        "{", "}", "func",  {} };
+const ScopeConfig PACK_RUST  = { "fn\\s+(\\w+)",                                       "{", "}", "fn",    {} };
+const ScopeConfig PACK_C     = { "\\b([a-zA-Z_]\\w*)\\s*\\([^;{}]*\\)\\s*\\{",          "{", "}", "func",
+                                 {"if", "for", "while", "switch", "return", "sizeof"} };
+const ScopeConfig PACK_CPP   = { "\\b([a-zA-Z_]\\w*)\\s*\\([^;{}]*\\)\\s*(?:const|noexcept|override|final|[\\s])*\\{", "{", "}", "func",
+                                 {"if", "for", "while", "switch", "return", "sizeof", "catch"} };
+const ScopeConfig PACK_JAVA  = { "\\b([a-zA-Z_]\\w*)\\s*\\([^;{}]*\\)\\s*(?:throws[^{]*)?\\{", "{", "}", "method",
+                                 {"if", "for", "while", "switch", "return", "catch", "synchronized"} };
+const ScopeConfig PACK_JS    = { "(?:function\\s+(\\w+)|class\\s+(\\w+))",             "{", "}", "func",  {} };
+const ScopeConfig PACK_TS    = { "(?:function\\s+(\\w+)|class\\s+(\\w+)|method\\s+(\\w+))", "{", "}", "func", {} };
 
 bool ends_with(const std::string &s, const std::string &suffix) {
     return s.size() >= suffix.size() &&
@@ -138,9 +141,13 @@ bool ScopeIndex::build(std::string_view buf, const ScopeConfig &cfg,
                 }
             }
         }
-        // Find the body block following the match.
+        if (std::find(cfg.skip_names.begin(), cfg.skip_names.end(), name) !=
+            cfg.skip_names.end())
+            continue;
+        // Find the body block from the match start — the C/C++/Java anchors
+        // end in `\{`, so the body's opener is part of the match itself.
         uint64_t op = 0, cp = 0;
-        if (!find_balanced_block(buf, mm.to, cfg.open, cfg.close, op, cp))
+        if (!find_balanced_block(buf, mm.from, cfg.open, cfg.close, op, cp))
             continue;
         ScopeRange r;
         r.start_off = mm.from;

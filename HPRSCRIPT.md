@@ -81,7 +81,7 @@ Positional file/dir args after `-s`/`-script` (or after a positional script file
 |---|---|
 | `-p <pattern>` | Case-sensitive search pattern (repeatable for multi-pattern, all match in one pass) |
 | `-pi <pattern>` | Case-insensitive search pattern (HS `CASELESS`; folds Unicode by default; repeatable, mixable with `-p`) |
-| `-glob <glob>` | Scan glob (e.g. `"**/*.go"`; repeatable). Absolute bases work too (`"/var/log/**/*.log"`). |
+| `-glob <glob>` | Scan glob (e.g. `"**/*.go"`; repeatable). Brace alternation is supported (`"src/**/*.{ts,tsx}"`), and absolute bases work too (`"/var/log/**/*.log"`). |
 | `-exclude <pat>` | Exclude rule (repeatable). Three forms: glob (`"*.log"`), bare directory name (`"vendor"` skips any `vendor/` dir), path prefix with `/` (`"src/generated/"`). |
 | `-w` | Whole-word matching (wraps the pattern as `\b(?:expr)\b`) |
 | `-no-utf8` | Disable UTF-8 mode (byte-level matching — see [UTF-8 / Unicode](#utf-8--unicode-support)) |
@@ -133,6 +133,7 @@ Positional file/dir args after `-s`/`-script` (or after a positional script file
 | `$BLOCK_FULL` | Match start through block end (signature + body) |
 | `$BLOCK_START` / `$BLOCK_END` | Byte offsets of block start / end (exclusive) |
 | `$BLOCK_LINE_START` / `$BLOCK_LINE_END` | Line numbers of block start / end |
+| `$BLOCK_LINE_COUNT` / `$BLOCK_BYTE_COUNT` | Block size in lines / bytes (`0` when no block was found) |
 | `$ENCLOSING_NAME` | Innermost enclosing scope's name (when `-scope` active) |
 | `$ENCLOSING_KIND` | Scope kind label (`func` by default; pack-specific) |
 | `$ENCLOSING_LINE_START` / `$ENCLOSING_LINE_END` | Line bounds of the enclosing scope |
@@ -225,7 +226,7 @@ The inline `(?i)` form is handy when you want to scope case-insensitivity to par
 
 ## Block extraction (CLI)
 
-`-block-open` and `-block-close` pair every match with the **balanced delimiter block** that follows it. The scanner walks forward from match-end, finds the first opening delimiter, then tracks nesting until depth returns to zero. This is how you grep for a function signature and pull back the function body in one go.
+`-block-open` and `-block-close` pair every match with its **balanced delimiter block**. The scanner searches forward from **match-start**, finds the first opening delimiter — one contained in the match itself counts, so anchors like `^@article\{` or a PEM `-----BEGIN` header pair with their own block — then tracks nesting until depth returns to zero. This is how you grep for a function signature and pull back the function body in one go.
 
 ```bash
 # Print full function bodies (signature + braces) for every Go func.
@@ -264,7 +265,7 @@ A script is a JSON object that describes a multi-pattern scan plus the actions t
 
 | Field | Type | Description |
 |---|---|---|
-| `scan` | `string[]` | Glob patterns for files to scan (e.g. `["**/*.py", "src/*.js"]`). Supports `**` for recursive traversal. Patterns may be relative or absolute (`"/var/log/**/*.log"`). |
+| `scan` | `string[]` | Glob patterns for files to scan (e.g. `["**/*.py", "src/*.js"]`). Supports `**` for recursive traversal and `{a,b}` alternation (`"**/*.{yml,yaml}"`). Patterns may be relative or absolute (`"/var/log/**/*.log"`). |
 | `exclude` | `string[]` | Exclude rules: glob, bare directory name, or path prefix (same semantics as the `-exclude` flag). |
 | `patterns` | `object[]` | Pattern definitions (see below). Required unless `phases` is used. |
 | `phases` | `object[]` | Sequential scan rounds. See [Phases](#phases). When set, `patterns` at the top level is rejected. |
@@ -282,7 +283,7 @@ A script is a JSON object that describes a multi-pattern scan plus the actions t
 | `on_file_end` | `action[]` | Actions to run after every file is fully scanned. |
 | `on_complete` | `action[]` | Actions to run after all files (and all phases) are processed. |
 
-Hidden directories (starting with `.`) are skipped. Files containing a NUL byte in their first 512 bytes are treated as binary and skipped.
+Hidden files and directories (leading `.`) are skipped **during recursive traversal** — but a scan item or glob that explicitly names a hidden path is honored: `.github/workflows/*.yml` scans the workflows, `.env` as a literal path is read, and `**` descends normally *below* an explicitly named hidden base. The skip applies to hidden entries *discovered* while recursing, never to paths you asked for. Files containing a NUL byte in their first 512 bytes are treated as binary and skipped.
 
 ### Pattern object
 
@@ -315,7 +316,7 @@ Available inside `$`-substitution (every string in `data` / `value` / `key` / fo
 | `$CONTEXT` | Match line plus configured `context_before`/`context_after` lines |
 | `$CONTEXT_BEFORE` | Lines before the match line (only when `context_before > 0`) |
 | `$CONTEXT_AFTER` | Lines after the match line (only when `context_after > 0`) |
-| `$BLOCK`, `$BLOCK_FULL`, `$BLOCK_START`, `$BLOCK_END`, `$BLOCK_LINE_START`, `$BLOCK_LINE_END` | Available inside an `on_block` (see [Block action](#block-action-cross-line-extraction)) |
+| `$BLOCK`, `$BLOCK_FULL`, `$BLOCK_START`, `$BLOCK_END`, `$BLOCK_LINE_START`, `$BLOCK_LINE_END`, `$BLOCK_LINE_COUNT`, `$BLOCK_BYTE_COUNT` | Available inside an `on_block` (see [Block action](#block-action-cross-line-extraction)) |
 | `$LOOKUP_KEY`, `$LOOKUP_VALUE` | Available inside a `lookup`'s `on_hit` / `on_miss` |
 | `$<varname>` | Any user-declared variable. When the entire string is `"$x"` the variable's native type is preserved; when embedded in a larger string it's stringified. |
 
@@ -399,13 +400,21 @@ Declare variables in the top-level `variables` object. They persist across match
 |---|---|
 | `map_set` | `target[key] = value` (key supports `$`-substitution). |
 | `map_increment` | `target[key] += 1` (creates the key with `1` if missing). |
+| `map_append` | Append `value` to the list at `target[key]` (creates the list if missing; promotes an existing scalar to a one-element list). |
+| `map_unique_append` | Like `map_append`, but skips values already present — accumulates a *set* per key. |
 | `count` | Shorthand for `map_increment` with `key = $PAT_ID`. |
 
 ```json
 {"action": "map_set", "target": "lines", "key": "$FILE", "value": "$LINE"}
 {"action": "map_increment", "target": "counts", "key": "$FILE"}
+{"action": "map_unique_append", "target": "files_by_sym", "key": "$EXTRACT_NAME", "value": "$FILE"}
 {"action": "count", "var": "by_pat"}
 ```
+
+`map_set` is last-write-wins — one value per key. When a key can legitimately
+map to *several* values (a trace-id seen in many services, a symbol used in
+many files), use `map_append`/`map_unique_append`; iterating with `for_each`
+then binds the whole list, which emits as a JSON array.
 
 #### Set algebra
 
@@ -546,12 +555,13 @@ Inside `on_block`, all match variables remain available and `$BLOCK*` are popula
 | `$BLOCK_FULL` | From match start to block end (signature + body) |
 | `$BLOCK_START` / `$BLOCK_END` | Byte offsets |
 | `$BLOCK_LINE_START` / `$BLOCK_LINE_END` | Line numbers |
+| `$BLOCK_LINE_COUNT` / `$BLOCK_BYTE_COUNT` | Block size in lines / bytes — handy for "functions longer than N lines" filters |
 
 If no balanced close is found, `on_block` is silently skipped (the match is still emitted by any sibling actions).
 
 #### How depth tracking works
 
-The walker starts at **match-end** (the byte right after `$MATCH`), scans forward looking for the first `open` delimiter, then counts:
+The walker starts at **match-start**, scans forward looking for the first `open` delimiter — which may sit inside the match itself, so `^@article\{` anchors its own `{` and a `-----BEGIN …-----` header anchors its own `-----BEGIN` — then counts:
 
 ```
 depth = 1                # we just saw the opening delimiter
@@ -792,7 +802,7 @@ With both flags off the formula reduces exactly to the default above.
 
 ### Skip + limit (pagination)
 
-`skip: N` skips the first N matched emit calls (still counted toward `limit`). `limit: M` caps total emitted records and stops scanning once reached. Combine for paging: `"skip": 20, "limit": 20` returns records 21–40.
+`skip: N` discards the first N matched emit calls before any output; skipped records do **not** count toward `limit`. `limit: M` then caps the records actually emitted and stops scanning once reached. Combine for paging: `"skip": 20, "limit": 20` returns records 21–40.
 
 ### Phases
 
@@ -957,7 +967,7 @@ hprscript -p '\xff\xd8\xff' -no-utf8 *.bin
 
 ### Invalid UTF-8 input
 
-When UTF-8 mode is on and the input contains invalid UTF-8 sequences, Hyperscan stops matching at that point and returns `HS_INVALID`. `hprscript` treats this as "scan finished early" — any matches before the bad byte are still emitted, no error is raised, and the next file is scanned. So a sprinkling of invalid bytes won't kill your search:
+Hyperscan makes no promise about UTF-8-mode patterns scanned over invalid UTF-8: the engine may keep matching straight past the bad bytes (the common case for ASCII patterns), or stop early and return `HS_INVALID`. `hprscript` treats either outcome as a completed scan — whatever matches were reported are emitted, no error is raised, and the next file is scanned:
 
 ```bash
 # Latin-1 bytes followed by ASCII — "hello" still gets found
@@ -965,7 +975,7 @@ printf '\xe9\xe0\xea hello\n' | hprscript -p 'hello' -o
 # → hello
 ```
 
-If your data is reliably non-UTF-8, prefer `-no-utf8` to skip the validation entirely.
+The honest caveat: on a file containing invalid UTF-8, results from UTF-8-mode patterns are **best-effort, not guaranteed complete** — and no diagnostic is emitted. If your data is (or might be) non-UTF-8 — legacy encodings, binary logs, mixed sources — use `-no-utf8` (or per-pattern `"utf8": false`), which has exact semantics: byte-level matching, every byte scanned.
 
 ### Per-pattern UTF-8 / UCP in script mode
 
@@ -1495,7 +1505,7 @@ hprscript -p TODO -scope auto '**/*.{go,rs,c,cpp,h,java,js,ts}'
 hprscript -p TODO -scope go '**/*.go'
 ```
 
-Supported packs: `go`, `rust`, `c`, `cpp` (`c++`/`cc`), `java`, `js`, `ts`.
+Supported packs: `go`, `rust`, `c`, `cpp` (`c++`/`cc`), `java`, `js`, `ts`. Any other value is rejected with an error (exit 2) rather than silently disabling scope annotation. The C-family packs ignore control-flow statements (`if (…) {`, `for (…) {`, `catch (…) {`, …) that would otherwise look like function signatures to the anchor regex.
 
 **Custom anchors** — for languages or scope shapes the packs don't cover.
 The anchor regex's first capture group becomes the scope name:
@@ -1626,11 +1636,11 @@ In script mode, the same names are top-level fields:
 
 `-llm` emits a compact, plain-text format intended for direct consumption by language models — no JSON parsing, no per-match metadata noise, just file → line → matched text. Far cheaper in tokens than `-j` for the same information.
 
-Layout: one **file header** per file (deduped — never repeated), then each match indented as `  <line>: <text>`. The output adapts to whichever extras are active:
+Layout: one **file header** per file (deduped — never repeated), then each match indented as `  <line>: <text>`. With more than one pattern active, each line carries a `[<pat-id>]` tag so you can tell which pattern fired. The output adapts to whichever extras are active:
 
 | Active flag | Per-match line shape |
 |---|---|
-| (none) | `  <line>: <match line>` |
+| (none) | `  <line>: <match line>` — with ≥2 patterns: `  <line>: [<pat>] <match line>` |
 | `-block-open`/`-block-close` | `  <line_start>-<line_end>` then the full block content on following lines |
 | `-scope <pack>` / `-scope-pattern …` | `  <line>: <match line>  [in <kind> <name>]` |
 | Both block + scope | block form, with a `[in <kind> <name>]` suffix on the header |
@@ -1676,7 +1686,7 @@ hprscript -p 'TODO' -llm -limit 1 -glob '**/*.go'
 
 - **Agent reading matches into context.** `-llm` strips JSON keys and quoting, so the same N matches occupy ~30–50% fewer tokens than `-j`.
 - **Quick human eyeballing.** The grouped layout reads like `grep -n` output rather than JSON Lines — easier to skim.
-- **You don't need byte offsets / pattern IDs / capture groups.** If a downstream tool needs `from`/`to`/`pat`/`extracted`, stick with `-j`.
+- **You don't need byte offsets / capture groups.** Pattern IDs still show up (as `[<pat>]` tags when multiple patterns are active), but if a downstream tool needs `from`/`to` offsets or the `extracted` map, stick with `-j`.
 
 `-llm` is mutually exclusive with the other output modes (`-j`, `-f`, `-c`, `-o`, `-format`, `-absent`).
 
@@ -1716,5 +1726,5 @@ The binary depends only on the platform C library — on Linux verify with `ldd 
 - **`-near A:B:K` and `-far A:B:K` express "X with/without Y nearby" in one call.** Common agent intents (`defer` near `Lock()`, `log.Print` without `// allow-print` on the same line) become single-flag queries.
 - **Use `-sample N` for "show me representative usages"** when an agent doesn't need every match — diversifying by file and surrounding-line shape produces a better picture in fewer tokens than `-limit N`.
 - **Set byte budgets defensively.** A `-max-context-bytes 500 -max-output-bytes 200000` floor protects an agent from a single minified line wiping out its context. Truncation is reported explicitly via per-field `*_truncated` flags and a final `output_truncated` info record — never silent.
-- **Prefer `-llm` over `-j` when piping matches into an LLM.** It strips JSON noise, dedupes file headers, and adapts to `-block-open`/`-scope` automatically — same information, ~30–50% fewer tokens. Switch back to `-j` only when you need offsets, pattern IDs, or `extracted` capture groups.
+- **Prefer `-llm` over `-j` when piping matches into an LLM.** It strips JSON noise, dedupes file headers, tags each line with its pattern id when several patterns are active, and adapts to `-block-open`/`-scope` automatically — same information, ~30–50% fewer tokens. Switch back to `-j` only when you need byte offsets or `extracted` capture groups.
 - **hprscript does not modify files.** It is a read-only search tool — any action that would alter file contents on disk is rejected, as are the `--write`/`--backup` flags.

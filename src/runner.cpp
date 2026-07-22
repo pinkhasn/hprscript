@@ -174,6 +174,17 @@ int run_search(const Cli &cli) {
     // Reused match buffer to avoid reallocating per file.
     std::vector<Match> raw;
 
+    // Unknown pack names used to silently disable scope annotation (the
+    // cookbook shipped a `-scope py` recipe nobody could tell was a no-op).
+    if (!cli.scope_lang.empty() && cli.scope_lang != "auto" &&
+        !builtin_scope_pack(cli.scope_lang)) {
+        std::fprintf(stderr,
+                     "hprscript: unknown -scope pack '%s' (supported: auto, "
+                     "go, rust, c, cpp, java, js, ts)\n",
+                     cli.scope_lang.c_str());
+        return 2;
+    }
+
     // Custom scope-config (used when no built-in pack is selected).
     ScopeConfig user_scope_custom;
     user_scope_custom.anchor_regex = cli.scope_pattern;

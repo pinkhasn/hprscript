@@ -300,14 +300,14 @@ hprscript -s '{
 
 **Why hprscript:** Variables persist within a file and reset at file end (`on_file_end`). The conditional `emit` runs once per file, not per match — exactly the granularity you want for "did this file have errors without recovery?"
 
-### 1.5 Live tail — multi-pattern alarm
+### 1.5 Multi-pattern alarm over a log snapshot
 
-**Problem:** Watch a streaming log for any of N alert patterns simultaneously. Production-incident bread-and-butter: you want one terminal showing all the things-that-might-break, not N separate `tail -F | grep` shells.
+**Problem:** Sweep a recent log window for any of N alert patterns simultaneously — one invocation showing all the things-that-might-break, not N separate `grep` passes.
 
-**Input:** Stdin from `kubectl logs -f`, `tail -F`, journalctl, etc.
+**Input:** Stdin from a bounded log dump (`kubectl logs --tail=…`, `journalctl --since=…`, a rotated file).
 
 ```bash
-kubectl logs -f deploy/api | hprscript \
+kubectl logs deploy/api --tail=20000 | hprscript \
   -p 'panic'      \
   -p 'OOM'        \
   -p 'deadlock'   \
@@ -316,6 +316,8 @@ kubectl logs -f deploy/api | hprscript \
 ```
 
 **Why hprscript:** When no `-glob` is given, hprscript reads stdin — slots straight into pipelines. Adding pattern #5 to the alarm has zero scan cost, and `$PAT_ID` makes it obvious which alarm fired.
+
+**Caveat — no live tail:** hprscript buffers stdin to EOF before scanning, so a follow stream (`kubectl logs -f`, `tail -F`) produces no output until the stream closes. Feed it bounded snapshots (`--tail`, `--since`, log files) and re-run — or loop it: `while :; do kubectl logs deploy/api --since=30s | hprscript …; sleep 30; done`.
 
 ### 1.6 Extract request durations from log lines
 
@@ -835,13 +837,19 @@ hprscript -s '{
   "patterns": [
     {"id":"t","regexp":"trace_id=([0-9a-f]{16,32})",
      "extract": ["tid"],
-     "on_match":[{"action":"map_set","target":"by_trace","key":"$EXTRACT_TID","value":"$FILE"}]}
+     "on_match":[{"action":"map_unique_append","target":"by_trace","key":"$EXTRACT_TID","value":"$FILE"}]}
   ],
   "on_complete":[
     {"action":"for_each","var":"by_trace","key_as":"tid","as":"f","do":[
       {"action":"emit","data":{"trace_id":"$tid","seen_in":"$f"}}]}
   ]
 }'
+```
+
+`map_unique_append` accumulates a deduplicated *list* per key (`map_set` would keep only the last file seen), so `seen_in` comes out as the full JSON array of services:
+
+```json
+{"trace_id":"7f3c2a1b","seen_in":["logs/api.log","logs/worker.log"]}
 ```
 
 ### 6.3 Errors grouped by trace-id
@@ -1550,8 +1558,10 @@ hprscript \
   -p 'subprocess\.\w+\([^)]*shell\s*=\s*True' \
   -p 'os\.system\([^)]*\+'                    \
   -p '\bpopen\s*\('                            \
-  -scope py -glob '**/*.py'
+  -glob '**/*.py'
 ```
+
+(No `-scope` here: the built-in packs cover brace-delimited languages only, and Python's indentation-based scopes have no delimiter to anchor on.)
 
 ---
 
@@ -1604,7 +1614,7 @@ hprscript \
 
 ### 14.4 Functions exceeding N lines
 
-**Problem:** Inventory functions whose body spans more than 100 lines. `block` extracts the body; `$BLOCK_LINE_END - $LINE` gives the size.
+**Problem:** Inventory functions whose body spans more than 100 lines. `block` extracts the body; `$BLOCK_LINE_COUNT` gives its size in lines.
 
 **Input:** Go source.
 
@@ -1614,7 +1624,7 @@ hprscript -s '{
   "patterns": [
     {"id":"fn","regexp":"^func\\s+(?:\\([^)]*\\)\\s+)?\\w+","on_match":[
       {"action":"block","open":"{","close":"}","on_block":[
-        {"action":"if","condition":{"op":"gt","args":[{"op":"sub","args":["$BLOCK_LINE_END","$LINE"]},100]},
+        {"action":"if","condition":{"op":"gt","args":["$BLOCK_LINE_COUNT",100]},
          "then":[{"action":"emit","data":{"file":"$FILE","sig":"$MATCH","start":"$LINE","end":"$BLOCK_LINE_END"}}]}]}]}
   ]
 }'
@@ -2221,9 +2231,21 @@ hprscript -p '^(.{10})(.{20})(.{10})' -extract id,name,amount \
 
 ### 21.1 JSONL records missing a required field
 
-**Problem:** Find JSONL files where some record lacks `"user_id"`. Per-file `-absent` is the right primitive.
+**Problem:** Find the individual JSONL records that lack `"user_id"`. Plain `-absent` can't do this — it fires only when a whole *file* contains no `"user_id"` anywhere. Instead, match every record line and use `submatch` with an absent sub-pattern to flag the lines where the field is missing.
 
 **Input:** `*.jsonl`.
+
+```bash
+hprscript -s '{
+  "scan": ["**/*.jsonl"],
+  "patterns": [{"id":"rec","regexp":"^\\{.*$","on_match":[
+    {"action":"submatch","patterns":[
+      {"id":"m","regexp":"\"user_id\"","absent":true,"on_match":[
+        {"action":"emit","data":{"file":"$FILE","line":"$LINE","missing":"user_id"}}]}]}]}]
+}'
+```
+
+For the coarser question — which *files* have no `"user_id"` at all — `-absent` is the right primitive:
 
 ```bash
 hprscript -p '"user_id"' -absent -glob '**/*.jsonl'

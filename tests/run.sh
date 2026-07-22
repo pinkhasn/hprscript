@@ -959,6 +959,156 @@ expect_lines "binary file (NUL in first 512 bytes) skipped" 0 "$OUT"
 rm -f "$HEX_FIX"
 
 # ---------------------------------------------------------------------------
+section "brace globs ({a,b} alternation)"
+BR_FIX="$HERE/_tmp_brace"
+mkdir -p "$BR_FIX/sub"
+printf 'needle\n' > "$BR_FIX/x.aaa"
+printf 'needle\n' > "$BR_FIX/x.bbb"
+printf 'needle\n' > "$BR_FIX/x.ccc"
+printf 'needle\n' > "$BR_FIX/sub/y.aaa"
+
+OUT=$("$BIN" -p needle -f -glob "$BR_FIX/*.{aaa,bbb}")
+expect_lines "brace suffix picks 2 of 3 extensions" 2 "$OUT"
+
+OUT=$("$BIN" -p needle -f -glob "$BR_FIX/**/*.{aaa,ccc}")
+expect_lines "brace + ** recursion: 3 files" 3 "$OUT"
+
+OUT=$("$BIN" -p needle -f -glob "$BR_FIX/{sub,nosuchdir}/*.aaa")
+expect_lines "brace over a directory segment" 1 "$OUT"
+
+OUT=$("$BIN" -p needle -f -glob "$BR_FIX/*.{aaa,{bbb,ccc}}")
+expect_lines "nested braces expand fully" 3 "$OUT"
+
+OUT=$("$BIN" -p needle -f -glob "$BR_FIX/*.{aaa,bbb,ccc}" -exclude '*.{bbb,ccc}')
+expect_lines "braces in -exclude" 1 "$OUT"
+expect_contains "braces in -exclude keeps aaa" "x.aaa" "$OUT"
+
+rm -rf "$BR_FIX"
+
+# ---------------------------------------------------------------------------
+section "block extraction: opener inside the match"
+BS_FIX="$HERE/_tmp_blockstart"
+mkdir -p "$BS_FIX"
+
+# Anchor regex ends with the block's own opener (`^@article\{`): the block
+# must be the whole entry, not the first nested {...} value inside it.
+printf '@article{k1,\n  author = {A. Uthor},\n  title = {T}\n}\n@article{k2,\n  title = {No Author}\n}\n' > "$BS_FIX/refs.bib"
+cat > "$BS_FIX/bib.hpr" <<'EOF'
+{"patterns":[{"id":"art","regexp":"^@article\\{","on_match":[
+  {"action":"block","open":"{","close":"}","on_block":[
+    {"action":"submatch","text":"$BLOCK","patterns":[
+      {"id":"a","regexp":"author\\s*=","absent":true,"on_match":[
+        {"action":"emit","data":{"line":"$LINE"}}]}]}]}]}]}
+EOF
+OUT=$("$BIN" -script "$BS_FIX/bib.hpr" -- "$BS_FIX/refs.bib")
+expect_lines "bibtex: exactly one entry flagged" 1 "$OUT"
+expect_contains "bibtex: the author-less entry (line 5)" '"line":5' "$OUT"
+
+# Opener at the START of the match (PEM header contains `-----BEGIN`): each
+# key pairs with its own block; a lone key must not be silently dropped.
+printf -- '-----BEGIN RSA PRIVATE KEY-----\nAAAA\n-----END RSA PRIVATE KEY-----\n' > "$BS_FIX/one.pem"
+printf -- '-----BEGIN A KEY-----\nAAAA\n-----END A KEY-----\nx\n-----BEGIN B KEY-----\nBBBB\n-----END B KEY-----\n' > "$BS_FIX/two.pem"
+cat > "$BS_FIX/pem.hpr" <<'EOF'
+{"patterns":[{"id":"pem","regexp":"-----BEGIN [A-Z ]*KEY-----","on_match":[
+  {"action":"block","open":"-----BEGIN","close":"-----END","on_block":[
+    {"action":"emit","data":{"s":"$BLOCK_LINE_START","e":"$BLOCK_LINE_END","n":"$BLOCK_LINE_COUNT"}}]}]}]}
+EOF
+OUT=$("$BIN" -script "$BS_FIX/pem.hpr" -- "$BS_FIX/one.pem")
+expect_eq "pem: single key found, spans lines 1-3" '{"e":3,"n":3,"s":1}' "$OUT"
+OUT=$("$BIN" -script "$BS_FIX/pem.hpr" -- "$BS_FIX/two.pem")
+expect_lines "pem: two keys, two records" 2 "$OUT"
+expect_contains "pem: first key block" '"s":1' "$OUT"
+expect_contains "pem: second key block" '"s":5' "$OUT"
+
+# Opener after match-end (the classic case) is unchanged.
+printf 'func main() {\n\tdo()\n}\n' > "$BS_FIX/m.go"
+OUT=$("$BIN" -p 'func \w+\(' -block-open '{' -block-close '}' -format '$BLOCK_LINE_START-$BLOCK_LINE_END' "$BS_FIX/m.go")
+expect_eq "go func body pairing unchanged" "1-3" "$OUT"
+OUT=$("$BIN" -p 'func \w+\(' -block-open '{' -block-close '}' -format '$BLOCK_LINE_COUNT/$BLOCK_BYTE_COUNT' "$BS_FIX/m.go")
+expect_eq "-format \$BLOCK_LINE_COUNT/\$BLOCK_BYTE_COUNT" "3/9" "$OUT"
+
+rm -rf "$BS_FIX"
+
+# ---------------------------------------------------------------------------
+section "scope packs: C-family pairing + keyword filter"
+SC_FIX="$HERE/_tmp_scope"
+mkdir -p "$SC_FIX"
+printf 'void f(int x) {\n  if (a) {\n    b();\n  }\n  c();\n}\n' > "$SC_FIX/t.c"
+printf 'void g(void) { a(); }\n' > "$SC_FIX/t2.c"
+
+# The C anchor regex ends in `{`, so the scope must still span the whole
+# function — not end at the first inner block's close brace.
+OUT=$("$BIN" -p 'c\(\)' -scope c -format '$ENCLOSING_NAME:$ENCLOSING_LINE_END' "$SC_FIX/t.c")
+expect_eq "match after an inner block is still inside f" "f:6" "$OUT"
+
+# `if (a) {` fits the anchor shape but must not become a scope.
+OUT=$("$BIN" -p 'b\(\)' -scope c -format '$ENCLOSING_NAME:$ENCLOSING_LINE_END' "$SC_FIX/t.c")
+expect_eq "control-flow keyword is not a scope" "f:6" "$OUT"
+
+# Function body with no inner braces (opener inside the anchor match).
+OUT=$("$BIN" -p 'a\(\)' -scope c -format '$ENCLOSING_NAME' "$SC_FIX/t2.c")
+expect_eq "brace-free one-line body gets a scope" "g" "$OUT"
+
+# Unknown pack names error instead of silently disabling annotation.
+OUT=$("$BIN" -p 'a\(\)' -scope py "$SC_FIX/t2.c" 2>&1) ; RC=$?
+expect_contains "unknown -scope pack message" "unknown -scope pack 'py'" "$OUT"
+[[ "$RC" == "2" ]] && report ok "unknown -scope pack exit 2" || report fail "unknown -scope pack exit 2 (got $RC)"
+
+OUT=$("$BIN" -s "{\"scope\":\"py\",\"patterns\":[{\"id\":\"t\",\"regexp\":\"a\"}]}" "$SC_FIX/t2.c" 2>&1) ; RC=$?
+expect_contains "script scope pack message" "unknown scope pack 'py'" "$OUT"
+[[ "$RC" == "2" ]] && report ok "script scope pack exit 2" || report fail "script scope pack exit 2 (got $RC)"
+
+rm -rf "$SC_FIX"
+
+# ---------------------------------------------------------------------------
+section "map_append / map_unique_append"
+MA_FIX="$HERE/_tmp_mapappend"
+mkdir -p "$MA_FIX"
+printf 'tid=aa x\ntid=aa y\n' > "$MA_FIX/s1.log"
+printf 'tid=aa z\ntid=bb q\n' > "$MA_FIX/s2.log"
+cat > "$MA_FIX/ma.hpr" <<'EOF'
+{"variables":{"m":{"type":"map"}},
+ "patterns":[{"id":"t","regexp":"tid=(\\w+)","extract":["tid"],"on_match":[
+   {"action":"map_unique_append","target":"m","key":"$EXTRACT_TID","value":"$FILE"}]}],
+ "on_complete":[{"action":"for_each","var":"m","key_as":"k","as":"v","do":[
+   {"action":"emit","data":{"tid":"$k","files":"$v"}}]}]}
+EOF
+OUT=$("$BIN" -script "$MA_FIX/ma.hpr" -- "$MA_FIX/s1.log" "$MA_FIX/s2.log")
+expect_lines "one row per tid" 2 "$OUT"
+expect_contains "files emitted as a JSON array" '"files":["' "$OUT"
+N=$(printf '%s' "$OUT" | grep -o 's1\.log' | grep -c '^')
+[[ "$N" == "1" ]] && report ok "unique_append dedupes repeat hits" || report fail "unique_append dedupes repeat hits (s1.log seen $N times)"
+AA=$(printf '%s\n' "$OUT" | grep '"tid":"aa"')
+case "$AA" in
+    *s1.log*s2.log*) report ok "tid aa lists both files" ;;
+    *) report fail "tid aa lists both files" ; printf '%s\n' "$AA" | sed 's/^/      | /' ;;
+esac
+rm -rf "$MA_FIX"
+
+# ---------------------------------------------------------------------------
+section "skip/limit paging"
+PG_FIX="$HERE/_tmp_paging"
+mkdir -p "$PG_FIX"
+printf 'T one\nT two\nT three\nT four\nT five\n' > "$PG_FIX/t.txt"
+OUT=$("$BIN" -s "{\"skip\":2,\"limit\":2,\"patterns\":[{\"id\":\"t\",\"regexp\":\"T \\\\w+\"}]}" "$PG_FIX/t.txt")
+expect_lines "skip 2 limit 2 emits two records" 2 "$OUT"
+expect_contains "page starts at record 3" '"line":3' "$OUT"
+expect_contains "page ends at record 4" '"line":4' "$OUT"
+expect_not_contains "record 5 stays unemitted" '"line":5' "$OUT"
+rm -rf "$PG_FIX"
+
+# ---------------------------------------------------------------------------
+section "hidden paths: explicit base scanned, recursive skip"
+HID_FIX="$HERE/_tmp_hidden"
+mkdir -p "$HID_FIX/.github/workflows"
+printf 'uses: x@main\n' > "$HID_FIX/.github/workflows/ci.yml"
+OUT=$("$BIN" -p 'uses:' -f -glob "$HID_FIX/**/*.yml")
+expect_lines "recursive walk skips hidden dirs" 0 "$OUT"
+OUT=$("$BIN" -p 'uses:' -f -glob "$HID_FIX/.github/workflows/*.{yml,yaml}")
+expect_lines "explicitly named hidden base is scanned" 1 "$OUT"
+rm -rf "$HID_FIX"
+
+# ---------------------------------------------------------------------------
 section "summary"
 TOTAL=$((PASS + FAIL))
 if [[ "$FAIL" -eq 0 ]]; then

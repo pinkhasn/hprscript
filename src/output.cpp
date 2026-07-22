@@ -33,7 +33,9 @@ BlockInfo extract_block(const OutputOptions &opts, std::string_view buf,
     if (opts.block_open.empty() || opts.block_close.empty()) return bi;
     bi.active = true;
     uint64_t op = 0, cp = 0;
-    if (!find_balanced_block(buf, m.to, opts.block_open, opts.block_close,
+    // Search from match START: an opener contained in the match (a signature
+    // regex ending in `\{`, a PEM `-----BEGIN` header) anchors its own block.
+    if (!find_balanced_block(buf, m.from, opts.block_open, opts.block_close,
                              op, cp))
         return bi;
     bi.found = true;
@@ -317,6 +319,9 @@ void Formatter::emit_custom(const std::string &file, const Pattern &pattern,
         // get short-circuited by $BLOCK.
         if (try_num(i, "$BLOCK_LINE_START", bi.line_start)) continue;
         if (try_num(i, "$BLOCK_LINE_END", bi.line_end)) continue;
+        if (try_num(i, "$BLOCK_LINE_COUNT",
+                    bi.found ? bi.line_end - bi.line_start + 1 : 0)) continue;
+        if (try_num(i, "$BLOCK_BYTE_COUNT", bi.end - bi.start)) continue;
         if (try_num(i, "$BLOCK_START", bi.start)) continue;
         if (try_num(i, "$BLOCK_END", bi.end)) continue;
         if (try_str(i, "$BLOCK_FULL", block_full_view)) continue;

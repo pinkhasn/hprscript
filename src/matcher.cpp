@@ -101,14 +101,13 @@ bool Matcher::scan(std::string_view buf, const MatchCb &cb) {
     hs_error_t rc = hs_scan(db_, buf.data(), buf.size(), 0, scratch_,
                             hs_event_handler, &ctx);
     // HS_SCAN_TERMINATED is expected when the callback asks to stop.
-    // HS_INVALID can occur in UTF-8 mode if the input contains invalid
-    // UTF-8 sequences — we treat that as "scan finished with whatever
-    // matches we've already seen" rather than a hard failure, so the
-    // caller can still emit partial results from the file. Note: any
-    // matches reported before the invalid byte are kept as-is; their
-    // offsets are still in raw byte positions and remain accurate for
-    // line-number lookup, but the scan stops at the first invalid byte
-    // so later matches in the file are silently dropped.
+    // HS_INVALID can occur in UTF-8 mode when the input contains invalid
+    // UTF-8 — but the engine makes no promise either way: it may also keep
+    // matching straight past bad bytes (observed with ASCII patterns) or
+    // stop early. Either outcome is treated as "scan finished with whatever
+    // matches were reported", never a hard failure, so results on invalid
+    // UTF-8 input are best-effort. Callers wanting defined semantics on
+    // such data should use utf8=false (byte-level matching).
     return rc == HS_SUCCESS || rc == HS_SCAN_TERMINATED || rc == HS_INVALID;
 }
 

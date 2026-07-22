@@ -5,6 +5,7 @@
 //   ?      one char except '/'
 //   **     zero or more path segments
 //   [abc]  / [a-z]  character class within one segment
+//   {a,b}  alternation (may nest, may span '/'), expanded before matching
 //
 // Matching is path-aware: segments are split on '/'. ** is the only token
 // that can cross segment boundaries.
