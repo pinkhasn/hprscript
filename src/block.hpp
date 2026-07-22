@@ -11,6 +11,9 @@ namespace hpr {
 // Walk forward from `pos` looking for the first occurrence of `open`, then
 // count nesting until the matching `close` is found. On success returns true
 // and writes the (start, end-exclusive) byte range to out_open/out_close.
+// Callers pass the match START so an opening delimiter that is part of the
+// match itself (e.g. the `{` in `^@article\{`, the `-----BEGIN` of a PEM
+// header) anchors the block instead of being skipped over.
 bool find_balanced_block(std::string_view buf, uint64_t pos,
                          const std::string &open, const std::string &close,
                          uint64_t &out_open, uint64_t &out_close);

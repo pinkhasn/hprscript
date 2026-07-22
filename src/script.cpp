@@ -129,7 +129,7 @@ enum class ActionKind {
     Emit, Print,
     Set, Increment, Decrement, Add, Subtract, Multiply, Divide, Reset,
     Append, Collect, UniqueAppend, Sort,
-    MapSet, MapIncrement, Count,
+    MapSet, MapIncrement, MapAppend, MapUniqueAppend, Count,
     SetDifference, SetIntersection, SetUnion,
     If, ForEach, Stop,
     Submatch, Block, Lookup,
@@ -448,6 +448,16 @@ bool builtin_token_str(const std::string &name, const ExecCtx &ctx,
     if (name == "BLOCK_LINE_END") {
         out = ctx.has_block ? u64_str(ctx.block_line_end) : "0"; return true;
     }
+    if (name == "BLOCK_LINE_COUNT") {
+        out = ctx.has_block
+                  ? u64_str(ctx.block_line_end - ctx.block_line_start + 1)
+                  : "0";
+        return true;
+    }
+    if (name == "BLOCK_BYTE_COUNT") {
+        out = ctx.has_block ? u64_str(ctx.block_end - ctx.block_start) : "0";
+        return true;
+    }
     if (name == "LOOKUP_KEY") { out = ctx.lookup_key; return true; }
     if (name == "LOOKUP_VALUE") {
         out = ctx.has_lookup ? ctx.lookup_value.to_str() : "";
@@ -505,6 +515,18 @@ bool builtin_token_value(const std::string &name, const ExecCtx &ctx,
     if (name == "BLOCK_END")   { out = RuntimeValue::make_int((int64_t)ctx.block_end); return true; }
     if (name == "BLOCK_LINE_START") { out = RuntimeValue::make_int((int64_t)ctx.block_line_start); return true; }
     if (name == "BLOCK_LINE_END")   { out = RuntimeValue::make_int((int64_t)ctx.block_line_end); return true; }
+    if (name == "BLOCK_LINE_COUNT") {
+        out = RuntimeValue::make_int(
+            ctx.has_block
+                ? (int64_t)(ctx.block_line_end - ctx.block_line_start + 1)
+                : 0);
+        return true;
+    }
+    if (name == "BLOCK_BYTE_COUNT") {
+        out = RuntimeValue::make_int(
+            ctx.has_block ? (int64_t)(ctx.block_end - ctx.block_start) : 0);
+        return true;
+    }
     if (name == "FILE") { out = RuntimeValue::make_str(ctx.file); return true; }
     if (name == "PAT_ID") { out = RuntimeValue::make_str(ctx.pat_id); return true; }
     if (name == "MATCH") { out = RuntimeValue::make_str(ctx.match_text); return true; }
@@ -752,18 +774,16 @@ void emit_record_string(const std::string &json_line, const ExecCtx &ctx,
                         const std::string &group_key_hint) {
     ScriptState &st = *ctx.state;
     if (st.suppress_records) return;
-    // Per-file cap stops the per-file scan, and treats already-skipped
-    // records as part of the cap.
+    // Per-file cap counts only records actually emitted (skipped records
+    // don't consume it).
     if (st.limit_per_file > 0 && st.per_file_emits >= st.limit_per_file) {
         st.stop_file = true;
         return;
     }
     ++st.matched_emits;
     if (st.skip_n > 0 && st.matched_emits <= st.skip_n) {
-        // Counted against limit but no output.
-        if (st.limit > 0 && st.matched_emits >= st.skip_n + st.limit) {
-            st.stop_all = true;
-        }
+        // Skipped records produce no output and do NOT count toward `limit`:
+        // skip=20 + limit=20 emits records 21-40.
         return;
     }
     if (st.limit > 0 && st.emitted >= st.limit) {
@@ -989,6 +1009,21 @@ bool compile_action(const json::Value &av, Action &out, std::string &err) {
         if (!take_str("key", out.key)) {
             err = "map_increment requires 'key'"; return false;
         }
+        return true;
+    }
+    if (name == "map_append" || name == "map_unique_append") {
+        out.kind = name == "map_append" ? ActionKind::MapAppend
+                                        : ActionKind::MapUniqueAppend;
+        if (!take_var("target", out.target)) {
+            err = name + " requires 'target'"; return false;
+        }
+        if (!take_str("key", out.key)) {
+            err = name + " requires 'key'"; return false;
+        }
+        const json::Value *vv = av.find("value");
+        if (!vv) { err = name + " requires 'value'"; return false; }
+        out.value = *vv;
+        out.has_value = true;
         return true;
     }
     if (name == "count") {
@@ -1453,6 +1488,29 @@ void execute_action(const Action &a, ExecCtx &ctx) {
         else it->second = RuntimeValue::make_int(it->second.to_int() + 1);
         return;
     }
+    case ActionKind::MapAppend:
+    case ActionKind::MapUniqueAppend: {
+        RuntimeValue &m = var_or_create_map(a.target);
+        std::string k = substitute(a.key, ctx);
+        RuntimeValue v = resolve_value(a.value, ctx);
+        auto &mm = m.as_map();
+        auto it = mm.find(k);
+        if (it == mm.end()) {
+            it = mm.emplace(k, RuntimeValue::make_list()).first;
+        } else if (!it->second.is_list()) {
+            // A scalar landed here earlier (e.g. via map_set): promote it to
+            // a one-element list rather than dropping it.
+            RuntimeValue prev = std::move(it->second);
+            it->second = RuntimeValue::make_list();
+            it->second.as_list().push_back(std::move(prev));
+        }
+        auto &lst = it->second.as_list();
+        if (a.kind == ActionKind::MapUniqueAppend) {
+            for (const auto &e : lst) if (e.equals(v)) return;
+        }
+        lst.push_back(std::move(v));
+        return;
+    }
     case ActionKind::Count: {
         // Increment map[var][$PAT_ID].
         RuntimeValue &m = var_or_create_map(a.var);
@@ -1588,7 +1646,7 @@ void execute_action(const Action &a, ExecCtx &ctx) {
         std::string open = substitute(a.block_open, ctx);
         std::string close = substitute(a.block_close, ctx);
         uint64_t op = 0, cp = 0;
-        if (!find_balanced_block(ctx.file_buf, ctx.to, open, close, op, cp))
+        if (!find_balanced_block(ctx.file_buf, ctx.from, open, close, op, cp))
             return;
         ExecCtx sub = ctx;
         sub.has_block = true;
@@ -2500,6 +2558,14 @@ int run_script(const Cli &cli) {
         const json::Value &sv = it->second;
         if (sv.is_string()) {
             state.scope_lang = sv.as_string();
+            if (state.scope_lang != "auto" &&
+                !builtin_scope_pack(state.scope_lang)) {
+                std::fprintf(stderr,
+                             "hprscript: unknown scope pack '%s' (supported: "
+                             "auto, go, rust, c, cpp, java, js, ts)\n",
+                             state.scope_lang.c_str());
+                return 2;
+            }
         } else if (sv.is_object()) {
             if (const json::Value *p = sv.find("pattern"); p && p->is_string())
                 state.scope_custom.anchor_regex = p->as_string();

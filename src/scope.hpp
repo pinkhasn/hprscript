@@ -36,6 +36,10 @@ struct ScopeConfig {
     std::string open;         // body opening delimiter
     std::string close;        // body closing delimiter
     std::string kind;         // emitted in records as `enclosing.kind`
+    // Names the anchor regex can match but that are NOT scopes. The C-family
+    // packs need this: `name(...) {` also fits `if (...) {` / `for (...) {`,
+    // and Hyperscan has no lookahead to exclude keywords in the regex itself.
+    std::vector<std::string> skip_names;
 };
 
 class ScopeIndex {

@@ -87,7 +87,7 @@ Gotchas: escape literal braces (`interface\{\}`); captures `(...)` are ignored u
 ## Power features (the reasons to use hprscript)
 
 ### Block extraction — anchor on a signature, pull the whole body
-`-block-open` + `-block-close` pair each match with the next **balanced** delimiter block (depth-tracked; nesting handled).
+`-block-open` + `-block-close` pair each match with its **balanced** delimiter block (depth-tracked; nesting handled). The search starts at match-start, so an opener inside the match itself counts — `^@article\{` anchors its own `{`, a PEM `-----BEGIN` header its own block.
 
 ```bash
 # Every Go function body (signature + braces)
@@ -153,7 +153,7 @@ Reach for `-s` when flags aren't enough: **aggregation** (counts/sums/manifests)
 
 **Pattern object:** `id`, `regexp` (required), `case_insensitive`, `word_boundary`, `utf8` (default true), `ucp`, `weight` (for rank), `absent` (fire once per file where NOT found), `extract:[…]`, `on_match:[actions]` (omit → default emit).
 
-**Tokens** (in any `data`/`value`/`key` string): `$FILE $PAT_ID $LINE $COL $FROM $TO $MATCH $CONTEXT $CONTEXT_BEFORE $CONTEXT_AFTER`; in `on_block`: `$BLOCK $BLOCK_FULL $BLOCK_START $BLOCK_END $BLOCK_LINE_START $BLOCK_LINE_END`; in `lookup`: `$LOOKUP_KEY $LOOKUP_VALUE`; with scope: `$ENCLOSING_*`; any var: `$name` (whole-string `"$x"` keeps native type; embedded → stringified).
+**Tokens** (in any `data`/`value`/`key` string): `$FILE $PAT_ID $LINE $COL $FROM $TO $MATCH $CONTEXT $CONTEXT_BEFORE $CONTEXT_AFTER`; in `on_block`: `$BLOCK $BLOCK_FULL $BLOCK_START $BLOCK_END $BLOCK_LINE_START $BLOCK_LINE_END $BLOCK_LINE_COUNT $BLOCK_BYTE_COUNT`; in `lookup`: `$LOOKUP_KEY $LOOKUP_VALUE`; with scope: `$ENCLOSING_*`; any var: `$name` (whole-string `"$x"` keeps native type; embedded → stringified).
 
 **Variables** (`{"v":{"type":…,"default":…}}`): `string` `int` `bool` `list` `map`. Reset to default with `{"action":"reset","vars":[…]}` (typically in `on_file_end`).
 
@@ -164,7 +164,7 @@ Reach for `-s` when flags aren't enough: **aggregation** (counts/sums/manifests)
 | Output | `emit` (JSON line; `data` optional), `print` (raw text; bypasses `group_by`) |
 | Arithmetic | `set` `increment` `decrement` `add` `subtract` `multiply` `divide` `reset` |
 | Lists | `append` `collect` `unique_append` `sort` (by `key`; `"value":"desc"`) |
-| Maps | `map_set` `map_increment` `count` (= map_increment on `$PAT_ID`) |
+| Maps | `map_set` `map_increment` `map_append`/`map_unique_append` (list/set per key) `count` (= map_increment on `$PAT_ID`) |
 | Set algebra | `set_difference` `set_intersection` `set_union` (`{target,a,b}`; lists/maps→keysets) |
 | Control | `if` (`condition`+`then`/`else`) · `for_each` (`as` for lists; `key_as`+`as` for maps) · `stop` (skip rest of file) |
 | Cross-line | `submatch` (sub-patterns over `$MATCH`/`text`; sub-patterns may be `absent`) · `block` (`open`/`close` → `on_block`) · `lookup` (`map`/`key` → `on_hit`/`on_miss`) |
