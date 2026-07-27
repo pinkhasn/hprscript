@@ -24,6 +24,12 @@ struct Pattern {
     bool ucp = false;
     double weight = 1.0;        // reserved for ranking mode (post-MVP)
 
+    // Reference-only pattern (edit mode's -ref): participates in matching —
+    // relations and -file-where see its matches — but never produces edit
+    // sites. The qualifier in `-far hit:allow:0` needs this, or its own
+    // matches would be rewritten too.
+    bool ref = false;
+
     // When non-empty, capture groups in the regex are re-extracted via a
     // std::regex (ECMAScript) post-pass over $MATCH and surfaced under these
     // names — names[i] maps to capture group i+1. Compile failures are

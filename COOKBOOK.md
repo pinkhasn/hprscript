@@ -182,6 +182,9 @@ hprscript -p 'https?://[a-zA-Z0-9.\-]*[\x{0400}-\x{04FF}][a-zA-Z0-9.\-]*' suspec
 31. [Strings triage — memory dumps, firmware, binaries](#31-strings-triage--memory-dumps-firmware-binaries)
 32. [Academic — LaTeX & BibTeX](#32-academic--latex--bibtex)
 
+### Editing files
+33. [Guarded code edits (`hprscript edit`)](#33-guarded-code-edits-hprscript-edit)
+
 ---
 
 # Logs & Observability
@@ -3280,6 +3283,107 @@ hprscript -s '{
   ]
 }'
 ```
+
+---
+
+# Editing files
+
+## 33. Guarded code edits (`hprscript edit`)
+
+The `edit` subcommand is the only write-capable mode — everything else in
+this cookbook stays read-only. Dry-run is the default; `-write` applies;
+guard violations exit 3 with nothing written. Full reference:
+[Edit mode](HPRSCRIPT.md#edit-mode-hprscript-edit).
+
+**The two-step contract (use this shape for every edit):**
+
+```bash
+# 1. Dry-run: shows the exact diff and the site count.
+hprscript edit -F 'retry(3)' -content 'retry(5)' src/worker.go
+# 2. Apply with the count from step 1 — drift in between becomes a refusal.
+hprscript edit -F 'retry(3)' -content 'retry(5)' -expect 1 -write src/worker.go
+```
+
+**Swap a whole function implementation** (never reproduce the old body):
+
+```bash
+cat > /tmp/new_impl.go <<'EOF'
+func LoadData(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("load %s: %w", path, err)
+	}
+	return parse(data)
+}
+EOF
+printf '%s' "$(cat /tmp/new_impl.go)" > /tmp/new_impl.go  # span ends at }, so trim the trailing newline
+hprscript edit -p 'func\s+LoadData\b' -block-open '{' -block-close '}' \
+    -span block-full -content-file /tmp/new_impl.go -expect 1 -write src/data.go
+```
+
+**Rename an identifier — but only on lines this branch added:**
+
+```bash
+hprscript edit -p '\bOldName\b' -content 'NewName' \
+    -git-changed -git-added-lines -expect 14 -write
+```
+
+**sed-style substitution with capture groups** (`-extract` + `$EXTRACT_*`):
+
+```bash
+hprscript edit -p 'log\.Printf\("([^"]*)"' -extract fmt \
+    -content 'logger.Infof("$EXTRACT_FMT"' -write -glob '**/*.go'
+```
+
+**Add an import inside Go's `import ( … )` block:**
+
+```bash
+hprscript edit -p '^import \(' -block-open '(' -block-close ')' \
+    -span block -insert end -content '\t"corp/pkg/log"\n' -expect 1 -write main.go
+```
+
+**Delete debug prints, guarded by an exact count:**
+
+```bash
+hprscript edit -p '^\s*debugPrint\(' -span line -delete -expect 6 -write -glob '**/*.go'
+```
+
+**Conditional edit — replace except where an allow-comment sits on the line.**
+The qualifier pattern must be `-ref` or its own matches would be edited too:
+
+```bash
+hprscript edit -p 'http://' -name hit -p 'allow-insecure' -name allow -ref \
+    -far hit:allow:0 -content 'https://' -write -glob '**/*.{yaml,conf}'
+```
+
+**Only inside one function** — bump a constant without touching the rest of
+the file (`-in-scope` implies `-scope auto`; the enclosing chain counts, so
+closures inside the function are covered too):
+
+```bash
+hprscript edit -F 'retry(3)' -content 'retry(5)' \
+    -in-scope 'ProcessBatch' -expect 1 -write src/worker.go
+```
+
+**Replace a whole function by name** — anchorless: no pattern, no signature
+regex, no brace flags; the scope pack knows the language:
+
+```bash
+hprscript -list-scopes src/data.go                    # outline: confirm the name
+hprscript edit -in-scope '^LoadData$' -span scope \
+    -content-file /tmp/new_loaddata.go -expect 1 -write src/data.go
+```
+
+**Append a statement at the end of a function's body:**
+
+```bash
+hprscript edit -in-scope '^main$' -span scope-body -insert end \
+    -content '\tflush()\n' -expect 1 -write cmd/run.go
+```
+
+**Recover / verify:** the JSONL records are the receipt; `git diff` is the
+undo. A rerun of the same command is safe — already-applied sites report
+`"status":"noop"` and rewrite nothing.
 
 ---
 

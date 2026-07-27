@@ -69,6 +69,43 @@ Default per-match record:
 - **Unicode by default.** UTF-8 mode is on; `-pi` folds across scripts (`CAFÉ` ↔ `café`, `ПРИВЕТ` ↔ `привет`). See [UTF-8 / Unicode](HPRSCRIPT.md#utf-8--unicode-support).
 - **grep-compatible output modes:** `-f` (file list), `-c` (per-file counts), `-o` (matched text only), `-format` (custom template), `-A`/`-B`/`-C` (context lines).
 - **Single static binary** — no runtime dependencies beyond `libc`/`libm`/`libpthread`.
+- **Guarded edit mode.** `hprscript edit` — the only mode that writes — turns the same targeting pipeline into precise, safe file modification: dry-run diffs by default, `-expect` count contracts, atomic byte-exact writes. See below.
+
+---
+
+## Edit mode — search-precise file modification
+
+`hprscript edit` is a separate subcommand and the **only** mode that can
+modify files; plain search and script modes stay strictly read-only. The
+pattern (and every filter: `-glob`, `-git-added-lines`, `-near`/`-far`,
+`-file-where`, …) that finds the sites is exactly what edits them.
+
+```bash
+# Two-step contract: dry-run shows a diff + count, then apply with -expect —
+# if anything changed in between, the count mismatches and nothing is written.
+hprscript edit -F 'retry(3)' -content 'retry(5)' src/worker.go
+hprscript edit -F 'retry(3)' -content 'retry(5)' -expect 1 -write src/worker.go
+
+# Replace a whole function BY NAME — no signature regex, no brace flags; the
+# scope packs know the language (anchorless: no -p at all):
+hprscript -list-scopes src/data.go        # outline: name, kind, line range per function
+hprscript edit -in-scope '^LoadData$' -span scope \
+    -content-file new_loaddata.go -expect 1 -write src/data.go
+
+# Bump a constant only inside one function (-in-scope also filters search):
+hprscript edit -F 'retry(3)' -content 'retry(5)' -in-scope 'ProcessBatch' -expect 1 -write src/worker.go
+
+# Rename, but only on lines this branch added:
+hprscript edit -p '\bOldName\b' -content 'NewName' \
+    -git-changed -git-added-lines -expect 14 -write
+```
+
+Safety model: dry-run by default; every guard (`-expect`,
+`-max-span-lines`, `-assert-contains`, overlap detection, drift check)
+is validated across all files **before a single byte is written** —
+violations exit 3 with files untouched. Writes are atomic (temp +
+rename) and byte-exact (CRLF and missing trailing newlines survive).
+Full reference: [Edit mode](HPRSCRIPT.md#edit-mode-hprscript-edit).
 
 ---
 

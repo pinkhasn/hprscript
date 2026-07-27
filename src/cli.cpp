@@ -46,6 +46,20 @@ bool valid_pattern_name(const char *s) {
     return true;
 }
 
+// Strict non-negative integer parse for guard flags (-expect,
+// -max-span-lines): a typo must be an error, not a silent 0.
+bool parse_nonneg(const char *s, int64_t &out) {
+    if (!*s) return false;
+    int64_t v = 0;
+    for (; *s; ++s) {
+        if (!std::isdigit((unsigned char)*s)) return false;
+        v = v * 10 + (*s - '0');
+        if (v < 0) return false; // overflow
+    }
+    out = v;
+    return true;
+}
+
 bool set_output_mode(Cli &cli, OutputMode mode) {
     if (cli.out_mode_set) {
         cli.error = true;
@@ -55,6 +69,87 @@ bool set_output_mode(Cli &cli, OutputMode mode) {
     cli.out_mode = mode;
     cli.out_mode_set = true;
     return true;
+}
+
+// Validate edit-subcommand flag coherence (HPRSCRIPT.md, "Edit mode" chapter). Called at
+// the end of parse_cli when the edit subcommand is active. Every check here
+// is a usage error (exit 2); guard violations at run time exit 3 instead.
+void validate_edit_cli(Cli &cli) {
+    auto fail = [&](const std::string &msg) {
+        cli.error = true;
+        cli.error_message = msg;
+    };
+    const EditOptions &e = cli.edit;
+
+    if (cli.out_mode_set && cli.out_mode != OutputMode::JsonLines)
+        return fail("edit mode: output is a dry-run diff or -j edit records; "
+                    "-f/-c/-o/-llm/-absent/-format do not apply");
+    if (cli.sample_n > 0)
+        return fail("edit mode cannot combine with -sample");
+    if (cli.records != Cli::RecordMode::None)
+        return fail("edit mode cannot combine with -records");
+    if (cli.context_before != 0 || cli.context_after != 0)
+        return fail("edit mode: -A/-B/-C do not apply "
+                    "(the diff carries its own context)");
+    if (!cli.script_inline.empty() || !cli.script_path.empty())
+        return fail("edit mode cannot combine with -s/-script "
+                    "(the script DSL is read-only)");
+
+    if ((e.span == EditOptions::Span::Block ||
+         e.span == EditOptions::Span::BlockFull) &&
+        (cli.block_open.empty() || cli.block_close.empty()))
+        return fail("-span block/block-full requires -block-open and "
+                    "-block-close");
+    const bool have_scope_cfg =
+        !cli.scope_lang.empty() ||
+        (!cli.scope_pattern.empty() && !cli.scope_open.empty() &&
+         !cli.scope_close.empty()) ||
+        !cli.in_scopes.empty() || !cli.in_scope_kind.empty();
+    if ((e.span == EditOptions::Span::Scope ||
+         e.span == EditOptions::Span::ScopeBody) && !have_scope_cfg)
+        return fail("-span scope/scope-body requires an active -scope "
+                    "(built-in pack, -scope-pattern/-scope-open/-scope-close, "
+                    "or -in-scope which implies -scope auto)");
+
+    const int sources = (e.content_set ? 1 : 0) +
+                        (e.content_file.empty() ? 0 : 1) +
+                        (e.content_stdin ? 1 : 0);
+    if (e.verb == EditOptions::Verb::Delete) {
+        if (sources != 0)
+            return fail("-delete does not take "
+                        "-content/-content-file/-content-stdin");
+    } else if (sources == 0) {
+        return fail("edit mode needs a content source: one of -content, "
+                    "-content-file, -content-stdin (or -delete)");
+    } else if (sources > 1) {
+        return fail("give exactly one of -content, -content-file, "
+                    "-content-stdin");
+    }
+
+    if (e.verb == EditOptions::Verb::Insert &&
+        (e.insert_pos == EditOptions::InsertPos::Start ||
+         e.insert_pos == EditOptions::InsertPos::End) &&
+        e.span != EditOptions::Span::Block &&
+        e.span != EditOptions::Span::ScopeBody)
+        return fail("-insert start/end needs a delimited span "
+                    "(-span block or -span scope-body); "
+                    "use before/after otherwise");
+
+    bool any_target = cli.patterns.empty(); // no patterns is caught later
+    for (const auto &p : cli.patterns)
+        if (!p.ref) any_target = true;
+    if (!any_target)
+        return fail("every pattern is -ref (reference-only); "
+                    "at least one pattern must produce edits");
+
+    const bool have_inputs = !cli.positional.empty() || !cli.globs.empty() ||
+                             !cli.file_lists.empty() || cli.git_changed ||
+                             cli.git_staged || cli.git_untracked ||
+                             !cli.git_ranges.empty();
+    if (!have_inputs)
+        return fail("edit mode requires explicit input files (positional "
+                    "paths, -glob, -files-from, or -git-*); it never reads "
+                    "a scan target from stdin");
 }
 
 } // namespace
@@ -68,6 +163,7 @@ void print_help(FILE *out) {
 "  hprscript -s '<json>' [files...]\n"
 "  hprscript -script <path> [files...]\n"
 "  hprscript [script.json]            # positional script or stdin\n"
+"  hprscript edit -p <pat> <edit flags> [files...]   # the ONLY write mode\n"
 "\n"
 "Search flags (with -p):\n"
 "  -p <pattern>     Search pattern (PCRE; repeatable for multi-pattern)\n"
@@ -147,6 +243,16 @@ void print_help(FILE *out) {
 "  -scope-close <s>         Body closing delimiter\n"
 "  -scope-kind <s>          Label emitted as enclosing.kind (default 'func')\n"
 "\n"
+"Scoped targeting (search and edit modes; imply -scope auto):\n"
+"  -in-scope <re>       Keep only matches inside a scope whose name matches\n"
+"                       (checks the whole enclosing chain; repeatable = OR)\n"
+"  -in-scope-kind <k>   Restrict -in-scope to scopes of this kind\n"
+"  -lines <spec>        Keep only matches starting in these 1-based lines:\n"
+"                       N, A:B, A:, or :B (repeatable = OR)\n"
+"  -list-scopes         List the scope index instead of searching: one\n"
+"                       record per function/class (JSONL, or -llm flat).\n"
+"                       Honors -in-scope/-in-scope-kind; takes no patterns\n"
+"\n"
 "Script mode:\n"
 "  -s <json>        Inline script\n"
 "  -script <path>   Script file\n"
@@ -159,6 +265,32 @@ void print_help(FILE *out) {
 "  -require-complete   Exit 2 when any file couldn't be read or a listed\n"
 "                      path was missing (partial results become failures)\n"
 "\n"
+"Edit mode (hprscript edit …; search/script modes never modify files):\n"
+"  Dry-run by default: prints a unified diff of would-be changes plus a\n"
+"  summary record; nothing is written without -write. Targeting flags\n"
+"  (-p/-glob/-near/-far/-file-where/-git-*/…) work as in search mode.\n"
+"  -span <s>            What each match edits: match (default), line, block,\n"
+"                       block-full ($BLOCK/$BLOCK_FULL ranges), scope (whole\n"
+"                       enclosing function), scope-body (its body block).\n"
+"                       With -in-scope and no -p at all, scope spans edit the\n"
+"                       named scopes directly (anchorless)\n"
+"  -content <tmpl>      Replacement template ($MATCH, $FILE, $EXTRACT_*, $$)\n"
+"  -content-file <f>    Replacement content from a file, verbatim — the way\n"
+"                       to pass multi-line code (no shell quoting)\n"
+"  -content-stdin       Replacement content from stdin\n"
+"  -insert <pos>        Insert instead of replace: before|after (span edges),\n"
+"                       start|end (just inside block/scope-body delimiters)\n"
+"  -delete              Remove the span (-span line also removes the newline)\n"
+"  -write               Apply changes (atomic per file: temp + rename)\n"
+"  -diff                With -write: also print the unified diff\n"
+"  -ref                 Mark the preceding pattern reference-only: it can\n"
+"                       qualify edits via -near/-far/-file-where but its own\n"
+"                       matches are never edited\n"
+"  -expect <n>          Guard: refuse (exit 3) unless exactly n edit sites\n"
+"  -max-span-lines <n>  Guard: refuse spans over n lines (default 500, 0=off)\n"
+"  -assert-contains <re> Guard: refuse unless every target span matches\n"
+"  -j                   Emit JSONL edit records instead of the dry-run diff\n"
+"\n"
 "Misc:\n"
 "  --version        Show version\n"
 "  -h, --help       This help\n");
@@ -166,7 +298,16 @@ void print_help(FILE *out) {
 
 Cli parse_cli(int argc, char **argv) {
     Cli cli;
-    for (int i = 1; i < argc; ++i) {
+    int first = 1;
+    // Subcommand detection: `hprscript edit …`. Must be argv[1] so
+    // command-prefix permission rules can distinguish write-capable
+    // invocations. A file literally named "edit" can still be scanned via
+    // `hprscript -p pat -- edit`.
+    if (argc > 1 && eq(argv[1], "edit")) {
+        cli.edit.active = true;
+        first = 2;
+    }
+    for (int i = first; i < argc; ++i) {
         const char *a = argv[i];
         if (eq(a, "--version")) { cli.show_version = true; continue; }
         if (eq(a, "-h") || eq(a, "--help")) { cli.show_help = true; continue; }
@@ -410,6 +551,53 @@ Cli parse_cli(int argc, char **argv) {
             continue;
         }
 
+        if (eq(a, "-in-scope")) {
+            const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
+            cli.in_scopes.emplace_back(v);
+            continue;
+        }
+        if (eq(a, "-in-scope-kind")) {
+            const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
+            cli.in_scope_kind = v;
+            continue;
+        }
+        if (eq(a, "-lines")) {
+            const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
+            Cli::LineRange r;
+            const char *colon = std::strchr(v, ':');
+            int64_t lo = 0, hi = 0;
+            bool ok = true;
+            if (!colon) {
+                ok = parse_nonneg(v, lo) && lo >= 1;   // "N"
+                hi = lo;
+            } else {
+                std::string a_part(v, colon - v), b_part(colon + 1);
+                if (a_part.empty() && b_part.empty()) ok = false;
+                if (ok && !a_part.empty())
+                    ok = parse_nonneg(a_part.c_str(), lo) && lo >= 1;
+                if (ok && !b_part.empty())
+                    ok = parse_nonneg(b_part.c_str(), hi) && hi >= 1;
+                if (a_part.empty()) lo = 1;
+                if (b_part.empty()) hi = 0;             // 0 = open end
+                if (ok && hi != 0 && hi < lo) ok = false;
+            }
+            if (!ok) {
+                cli.error = true;
+                cli.error_message = std::string("-lines: expected N, A:B, "
+                                                "A:, or :B (1-based) — got '") +
+                                    v + "'";
+                return cli;
+            }
+            r.lo = static_cast<uint32_t>(lo);
+            r.hi = hi == 0 ? 0xffffffffu : static_cast<uint32_t>(hi);
+            cli.line_ranges.push_back(r);
+            continue;
+        }
+        if (eq(a, "-list-scopes") || eq(a, "--list-scopes")) {
+            cli.list_scopes = true;
+            continue;
+        }
+
         if (eq(a, "-sample")) {
             const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
             cli.sample_n = std::atoi(v);
@@ -506,6 +694,106 @@ Cli parse_cli(int argc, char **argv) {
             continue;
         }
 
+        // Edit-subcommand flags. Only recognised after `hprscript edit` —
+        // in search/script mode they fall through to "unknown flag", which
+        // keeps the long-documented promise that bare hprscript rejects
+        // write-shaped flags.
+        if (cli.edit.active) {
+            if (eq(a, "-span")) {
+                const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
+                if      (eq(v, "match"))      cli.edit.span = EditOptions::Span::Match;
+                else if (eq(v, "line"))       cli.edit.span = EditOptions::Span::Line;
+                else if (eq(v, "block"))      cli.edit.span = EditOptions::Span::Block;
+                else if (eq(v, "block-full")) cli.edit.span = EditOptions::Span::BlockFull;
+                else if (eq(v, "scope"))      cli.edit.span = EditOptions::Span::Scope;
+                else if (eq(v, "scope-body")) cli.edit.span = EditOptions::Span::ScopeBody;
+                else {
+                    cli.error = true;
+                    cli.error_message = std::string("-span: unknown span '") + v +
+                        "' (match, line, block, block-full, scope, scope-body)";
+                    return cli;
+                }
+                continue;
+            }
+            if (eq(a, "-content")) {
+                const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
+                cli.edit.content_set = true;
+                cli.edit.content = v;
+                continue;
+            }
+            if (eq(a, "-content-file")) {
+                const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
+                cli.edit.content_file = v;
+                continue;
+            }
+            if (eq(a, "-content-stdin")) { cli.edit.content_stdin = true; continue; }
+            if (eq(a, "-ref")) {
+                if (cli.patterns.empty()) {
+                    cli.error = true;
+                    cli.error_message = "-ref must follow a -p/-pi/-F/-Fi";
+                    return cli;
+                }
+                cli.patterns.back().ref = true;
+                continue;
+            }
+            if (eq(a, "-insert")) {
+                const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
+                if (cli.edit.verb == EditOptions::Verb::Delete) {
+                    cli.error = true;
+                    cli.error_message = "-insert cannot combine with -delete";
+                    return cli;
+                }
+                cli.edit.verb = EditOptions::Verb::Insert;
+                if      (eq(v, "before")) cli.edit.insert_pos = EditOptions::InsertPos::Before;
+                else if (eq(v, "after"))  cli.edit.insert_pos = EditOptions::InsertPos::After;
+                else if (eq(v, "start"))  cli.edit.insert_pos = EditOptions::InsertPos::Start;
+                else if (eq(v, "end"))    cli.edit.insert_pos = EditOptions::InsertPos::End;
+                else {
+                    cli.error = true;
+                    cli.error_message = std::string("-insert: unknown position '")
+                                        + v + "' (before, after, start, end)";
+                    return cli;
+                }
+                continue;
+            }
+            if (eq(a, "-delete")) {
+                if (cli.edit.verb == EditOptions::Verb::Insert) {
+                    cli.error = true;
+                    cli.error_message = "-delete cannot combine with -insert";
+                    return cli;
+                }
+                cli.edit.verb = EditOptions::Verb::Delete;
+                continue;
+            }
+            if (eq(a, "-write"))  { cli.edit.write = true; continue; }
+            if (eq(a, "-diff"))   { cli.edit.diff = true; continue; }
+            if (eq(a, "-expect")) {
+                const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
+                if (!parse_nonneg(v, cli.edit.expect)) {
+                    cli.error = true;
+                    cli.error_message =
+                        std::string("-expect: not a non-negative integer: ") + v;
+                    return cli;
+                }
+                continue;
+            }
+            if (eq(a, "-max-span-lines")) {
+                const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
+                if (!parse_nonneg(v, cli.edit.max_span_lines)) {
+                    cli.error = true;
+                    cli.error_message =
+                        std::string("-max-span-lines: not a non-negative integer: ") + v;
+                    return cli;
+                }
+                continue;
+            }
+            if (eq(a, "-assert-contains")) {
+                const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
+                cli.edit.assert_contains = v;
+                continue;
+            }
+        }
+
         // `--` ends flag parsing; the rest is positional. Documented for
         // -script usage: `hprscript -script find_funcs.hpr -- src/foo.go`.
         if (eq(a, "--")) {
@@ -541,6 +829,49 @@ Cli parse_cli(int argc, char **argv) {
         cli.error_message =
             "only one -files-from/-files0-from may read from stdin";
     }
+    if (!cli.error && !cli.show_help && !cli.show_version) {
+        const bool script_mode =
+            !cli.script_inline.empty() || !cli.script_path.empty();
+        if (script_mode &&
+            (!cli.in_scopes.empty() || !cli.in_scope_kind.empty() ||
+             !cli.line_ranges.empty())) {
+            cli.error = true;
+            cli.error_message = "-in-scope/-in-scope-kind/-lines work in "
+                                "quick (-p) and edit modes only";
+            return cli;
+        }
+        if (cli.list_scopes) {
+            if (cli.edit.active) {
+                cli.error = true;
+                cli.error_message = "-list-scopes cannot combine with edit mode";
+            } else if (!cli.patterns.empty() || !cli.patterns_from.empty()) {
+                cli.error = true;
+                cli.error_message = "-list-scopes takes no patterns — it "
+                                    "lists the scope index itself";
+            } else if (script_mode) {
+                cli.error = true;
+                cli.error_message = "-list-scopes cannot combine with -s/-script";
+            } else if (cli.out_mode_set &&
+                       cli.out_mode != OutputMode::JsonLines &&
+                       cli.out_mode != OutputMode::Llm) {
+                cli.error = true;
+                cli.error_message =
+                    "-list-scopes output is JSONL (default) or -llm";
+            } else if (cli.sample_n > 0 ||
+                       cli.records != Cli::RecordMode::None) {
+                cli.error = true;
+                cli.error_message =
+                    "-list-scopes cannot combine with -sample/-records";
+            } else if (!cli.line_ranges.empty()) {
+                cli.error = true;
+                cli.error_message = "-list-scopes lists whole scopes — "
+                                    "-lines does not apply";
+            }
+            if (cli.error) return cli;
+        }
+    }
+    if (cli.edit.active && !cli.error && !cli.show_help && !cli.show_version)
+        validate_edit_cli(cli);
     return cli;
 }
 
@@ -573,7 +904,8 @@ bool load_patterns_from(Cli &cli) {
             for (const auto &kv : pr.value.as_object()) {
                 if (kv.first != "id" && kv.first != "regexp" &&
                     kv.first != "literal" && kv.first != "case_insensitive" &&
-                    kv.first != "word_boundary" && kv.first != "utf8")
+                    kv.first != "word_boundary" && kv.first != "utf8" &&
+                    kv.first != "ref")
                     return fail("unknown field '" + kv.first + "'");
             }
             const json::Value *re = pr.value.find("regexp");
@@ -608,6 +940,10 @@ bool load_patterns_from(Cli &cli) {
             if (const json::Value *v = pr.value.find("utf8")) {
                 if (!v->is_bool()) return fail("'utf8' must be a boolean");
                 p.utf8 = v->as_bool() ? 1 : 0;
+            }
+            if (const json::Value *v = pr.value.find("ref")) {
+                if (!v->is_bool()) return fail("'ref' must be a boolean");
+                p.ref = v->as_bool();
             }
             cli.patterns.push_back(std::move(p));
         }

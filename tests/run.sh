@@ -1421,6 +1421,474 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+section "edit subcommand: dispatch + validation (Phase 0)"
+
+# Write-shaped flags stay unknown outside the edit subcommand — the bare
+# tool's read-only promise is syntactic, not behavioral.
+OUT=$("$BIN" -p x -write "$SAMPLE/a.go" 2>&1) ; RC=$?
+expect_contains "-write outside edit is unknown" "unknown flag: -write" "$OUT"
+[[ "$RC" == "2" ]] && report ok "-write outside edit exit 2" || report fail "-write outside edit exit (got $RC)"
+
+# Help mentions edit mode; `edit -h` shows help instead of a usage error.
+expect_contains "help documents edit mode" "Edit mode" "$("$BIN" --help)"
+OUT=$("$BIN" edit -h 2>&1) ; RC=$?
+expect_contains "edit -h prints help" "Usage:" "$OUT"
+[[ "$RC" == "0" ]] && report ok "edit -h exit 0" || report fail "edit -h exit (got $RC)"
+
+# Validation: every refusal is exit 2 with a targeted message.
+OUT=$("$BIN" edit -p x -content y 2>&1) ; RC=$?
+expect_contains "edit needs explicit inputs" "requires explicit input files" "$OUT"
+[[ "$RC" == "2" ]] && report ok "edit no-input exit 2" || report fail "edit no-input exit (got $RC)"
+
+OUT=$("$BIN" edit -p x -content y -span block "$SAMPLE/a.go" 2>&1)
+expect_contains "span block needs delimiters" "requires -block-open and -block-close" "$OUT"
+
+OUT=$("$BIN" edit -p x -content y -span scope "$SAMPLE/a.go" 2>&1)
+expect_contains "span scope needs -scope" "requires an active -scope" "$OUT"
+
+OUT=$("$BIN" edit -p x -content y -span nope "$SAMPLE/a.go" 2>&1)
+expect_contains "unknown span rejected" "-span: unknown span 'nope'" "$OUT"
+
+OUT=$("$BIN" edit -p x "$SAMPLE/a.go" 2>&1)
+expect_contains "missing content source" "needs a content source" "$OUT"
+
+OUT=$("$BIN" edit -p x -content a -content-stdin "$SAMPLE/a.go" 2>&1)
+expect_contains "two content sources rejected" "exactly one of -content" "$OUT"
+
+OUT=$("$BIN" edit -p x -delete -content a "$SAMPLE/a.go" 2>&1)
+expect_contains "-delete rejects content" "-delete does not take" "$OUT"
+
+OUT=$("$BIN" edit -p x -insert end -content a "$SAMPLE/a.go" 2>&1)
+expect_contains "-insert end needs delimited span" "needs a delimited span" "$OUT"
+
+OUT=$("$BIN" edit -p x -content a -insert nope "$SAMPLE/a.go" 2>&1)
+expect_contains "unknown insert pos rejected" "-insert: unknown position" "$OUT"
+
+OUT=$("$BIN" edit -p x -delete -insert end "$SAMPLE/a.go" 2>&1)
+expect_contains "-insert after -delete rejected" "cannot combine with -delete" "$OUT"
+
+OUT=$("$BIN" edit -p x -content a -expect 2x "$SAMPLE/a.go" 2>&1)
+expect_contains "-expect strict integer" "not a non-negative integer" "$OUT"
+
+OUT=$("$BIN" edit -p x -content a -max-span-lines -3 "$SAMPLE/a.go" 2>&1)
+expect_contains "-max-span-lines strict integer" "not a non-negative integer" "$OUT"
+
+OUT=$("$BIN" edit -p x -content a -o "$SAMPLE/a.go" 2>&1)
+expect_contains "edit rejects -o output mode" "do not apply" "$OUT"
+
+OUT=$("$BIN" edit -p x -content a -C 2 "$SAMPLE/a.go" 2>&1)
+expect_contains "edit rejects context flags" "-A/-B/-C do not apply" "$OUT"
+
+OUT=$("$BIN" edit -p x -content a -sample 3 "$SAMPLE/a.go" 2>&1)
+expect_contains "edit rejects -sample" "cannot combine with -sample" "$OUT"
+
+OUT=$("$BIN" edit -content a -s '{}' "$SAMPLE/a.go" 2>&1)
+expect_contains "edit rejects -s script" "read-only" "$OUT"
+
+OUT=$("$BIN" edit -content a "$SAMPLE/a.go" 2>&1) ; RC=$?
+expect_contains "edit without -p" "edit: -p <pattern> required" "$OUT"
+[[ "$RC" == "2" ]] && report ok "edit without -p exit 2" || report fail "edit without -p exit (got $RC)"
+
+# Anchorless edits need -in-scope + a scope span; everything else refuses.
+OUT=$("$BIN" edit -content y "$SAMPLE/a.go" 2>&1) ; RC=$?
+expect_contains "anchorless needs in-scope+scope span" "anchorless" "$OUT"
+[[ "$RC" == "2" ]] && report ok "anchorless misuse exit 2" || report fail "anchorless misuse exit (got $RC)"
+OUT=$("$BIN" -in-scope f -s '{}' 2>&1) ; RC=$?
+expect_contains "-in-scope rejected in script mode" "quick (-p) and edit modes" "$OUT"
+OUT=$("$BIN" -lines 9:3 -p x "$SAMPLE/a.go" 2>&1) ; RC=$?
+expect_contains "-lines rejects reversed range" "-lines: expected" "$OUT"
+OUT=$("$BIN" -list-scopes -p x "$SAMPLE/a.go" 2>&1) ; RC=$?
+expect_contains "-list-scopes takes no patterns" "takes no patterns" "$OUT"
+
+# ---------------------------------------------------------------------------
+section "edit engine: replace / guards / write (sandboxed)"
+
+# Every test operates on fresh copies inside a temp sandbox — fixtures are
+# never touched, and each case asserts BOTH the output contract and the
+# on-disk bytes.
+ED=$(mktemp -d)
+
+# A small Go-ish file used across cases. No trailing oddities: 12 lines.
+make_w() {
+    cat > "$ED/w.go" <<'GOEOF'
+package main
+
+import "fmt"
+
+func LoadData(path string) error {
+	fmt.Println("loading", path)
+	return nil
+}
+
+func main() {
+	fmt.Println(LoadData("x"), "retry(3)")
+}
+GOEOF
+}
+
+# --- dry-run: exact diff golden, file untouched, exit 0
+make_w
+OUT=$("$BIN" edit -F 'retry(3)' -content 'retry(5)' "$ED/w.go") ; RC=$?
+EXPECTED="--- a/$ED/w.go
++++ b/$ED/w.go
+@@ -8,5 +8,5 @@
+ }
+ 
+ func main() {
+-	fmt.Println(LoadData(\"x\"), \"retry(3)\")
++	fmt.Println(LoadData(\"x\"), \"retry(5)\")
+ }
+{\"type\":\"edit-summary\",\"sites\":1,\"changed\":1,\"noops\":0,\"files_changed\":1,\"dry_run\":true,\"applied\":false}"
+expect_eq "dry-run: exact unified diff + summary" "$EXPECTED" "$OUT"
+[[ "$RC" == "0" ]] && report ok "dry-run exit 0" || report fail "dry-run exit (got $RC)"
+OUT=$("$BIN" -F 'retry(3)' -c "$ED/w.go")
+expect_contains "dry-run leaves file untouched" ":1" "$OUT"
+
+# --- -write with -expect: applied, records, exit 0
+OUT=$("$BIN" edit -F 'retry(3)' -content 'retry(5)' -expect 1 -write "$ED/w.go") ; RC=$?
+expect_contains "write: edit record"    '"status":"changed"' "$OUT"
+expect_contains "write: summary applied" '"applied":true'    "$OUT"
+[[ "$RC" == "0" ]] && report ok "write exit 0" || report fail "write exit (got $RC)"
+OUT=$("$BIN" -F 'retry(5)' -c "$ED/w.go")
+expect_contains "write: change on disk" ":1" "$OUT"
+
+# --- idempotent rerun: noop, exit 0, file stable
+OUT=$("$BIN" edit -F 'retry(5)' -content 'retry(5)' -write "$ED/w.go") ; RC=$?
+expect_contains "noop rerun: status noop" '"status":"noop"' "$OUT"
+expect_contains "noop rerun: 0 files changed" '"files_changed":0' "$OUT"
+[[ "$RC" == "0" ]] && report ok "noop rerun exit 0" || report fail "noop rerun exit (got $RC)"
+
+# --- -expect mismatch: exit 3, nothing written
+make_w
+OUT=$("$BIN" edit -F 'fmt' -content 'FMT' -expect 1 -write "$ED/w.go") ; RC=$?
+expect_contains "expect mismatch: guard record" '"guard":"expect"' "$OUT"
+[[ "$RC" == "3" ]] && report ok "expect mismatch exit 3" || report fail "expect mismatch exit (got $RC)"
+OUT=$("$BIN" -F 'FMT' -f "$ED/w.go" ; true)
+expect_lines "expect mismatch: nothing written" 0 "$OUT"
+
+# --- no matches: exit 1, empty summary
+OUT=$("$BIN" edit -F 'no_such_token' -content 'x' -write "$ED/w.go") ; RC=$?
+expect_contains "no matches: sites 0" '"sites":0' "$OUT"
+[[ "$RC" == "1" ]] && report ok "no matches exit 1" || report fail "no matches exit (got $RC)"
+
+# --- block-full: whole-function swap from -content-file
+make_w
+cat > "$ED/newbody.txt" <<'GOEOF'
+func LoadData(path string) error {
+	return load(path)
+}
+GOEOF
+printf '%s' "$(cat "$ED/newbody.txt")" > "$ED/newbody.txt"  # strip trailing NL: span ends at }
+OUT=$("$BIN" edit -p 'func LoadData\b' -block-open '{' -block-close '}' \
+      -span block-full -content-file "$ED/newbody.txt" -expect 1 -write "$ED/w.go") ; RC=$?
+[[ "$RC" == "0" ]] && report ok "block-full swap exit 0" || report fail "block-full swap exit (got $RC)"
+OUT=$("$BIN" -F 'return load(path)' -c "$ED/w.go")
+expect_contains "block-full swap: new body on disk" ":1" "$OUT"
+OUT=$("$BIN" -F 'loading' -f "$ED/w.go" ; true)
+expect_lines "block-full swap: old body gone" 0 "$OUT"
+
+# --- patch(1) round-trip: dry-run diff reproduces -write output exactly
+if command -v patch >/dev/null 2>&1; then
+    make_w
+    "$BIN" edit -p 'func LoadData\b' -block-open '{' -block-close '}' \
+        -span block-full -content-file "$ED/newbody.txt" "$ED/w.go" > "$ED/swap.diff"
+    sed '/^{"type"/d' "$ED/swap.diff" | (cd / && patch -p1 -s -o "$ED/w.patched" "$ED/w.go")
+    "$BIN" edit -p 'func LoadData\b' -block-open '{' -block-close '}' \
+        -span block-full -content-file "$ED/newbody.txt" -write "$ED/w.go" > /dev/null
+    if cmp -s "$ED/w.patched" "$ED/w.go"; then
+        report ok "patch round-trip: diff == splice"
+    else
+        report fail "patch round-trip: diff == splice"
+    fi
+else
+    report ok "patch not available — round-trip skipped"
+fi
+
+# --- insert end into a delimited block
+printf 'import (\n\t"fmt"\n)\n' > "$ED/imp.go"
+"$BIN" edit -p '^import \(' -block-open '(' -block-close ')' -span block \
+    -insert end -content '\t"os"\n' -expect 1 -write "$ED/imp.go" > /dev/null
+EXPECTED=$(printf 'import (\n\t"fmt"\n\t"os"\n)\n')
+expect_eq "insert end inside block" "$EXPECTED" "$(cat "$ED/imp.go")"
+
+# --- insert before, whole-line (pure insertion diff)
+printf 'l1\nl2\nl3\n' > "$ED/ins.txt"
+OUT=$("$BIN" edit -p '^l2' -span line -insert before -content 'NEW\n' "$ED/ins.txt")
+expect_contains "pure line insert: diff +NEW" '+NEW' "$OUT"
+expect_not_contains "pure line insert: no removals" '-l2' "$OUT"
+"$BIN" edit -p '^l2' -span line -insert before -content 'NEW\n' -write "$ED/ins.txt" > /dev/null
+expect_eq "insert before line on disk" "$(printf 'l1\nNEW\nl2\nl3\n')" "$(cat "$ED/ins.txt")"
+
+# --- delete a full line (newline consumed, no blank left)
+printf 'keep1\ndebugPrint(1)\nkeep2\n' > "$ED/d.txt"
+"$BIN" edit -p '^debugPrint' -span line -delete -expect 1 -write "$ED/d.txt" > /dev/null
+expect_eq "delete line consumes newline" "$(printf 'keep1\nkeep2\n')" "$(cat "$ED/d.txt")"
+
+# --- template tokens: $EXTRACT_*, $MATCH, $$
+printf 'log.Printf("hello %%s", name)\n' > "$ED/t.go"
+"$BIN" edit -p 'log\.Printf\("([^"]*)"' -extract fmtstr \
+    -content 'logger.Infof("$EXTRACT_FMTSTR"' -write "$ED/t.go" > /dev/null
+expect_eq "extract token in template" 'logger.Infof("hello %s", name)' "$(cat "$ED/t.go")"
+printf 'val\n' > "$ED/tok.txt"
+"$BIN" edit -F 'val' -content '<$MATCH> costs $$5' -write "$ED/tok.txt" > /dev/null
+expect_eq "MATCH and \$\$ tokens" '<val> costs $5' "$(cat "$ED/tok.txt")"
+
+# --- overlap conflict: exit 3, file untouched
+printf 'aabbcc\n' > "$ED/ov.txt"
+OUT=$("$BIN" edit -p 'aabb' -p 'bbcc' -content 'X' -write "$ED/ov.txt") ; RC=$?
+expect_contains "overlap: guard record" '"guard":"overlap"' "$OUT"
+[[ "$RC" == "3" ]] && report ok "overlap exit 3" || report fail "overlap exit (got $RC)"
+expect_eq "overlap: file untouched" 'aabbcc' "$(cat "$ED/ov.txt")"
+
+# --- identical span+content from two patterns dedups to one site
+printf 'target\n' > "$ED/dd.txt"
+OUT=$("$BIN" edit -p 'target' -p 'tar get|target' -content 'done' -write "$ED/dd.txt")
+expect_contains "identical edits dedup" '"sites":1' "$OUT"
+expect_eq "dedup applied once" 'done' "$(cat "$ED/dd.txt")"
+
+# --- -max-span-lines guard + explicit override
+python3 - "$ED/big.go" <<'PYEOF'
+import sys
+with open(sys.argv[1], 'w') as f:
+    f.write('func Big() {\n')
+    for i in range(600):
+        f.write('  line%d\n' % i)
+    f.write('}\n')
+PYEOF
+OUT=$("$BIN" edit -p 'func Big' -block-open '{' -block-close '}' -span block-full \
+      -content 'X' -write "$ED/big.go") ; RC=$?
+expect_contains "max-span-lines: guard record" '"guard":"max-span-lines"' "$OUT"
+[[ "$RC" == "3" ]] && report ok "max-span-lines exit 3" || report fail "max-span-lines exit (got $RC)"
+OUT=$("$BIN" edit -p 'func Big' -block-open '{' -block-close '}' -span block-full \
+      -content 'X' -max-span-lines 0 -write "$ED/big.go") ; RC=$?
+[[ "$RC" == "0" ]] && report ok "max-span-lines 0 overrides" || report fail "max-span-lines 0 (got $RC)"
+expect_eq "big replace applied" 'X' "$(cat "$ED/big.go")"
+
+# --- -assert-contains: pass applies, fail refuses
+printf 'func A() {\n  retry(3)\n}\n' > "$ED/ac.go"
+OUT=$("$BIN" edit -p 'func A' -block-open '{' -block-close '}' -span block \
+      -content '{ retry(5) }' -assert-contains 'retry' -write "$ED/ac.go") ; RC=$?
+[[ "$RC" == "0" ]] && report ok "assert-contains pass applies" || report fail "assert-contains pass (got $RC)"
+OUT=$("$BIN" edit -F 'retry(5)' -content 'retry(7)' -assert-contains 'nonexistent' -write "$ED/ac.go") ; RC=$?
+expect_contains "assert-contains fail: guard" '"guard":"assert-contains"' "$OUT"
+[[ "$RC" == "3" ]] && report ok "assert-contains fail exit 3" || report fail "assert-contains fail (got $RC)"
+
+# --- block-not-found is a guard, not a silent skip
+printf 'func Broken( {\n' > "$ED/broken.go"
+OUT=$("$BIN" edit -p 'func Broken' -block-open '{' -block-close '}' -span block \
+      -content 'X' -write "$ED/broken.go") ; RC=$?
+expect_contains "unclosed block: guard record" '"guard":"block-not-found"' "$OUT"
+[[ "$RC" == "3" ]] && report ok "unclosed block exit 3" || report fail "unclosed block exit (got $RC)"
+
+# --- byte-exactness: CRLF and missing trailing newline survive
+printf 'alpha\r\nBETA\r\ngamma\r\n' > "$ED/crlf.txt"
+"$BIN" edit -F 'BETA' -content 'beta' -write "$ED/crlf.txt" > /dev/null
+printf 'alpha\r\nbeta\r\ngamma\r\n' > "$ED/crlf.want"
+if cmp -s "$ED/crlf.txt" "$ED/crlf.want"; then
+    report ok "CRLF bytes preserved"
+else
+    report fail "CRLF bytes preserved"
+fi
+printf 'one\ntwo END' > "$ED/nonl.txt"
+OUT=$("$BIN" edit -F 'END' -content 'FIN' "$ED/nonl.txt")
+expect_contains "no-newline marker in diff" 'No newline at end of file' "$OUT"
+"$BIN" edit -F 'END' -content 'FIN' -write "$ED/nonl.txt" > /dev/null
+printf 'one\ntwo FIN' > "$ED/nonl.want"
+if cmp -s "$ED/nonl.txt" "$ED/nonl.want"; then
+    report ok "missing trailing newline preserved"
+else
+    report fail "missing trailing newline preserved"
+fi
+
+# --- executable bit survives the temp+rename write
+printf '#!/bin/sh\necho hi\n' > "$ED/perm.sh" && chmod 755 "$ED/perm.sh"
+"$BIN" edit -F 'hi' -content 'bye' -write "$ED/perm.sh" > /dev/null
+MODE=$(stat -c '%a' "$ED/perm.sh" 2>/dev/null || stat -f '%Lp' "$ED/perm.sh")
+expect_eq "permissions preserved" "755" "$MODE"
+
+# --- multi-file edit in one pass
+printf 'AAA\n' > "$ED/m1.txt" ; printf 'AAA\nAAA\n' > "$ED/m2.txt"
+OUT=$("$BIN" edit -F 'AAA' -content 'BBB' -expect 3 -write "$ED/m1.txt" "$ED/m2.txt")
+expect_contains "multi-file: 2 files changed" '"files_changed":2' "$OUT"
+expect_eq "multi-file m1" 'BBB' "$(cat "$ED/m1.txt")"
+expect_eq "multi-file m2" "$(printf 'BBB\nBBB\n')" "$(cat "$ED/m2.txt")"
+
+# --- relations compose as edit qualifiers: -far + -ref skip allowlisted
+# lines. The qualifier pattern MUST be -ref, or its own matches get edited.
+printf 'p(1)\np(2) // keep\np(3)\n' > "$ED/rel.txt"
+OUT=$("$BIN" edit -p 'p\([0-9]\)' -name hit -p 'keep' -name allow -ref \
+      -far hit:allow:0 -content 'q()' -write "$ED/rel.txt")
+expect_contains "relation-filtered edit: 2 sites" '"sites":2' "$OUT"
+expect_eq "relation-filtered result" "$(printf 'q()\np(2) // keep\nq()\n')" "$(cat "$ED/rel.txt")"
+
+# Without -ref the qualifier's own match is an edit site too — pinned so the
+# semantic stays explicit.
+printf 'p(1)\np(2) // keep\np(3)\n' > "$ED/rel2.txt"
+OUT=$("$BIN" edit -p 'p\([0-9]\)' -name hit -p 'keep' -name allow \
+      -far hit:allow:0 -content 'q()' "$ED/rel2.txt")
+expect_contains "without -ref qualifier edits too" '"sites":3' "$OUT"
+
+# All patterns -ref is a usage error.
+OUT=$("$BIN" edit -p 'x' -ref -content 'y' "$ED/rel2.txt" 2>&1) ; RC=$?
+expect_contains "all -ref rejected" "at least one pattern must produce" "$OUT"
+[[ "$RC" == "2" ]] && report ok "all -ref exit 2" || report fail "all -ref exit (got $RC)"
+
+# --- -j dry-run: records, no diff; -diff + -write: both
+printf 'AAA\n' > "$ED/j.txt"
+OUT=$("$BIN" edit -F 'AAA' -content 'BBB' -j "$ED/j.txt")
+expect_contains "dry-run -j: edit record" '"type":"edit"' "$OUT"
+expect_not_contains "dry-run -j: no diff" '+++' "$OUT"
+OUT=$("$BIN" edit -F 'AAA' -content 'BBB' -diff -write "$ED/j.txt")
+expect_contains "write -diff: prints diff" '+++' "$OUT"
+expect_contains "write -diff: prints records" '"type":"edit"' "$OUT"
+
+# --- -content-stdin
+printf 'OLD\n' > "$ED/stdin.txt"
+OUT=$(printf 'MULTI\nLINE' | "$BIN" edit -F 'OLD' -content-stdin -write "$ED/stdin.txt")
+expect_eq "content from stdin" "$(printf 'MULTI\nLINE\n')" "$(cat "$ED/stdin.txt")"
+
+rm -rf "$ED"
+
+# ---------------------------------------------------------------------------
+section "scoped targeting: -in-scope / -lines / scope spans / -list-scopes"
+
+SC=$(mktemp -d)
+make_p2() {
+    cat > "$SC/p2.go" <<'GOEOF'
+package main
+
+func LoadData(path string) error {
+	retry(3)
+	return nil
+}
+
+func ProcessBatch(items []int) {
+	retry(3)
+	inner(func() {
+		retry(3)
+	})
+}
+
+func main() {
+	retry(3)
+}
+GOEOF
+}
+make_p2
+
+# --- -in-scope search filter: implies -scope auto, chain semantics include
+# code inside anonymous closures nested in the named function.
+OUT=$("$BIN" -F 'retry(3)' -in-scope 'ProcessBatch' -format '$LINE' "$SC/p2.go")
+expect_eq "-in-scope keeps chain matches" "$(printf '9\n11')" "$OUT"
+OUT=$("$BIN" -F 'retry(3)' -in-scope 'LoadData' -in-scope 'main' -format '$LINE' "$SC/p2.go")
+expect_eq "-in-scope repeatable ORs" "$(printf '4\n16')" "$OUT"
+OUT=$("$BIN" -F 'retry(3)' -in-scope 'NoSuchFunc' -f "$SC/p2.go" ; true)
+expect_lines "-in-scope no match drops all" 0 "$OUT"
+
+# --- -lines forms
+OUT=$("$BIN" -F 'retry(3)' -lines 8:13 -format '$LINE' "$SC/p2.go")
+expect_eq "-lines A:B" "$(printf '9\n11')" "$OUT"
+OUT=$("$BIN" -F 'retry(3)' -lines 16 -format '$LINE' "$SC/p2.go")
+expect_eq "-lines single N" "16" "$OUT"
+OUT=$("$BIN" -F 'retry(3)' -lines :6 -lines 15: -format '$LINE' "$SC/p2.go")
+expect_eq "-lines open forms OR" "$(printf '4\n16')" "$OUT"
+
+# --- -list-scopes
+OUT=$("$BIN" -list-scopes "$SC/p2.go")
+expect_lines "list-scopes: 3 scopes" 3 "$OUT"
+expect_contains "list-scopes record shape" '"type":"scope","file":"'"$SC"'/p2.go","name":"LoadData","kind":"func","line_start":3,"line_end":6' "$OUT"
+OUT=$("$BIN" -list-scopes -llm -in-scope 'main' "$SC/p2.go")
+expect_eq "list-scopes llm + filter" "$SC/p2.go:15-17 func main" "$OUT"
+OUT=$("$BIN" -list-scopes -in-scope 'zzz' "$SC/p2.go" ; echo "rc=$?")
+expect_contains "list-scopes none found exit 1" "rc=1" "$OUT"
+
+# --- edit filtered by -in-scope
+make_p2
+OUT=$("$BIN" edit -F 'retry(3)' -content 'retry(9)' -in-scope 'ProcessBatch' \
+      -expect 2 -write "$SC/p2.go")
+expect_contains "in-scope edit: 2 sites" '"sites":2' "$OUT"
+OUT=$("$BIN" -F 'retry(9)' -in-scope 'ProcessBatch' -c "$SC/p2.go")
+expect_contains "in-scope edit applied inside" ":2" "$OUT"
+OUT=$("$BIN" -F 'retry(3)' -c "$SC/p2.go")
+expect_contains "in-scope edit untouched outside" ":2" "$OUT"
+
+# --- -lines edit + -assert-contains staleness tripwire
+make_p2
+OUT=$("$BIN" edit -F 'retry(3)' -content 'retry(7)' -lines 1:6 \
+      -assert-contains 'retry' -expect 1 -write "$SC/p2.go") ; RC=$?
+[[ "$RC" == "0" ]] && report ok "-lines edit applies" || report fail "-lines edit (got $RC)"
+OUT=$("$BIN" edit -F 'return nil' -content 'X' -lines 1:6 \
+      -assert-contains 'no_longer_there' -write "$SC/p2.go") ; RC=$?
+expect_contains "-lines stale assert refuses" '"guard":"assert-contains"' "$OUT"
+[[ "$RC" == "3" ]] && report ok "-lines stale assert exit 3" || report fail "-lines stale assert (got $RC)"
+
+# --- span scope: targets the NAMED scope (not the closure), dedups the two
+# matches inside it to one site.
+make_p2
+OUT=$("$BIN" edit -F 'retry(3)' -in-scope 'ProcessBatch' -span scope \
+      -content 'func ProcessBatch(items []int) {}' -j "$SC/p2.go")
+expect_contains "span scope: single deduped site" '"sites":1' "$OUT"
+expect_contains "span scope: whole-function lines" '"line_start":8,"line_end":13' "$OUT"
+
+# --- span scope-body replace keeps the signature
+make_p2
+"$BIN" edit -F 'retry(3)' -in-scope '^main$' -span scope-body \
+    -content '{ boot() }' -expect 1 -write "$SC/p2.go" > /dev/null
+OUT=$("$BIN" -F 'func main() { boot() }' -c "$SC/p2.go")
+expect_contains "scope-body keeps signature" ":1" "$OUT"
+
+# --- scope-not-found guard: match outside any scope
+printf 'retry(3)\n' > "$SC/bare.go"
+OUT=$("$BIN" edit -F 'retry(3)' -span scope -scope go -content 'X' -write "$SC/bare.go") ; RC=$?
+expect_contains "scope-not-found guard" '"guard":"scope-not-found"' "$OUT"
+[[ "$RC" == "3" ]] && report ok "scope-not-found exit 3" || report fail "scope-not-found exit (got $RC)"
+
+# --- anchorless: replace a function purely by name
+make_p2
+printf 'func LoadData(path string) error {\n\treturn load2(path)\n}' > "$SC/nb.txt"
+OUT=$("$BIN" edit -in-scope '^LoadData$' -span scope -content-file "$SC/nb.txt" \
+      -expect 1 -write "$SC/p2.go")
+expect_contains "anchorless: pat is scope name" '"pat":"LoadData"' "$OUT"
+OUT=$("$BIN" -F 'return load2(path)' -c "$SC/p2.go")
+expect_contains "anchorless swap on disk" ":1" "$OUT"
+
+# --- anchorless insert at end of a named function's body
+make_p2
+"$BIN" edit -in-scope '^main$' -span scope-body -insert end \
+    -content '\tflush()\n' -expect 1 -write "$SC/p2.go" > /dev/null
+OUT=$("$BIN" -F 'flush()' -in-scope '^main$' -c "$SC/p2.go")
+expect_contains "anchorless insert end" ":1" "$OUT"
+
+# --- -in-scope-kind with a custom scope pack
+printf 'sub alpha {\n  x();\n}\nsub beta {\n  y();\n}\n' > "$SC/k.pl"
+OUT=$("$BIN" -p '\w\(\)' -scope-pattern 'sub\s+(\w+)' -scope-open '{' \
+      -scope-close '}' -scope-kind perl-sub -in-scope-kind perl-sub \
+      -format '$LINE' "$SC/k.pl")
+expect_eq "-in-scope-kind matching kind" "$(printf '2\n5')" "$OUT"
+OUT=$("$BIN" -p '\w\(\)' -scope-pattern 'sub\s+(\w+)' -scope-open '{' \
+      -scope-close '}' -scope-kind perl-sub -in-scope-kind other \
+      -f "$SC/k.pl" ; true)
+expect_lines "-in-scope-kind wrong kind drops all" 0 "$OUT"
+
+# --- 'ref' field in -patterns-from rule packs
+printf '{"id":"hit","regexp":"p\\\\([0-9]\\\\)"}\n{"id":"allow","regexp":"keep","ref":true}\n' > "$SC/pack.jsonl"
+printf 'p(1)\np(2) // keep\np(3)\n' > "$SC/pk.txt"
+OUT=$("$BIN" edit -patterns-from "$SC/pack.jsonl" -far hit:allow:0 \
+      -content 'q()' -write "$SC/pk.txt")
+expect_contains "patterns-from ref field: 2 sites" '"sites":2' "$OUT"
+printf '{"id":"only","regexp":"x","ref":true}\n' > "$SC/allref.jsonl"
+OUT=$("$BIN" edit -patterns-from "$SC/allref.jsonl" -content 'y' "$SC/pk.txt" 2>&1) ; RC=$?
+expect_contains "all-ref rule pack rejected" "at least one pattern must produce" "$OUT"
+[[ "$RC" == "2" ]] && report ok "all-ref rule pack exit 2" || report fail "all-ref rule pack exit (got $RC)"
+
+# --- -list-scopes refuses silently-ignored flags
+OUT=$("$BIN" -list-scopes -lines 1:2 "$SC/p2.go" 2>&1) ; RC=$?
+expect_contains "-list-scopes rejects -lines" "does not apply" "$OUT"
+[[ "$RC" == "2" ]] && report ok "-list-scopes -lines exit 2" || report fail "-list-scopes -lines exit (got $RC)"
+
+rm -rf "$SC"
+
+# ---------------------------------------------------------------------------
 section "summary"
 TOTAL=$((PASS + FAIL))
 if [[ "$FAIL" -eq 0 ]]; then

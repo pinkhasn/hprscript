@@ -29,6 +29,47 @@ struct CliPattern {
     // -1 = inherit the global flag (-w / -no-utf8), 0/1 = explicit.
     int word_boundary = -1;
     int utf8 = -1;
+    // Edit mode only (-ref): reference-only pattern — usable in relations
+    // and -file-where, but its matches never become edit sites.
+    bool ref = false;
+};
+
+// Options for the `edit` subcommand — the only mode allowed to modify
+// files. Search (-p) and script (-s) modes stay strictly read-only; edit is
+// a distinct argv[1] verb so command-prefix permission systems can gate it
+// separately. Dry-run is the default; -write applies. See the "Edit mode"
+// chapter in HPRSCRIPT.md.
+struct EditOptions {
+    bool active = false; // argv[1] was "edit"
+
+    // What byte range each match resolves to. Block spans reuse the
+    // documented $BLOCK/$BLOCK_FULL semantics; scope spans use the
+    // enclosing ScopeRange.
+    enum class Span { Match, Line, Block, BlockFull, Scope, ScopeBody };
+    Span span = Span::Match;
+
+    enum class Verb { Replace, Insert, Delete };
+    Verb verb = Verb::Replace;
+
+    // -insert position relative to the resolved span. Before/After = outer
+    // edges (any span); Start/End = just inside the delimiters (block /
+    // scope-body only).
+    enum class InsertPos { Before, After, Start, End };
+    InsertPos insert_pos = InsertPos::Before;
+
+    // Content source — exactly one for replace/insert, none for -delete.
+    bool content_set = false;   // -content given (may be empty string)
+    std::string content;        // inline template ($MATCH, $EXTRACT_*, …)
+    std::string content_file;   // -content-file path
+    bool content_stdin = false; // -content-stdin
+
+    bool write = false; // -write: apply; default is dry-run preview
+    bool diff = false;  // -diff: with -write, also print the unified diff
+
+    // Guards — all checked before anything is written; violations exit 3.
+    int64_t expect = -1;          // exact edit-site count, -1 = off
+    int64_t max_span_lines = 500; // refuse larger spans; 0 = unlimited
+    std::string assert_contains;  // every span must match this regex
 };
 
 struct Cli {
@@ -140,6 +181,28 @@ struct Cli {
     enum class RecordMode { None, Line };
     RecordMode records = RecordMode::None;
 
+    // Scoped targeting (-in-scope / -in-scope-kind): keep only matches whose
+    // enclosing-scope chain contains a scope whose name matches one of these
+    // regexes (ECMAScript, search semantics; OR) and whose kind equals
+    // in_scope_kind when set. Implies `-scope auto` when no scope config was
+    // given. Works in search and edit mode; in edit mode it also selects the
+    // targets of anchorless `-span scope|scope-body` edits.
+    std::vector<std::string> in_scopes;
+    std::string in_scope_kind;
+
+    // Line-range restriction (-lines): keep only matches starting within one
+    // of these 1-based inclusive ranges (OR). Forms: "N", "A:B", "A:", ":B".
+    struct LineRange {
+        uint32_t lo = 1;
+        uint32_t hi = 0xffffffffu;
+    };
+    std::vector<LineRange> line_ranges;
+
+    // -list-scopes: dump the scope index (name/kind/lines per scope) instead
+    // of searching — no patterns involved. Honors -in-scope/-in-scope-kind
+    // as a filter; output is JSONL (default) or -llm flat lines.
+    bool list_scopes = false;
+
     // Sample mode (`-sample N`): collect matches across all files, then
     // emit ≤N representatives stratified by file and by a canonicalised
     // surrounding-line "shape" (identifiers replaced with `_`, whitespace
@@ -161,6 +224,9 @@ struct Cli {
     // -require-complete: exit 2 when any file could not be read or a listed
     // path was missing — silent partial results become hard failures.
     bool require_complete = false;
+
+    // Edit subcommand (`hprscript edit …`). See EditOptions.
+    EditOptions edit;
 
     // Misc.
     bool show_version = false;

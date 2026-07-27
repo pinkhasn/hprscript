@@ -56,6 +56,11 @@ public:
     // (smallest) containing range wins.
     const ScopeRange *find_innermost(uint64_t offset) const;
 
+    // Full range list, sorted by start_off ascending (nested ranges are
+    // interleaved). Used for ancestor-chain checks (-in-scope), anchorless
+    // scope edits, and -list-scopes.
+    const std::vector<ScopeRange> &all() const { return ranges_; }
+
 private:
     // Sorted by start_off ascending; nested ranges are interleaved.
     std::vector<ScopeRange> ranges_;

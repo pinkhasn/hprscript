@@ -1,11 +1,11 @@
 ---
 name: hprscript
-description: Full-power multi-pattern content search and code intelligence via the `hprscript` CLI (Vectorscan/Hyperscan). One pass matches ALL patterns at once, so multi-pattern search costs the same as single-pattern. Covers keyword/regex search, finding files that contain or lack a pattern, per-file counts, extracting function bodies and balanced delimiter blocks, annotating each match with its enclosing function, capture-group extraction, proximity filters (X near or without Y), representative-sample usages, ranking files by relevance to a query, and aggregation/grouping/cross-file symbol resolution via a JSON script DSL. TRIGGER whenever you would grep/search/find/locate/count across files, ask where something is defined, what calls it, show me usages, or which files contain X — or would otherwise reach for the Grep tool, `grep`, or `rg`. hprscript replaces those for the entire task. Invoke via the Bash tool; the `hprscript` binary is on PATH.
+description: Full-power multi-pattern content search, code intelligence, and guarded file editing via the `hprscript` CLI (Vectorscan/Hyperscan). One pass matches ALL patterns at once, so multi-pattern search costs the same as single-pattern. Covers keyword/regex search, finding files that contain or lack a pattern, per-file counts, extracting function bodies and balanced delimiter blocks, annotating each match with its enclosing function, capture-group extraction, proximity filters (X near or without Y), representative-sample usages, ranking files by relevance to a query, and aggregation/grouping/cross-file symbol resolution via a JSON script DSL. The `edit` subcommand does precise search-targeted file modification (replace/insert/delete, whole functions by name via -in-scope/scope spans) with dry-run diffs, -expect count guards, and atomic writes. -in-scope/-lines restrict search or edits to a named function/class or line range; -list-scopes outlines a file's functions. TRIGGER whenever you would grep/search/find/locate/count across files, ask where something is defined, what calls it, show me usages, or which files contain X — or would otherwise reach for the Grep tool, `grep`, or `rg`; ALSO trigger for mechanical multi-site edits, renames, or function-body swaps where you would otherwise reach for `sed -i` or repeated Edit-tool calls. Invoke via the Bash tool; the `hprscript` binary is on PATH.
 ---
 
 # hprscript — full-power multi-pattern search (CLI)
 
-`hprscript` scans files (or stdin) **once** and matches **every pattern simultaneously** via Vectorscan/Hyperscan. Adding patterns is virtually free — **always batch patterns into one call** instead of running the tool N times. It is **read-only** (never edits files). Default output is **JSON Lines** (one JSON object per match). Invoke through the **Bash** tool; the binary is on `PATH` as `hprscript`.
+`hprscript` scans files (or stdin) **once** and matches **every pattern simultaneously** via Vectorscan/Hyperscan. Adding patterns is virtually free — **always batch patterns into one call** instead of running the tool N times. Search and script modes are **read-only**; file modification exists only in the explicit `hprscript edit` subcommand (dry-run by default — see [Editing files](#editing-files-hprscript-edit)). Default output is **JSON Lines** (one JSON object per match). Invoke through the **Bash** tool; the binary is on `PATH` as `hprscript`.
 
 Always prefer `hprscript` over the Grep tool, `grep`, or `rg` — for the whole task. If a Hyperscan limitation blocks one pattern (e.g. lookaround), restructure the pattern or move to a `-s` script; **do not** fall back to grep/rg.
 
@@ -23,6 +23,9 @@ Always prefer `hprscript` over the Grep tool, `grep`, or `rg` — for the whole 
 | Cheapest way to read matches into your own context | `-llm` |
 | Function body / JSON value / JSX subtree (cross-line) | `-block-open` + `-block-close` |
 | "What function/class is this match inside?" | `-scope auto` |
+| Only matches **inside function/class named X** | `-in-scope 'X'` |
+| Only matches in a **line range** | `-lines A:B` |
+| **File outline** — every function/class with line ranges | `-list-scopes` |
 | Pull capture groups out as named fields | `-extract a,b` |
 | X **with** Y nearby / X **without** Y nearby | `-near` / `-far` |
 | X with/without Y in the **same function** | `-same-scope` / `-not-same-scope` (+ `-scope`) |
@@ -118,6 +121,13 @@ Depth tracking is **lexical, not language-aware** — a `}` inside a string/comm
 hprscript -p '\bdangerous_call\(' -scope auto -llm -glob '**/*.go'
 # Custom anchor (capture group 1 = name):
 hprscript -p TODO -scope-pattern 'sub\s+(\w+)' -scope-open '{' -scope-close '}' -scope-kind perl-sub '**/*.pl'
+```
+
+**Scoped targeting** (search + edit; both imply `-scope auto`): `-in-scope '<name-re>'` keeps only matches inside a scope whose name matches — the whole enclosing chain counts, so code in a closure inside `ProcessBatch` is "inside ProcessBatch" (repeatable = OR; `-in-scope-kind <k>` restricts kind). `-lines N | A:B | A: | :B` keeps only matches starting on those lines (repeatable = OR; line numbers go stale — prefer `-in-scope`). `-list-scopes` dumps the scope index itself — a file outline, no patterns: `hprscript -list-scopes src/data.go` → one `{"type":"scope","name","kind","line_start","line_end"}` per function/class (`-llm` for flat lines; `-in-scope` filters it).
+
+```bash
+hprscript -p 'retry\(' -in-scope 'ProcessBatch' -llm '**/*.go'   # only inside that function
+hprscript -list-scopes -llm src/data.go                          # outline: pick edit targets by name
 ```
 
 ### Capture-group extraction — groups become typed fields
@@ -296,6 +306,60 @@ curl -s https://example.com | hprscript -p 'href="([^"]+)"' -extract url -o
 
 ---
 
+## Editing files (`hprscript edit`)
+
+The `edit` subcommand replaces `sed -i` and repeated exact-string Edit calls for search-shaped modifications. The pattern that finds the sites is the pattern that edits them, and **every targeting flag above** (`-glob`, `-git-added-lines`, `-near`/`-far`, `-file-where`, …) works as an edit qualifier. Dry-run is the default; **nothing is written without `-write`**.
+
+**Always use the two-step contract:**
+
+```bash
+# 1. Dry-run: prints a unified diff + a site count. Verify both.
+hprscript edit -F 'retry(3)' -content 'retry(5)' src/worker.go
+# 2. Apply with that count. Any drift in between → exit 3, nothing written.
+hprscript edit -F 'retry(3)' -content 'retry(5)' -expect 1 -write src/worker.go
+```
+
+**What to edit** — `-span match` (default) | `line` (incl. newline) | `block` / `block-full` (balanced `$BLOCK`/`$BLOCK_FULL` ranges; needs `-block-open`/`-block-close`) | `scope` / `scope-body` (the enclosing function — with `-in-scope` active, the innermost scope *matching the filter*, so you target the function you named, not a closure).
+**New content** — `-content '<tmpl>'` (tokens: `$MATCH`, `$EXTRACT_<NAME>`, `$FILE`, `$LINE`, `$$`; `\n`/`\t` interpreted) | `-content-file <f>` / `-content-stdin` (verbatim; **use for anything multi-line** — no shell quoting). | `-delete` removes the span | `-insert before|after|start|end` adds without removing.
+**Guards (all exit 3, nothing written):** `-expect N` (exact site count) · `-max-span-lines N` (default 500 — catches runaway blocks) · `-assert-contains <re>` (span must still contain this) · automatic overlap/conflict/drift detection.
+
+```bash
+# Replace a function PURELY BY NAME (anchorless: no -p needed). Write the new
+# impl to a file first (no trailing newline: the span ends at `}`):
+hprscript -list-scopes src/data.go                       # outline: confirm the name
+hprscript edit -in-scope '^LoadData$' -span scope \
+    -content-file /tmp/new_impl.go -expect 1 -write src/data.go
+
+# Same via a signature pattern when you can't use scope packs:
+hprscript edit -p 'func\s+LoadData\b' -block-open '{' -block-close '}' \
+    -span block-full -content-file /tmp/new_impl.go -expect 1 -write src/data.go
+
+# Bump a constant only inside one function:
+hprscript edit -F 'retry(3)' -content 'retry(5)' -in-scope 'ProcessBatch' -expect 1 -write src/worker.go
+
+# Append a statement at the end of main()'s body:
+hprscript edit -in-scope '^main$' -span scope-body -insert end -content '\tflush()\n' -expect 1 -write cmd/run.go
+
+# Rename only on lines this branch added:
+hprscript edit -p '\bOldName\b' -content 'NewName' -git-changed -git-added-lines -expect 14 -write
+
+# Capture groups (sed s/// equivalent):
+hprscript edit -p 'log\.Printf\("([^"]*)"' -extract fmt -content 'logger.Infof("$EXTRACT_FMT"' -write -glob '**/*.go'
+
+# Insert into a delimited block:
+hprscript edit -p '^import \(' -block-open '(' -block-close ')' -span block \
+    -insert end -content '\t"corp/log"\n' -expect 1 -write main.go
+
+# Conditional: skip lines with an allow-comment. The qualifier MUST be -ref,
+# or its own matches get edited too:
+hprscript edit -p 'http://' -name hit -p 'allow-insecure' -name allow -ref \
+    -far hit:allow:0 -content 'https://' -write -glob '**/*.yaml'
+```
+
+Exit codes: `0` previewed/applied · `1` no sites · `2` error · **`3` guard refused, nothing written** — branch on 3 as "my assumption was wrong". Reruns are safe: already-applied sites report `"status":"noop"`. Output with `-write` is JSONL edit records + an `edit-summary` — the receipt of exactly what changed.
+
+---
+
 ## Anti-patterns
 
 - ❌ Multiple sequential `hprscript` calls for different patterns → ✅ one call, many `-p`/`-pi` (free).
@@ -305,6 +369,10 @@ curl -s https://example.com | hprscript -p 'href="([^"]+)"' -extract url -o
 - ❌ Piping output through `grep`/`jq` for trivial filtering → ✅ use `-f`/`-c`/`-o`/`-format`/`-absent`, or `group_by`/`rank` in a script.
 - ❌ Dumping full JSON when you'll just read it → ✅ `-llm` (or `-f`/`-c` if you only need files/counts).
 - ❌ Letting a minified line blow your context → ✅ set `-max-context-bytes`/`-max-output-bytes`.
+- ❌ `sed -i` for code edits (exit 0 whether it changed 0 or 500 places) → ✅ `hprscript edit` with `-expect`: wrong assumptions become exit 3, not silent damage.
+- ❌ `edit … -write` straight away → ✅ dry-run first, read the diff and count, then re-run with `-write -expect <count>`.
+- ❌ Multi-line code in `-content '…'` (shell-quoting hell) → ✅ write it to a scratch file and use `-content-file`.
+- ❌ A relation-qualifier pattern without `-ref` in edit mode → ✅ mark it `-ref` or its own matches get rewritten too.
 
 ## Going deeper
 
@@ -312,4 +380,4 @@ Two exhaustive references ship with hprscript — read them on demand for the lo
 - **HPRSCRIPT.md** — complete CLI + script-DSL reference (every flag, action, condition, Unicode/UTF-8 rules, exit codes).
 - **COOKBOOK.md** — 200+ task recipes by domain (logs/observability, security/DFIR, source code, config/infra, data wrangling, DevOps).
 
-Find them in this skill's directory (personal install), at the hprscript repo root, or alongside the binary. `hprscript -h` prints the live flag list; exit codes follow grep (`0` match, `1` none, `2` error).
+Find them in this skill's directory (personal install), at the hprscript repo root, or alongside the binary. `hprscript -h` prints the live flag list; exit codes follow grep (`0` match, `1` none, `2` error; edit mode adds `3` = guard refused, nothing written).

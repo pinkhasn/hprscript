@@ -1,6 +1,7 @@
 // hprscript — multi-pattern PCRE search powered by Vectorscan.
 //
-// Entry point. Parses the CLI and dispatches to either:
+// Entry point. Parses the CLI and dispatches to one of:
+//   - run_edit():   `edit` subcommand (the only mode that writes files)
 //   - run_search(): -p quick-search mode
 //   - run_script(): -s/-script JSON-script mode
 //
@@ -8,6 +9,7 @@
 // difference is whether patterns/options are supplied via flags or JSON.
 
 #include "cli.hpp"
+#include "edit.hpp"
 #include "runner.hpp"
 #include "script.hpp"
 
@@ -43,6 +45,16 @@ int main(int argc, char **argv) {
     if (cli.show_version) {
         std::printf("hprscript %s (vectorscan %s)\n", HPRSCRIPT_VERSION, hs_version());
         return 0;
+    }
+
+    // Edit subcommand (`hprscript edit …`) — the only mode that can write.
+    if (cli.edit.active) {
+        return hpr::run_edit(cli);
+    }
+
+    // -list-scopes: dump the scope index, no patterns involved.
+    if (cli.list_scopes) {
+        return hpr::run_list_scopes(cli);
     }
 
     // Quick-search (-p) mode is selected when at least one -p was given.

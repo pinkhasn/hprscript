@@ -1,0 +1,4 @@
+build/
+hprscript
+__pycache__/
+*.pyc

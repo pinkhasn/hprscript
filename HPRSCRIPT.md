@@ -65,6 +65,7 @@ hprscript -s '<json>' [files...]
 hprscript -script <path> [files...]
 hprscript script.json [files...]            # positional arg as script file
 cat script.json | hprscript                  # script piped on stdin
+hprscript edit -p <pat> <edit flags> [files...]   # the ONLY mode that writes
 ```
 
 When neither `-p` nor `-s`/`-script` is given, the first positional argument is treated as a script file. If there are no positional arguments, `hprscript` reads the script from **stdin** (when piped).
@@ -83,7 +84,7 @@ Positional file/dir args after `-s`/`-script` (or after a positional script file
 | `-pi <pattern>` | Case-insensitive search pattern (HS `CASELESS`; folds Unicode by default; repeatable, mixable with `-p`) |
 | `-F <string>` / `-Fi <string>` | Fixed-string pattern (case-sensitive / -insensitive) — matched literally, no regex interpretation. Repeatable, mixable with `-p`/`-pi`. |
 | `-name <id>` | Name the preceding `-p`/`-pi`/`-F`/`-Fi`: the id (`[A-Za-z_]\w*`) replaces the auto `p<i>` in `pat`, `$PAT_ID`, `-llm` tags, relations, and `-file-where`. |
-| `-patterns-from <f>` | Load additional patterns from a JSONL rule file — one `{"id","regexp"\|"literal","case_insensitive","word_boundary","utf8"}` object per line, `#` comments allowed. Repeatable. See [Fixed strings & pattern files](#fixed-strings--pattern-files--f--fi--patterns-from). |
+| `-patterns-from <f>` | Load additional patterns from a JSONL rule file — one `{"id","regexp"\|"literal","case_insensitive","word_boundary","utf8","ref"}` object per line, `#` comments allowed. Repeatable. See [Fixed strings & pattern files](#fixed-strings--pattern-files--f--fi--patterns-from). |
 | `-file-where <expr>` | Per-file predicate over pattern ids (`'err AND NOT recovery'`). See [Per-file conditions](#per-file-conditions--file-where). |
 | `-records line` | With `-absent`: record-level absence — one JSON record per non-empty line lacking each pattern. See [Record-level absence](#record-level-absence--records-line). |
 | `-glob <glob>` | Scan glob (e.g. `"**/*.go"`; repeatable). Brace alternation is supported (`"src/**/*.{ts,tsx}"`), and absolute bases work too (`"/var/log/**/*.log"`). |
@@ -107,6 +108,10 @@ Positional file/dir args after `-s`/`-script` (or after a positional script file
 | `-scope <lang\|auto>` | Built-in language pack for enclosing-scope annotation (`auto`, `go`, `rust`, `c`, `cpp`, `java`, `js`, `ts`). See [Enclosing scope](#enclosing-scope). |
 | `-scope-pattern <regex>` | Custom scope-anchor regex (capture group 1 = name). |
 | `-scope-open <s>` / `-scope-close <s>` / `-scope-kind <s>` | Custom scope delimiters and emitted `kind` label (default `func`). |
+| `-in-scope <re>` | Keep only matches inside a scope whose name matches (whole enclosing chain; repeatable = OR; implies `-scope auto`). See [Scoped targeting](#scoped-targeting--in-scope---in-scope-kind---lines-and--list-scopes). |
+| `-in-scope-kind <k>` | Restrict `-in-scope` to scopes of this kind (or standalone: any scope of the kind). |
+| `-lines <spec>` | Keep only matches starting on these 1-based lines: `N`, `A:B`, `A:`, `:B` (repeatable = OR). |
+| `-list-scopes` | List the scope index instead of searching — one record per function/class; takes no patterns. |
 | `-near A:B:K` | Emit pattern `A`'s matches with a `B`-match within `K` lines (repeatable). See [Pattern relations](#pattern-relations--near---far). |
 | `-far A:B:K` | Emit `A`'s matches with **no** `B`-match within `K` lines (repeatable, ANDs with other relations). |
 | `-same-scope A:B` | Emit `A`'s matches that share their innermost enclosing scope with a `B`-match. Requires `-scope`. |
@@ -1267,7 +1272,7 @@ The following are deliberately rejected with an explicit error so they don't fai
 
 **Per-pattern**: `pcre` (not needed — Hyperscan is already PCRE), `run_pattern_at`, `run_pattern_from`, `run_pattern_to`, `run_pattern_until`.
 
-**Actions**: hprscript is a read-only search tool — any action that would alter file contents on disk is rejected, as are the `--write`/`--backup` CLI flags.
+**Actions**: the script DSL is read-only — any action that would alter file contents on disk is rejected, as are the `--write`/`--backup` CLI flags in search/script mode. File modification exists only in the explicit [`edit` subcommand](#edit-mode-hprscript-edit), which is dry-run by default.
 
 **Other**: word/sentence counters (`$WORD`/`$SENTENCE` resolve to 0 — the lexical pass is not yet wired up).
 
@@ -1702,6 +1707,52 @@ the next sibling definition.
 
 ---
 
+## Scoped targeting (`-in-scope` / `-in-scope-kind` / `-lines`) and `-list-scopes`
+
+Restrict where matches count — in search **and** edit mode (they are
+rejected in script mode). Both scope flags imply `-scope auto` when no
+scope config is given (records then also gain the `enclosing` annotation).
+
+- **`-in-scope <name-regex>`** — keep only matches whose enclosing-scope
+  *chain* contains a scope whose name matches (ECMAScript regex, search
+  semantics). The chain test means code inside an anonymous closure nested
+  in `ProcessBatch` still counts as inside `ProcessBatch`, and a method's
+  body counts as inside its class. Repeatable → OR.
+- **`-in-scope-kind <kind>`** — additionally require the matching scope's
+  kind (useful with custom `-scope-kind` packs; built-in packs use one kind
+  per language). Works standalone: any scope of that kind.
+- **`-lines <spec>`** — keep only matches *starting* on these 1-based lines.
+  Forms: `N`, `A:B`, `A:` (open end), `:B` (from 1). Repeatable → OR.
+  Line numbers go stale as files change — prefer `-in-scope` (names survive
+  edits), and in edit mode pair `-lines` with `-assert-contains`.
+
+Ordering: these filters run **after** `-near`/`-far` relations (relations
+judge proximity against the full match set) and **before** `-file-where`
+(the predicate sees only matches that count).
+
+```bash
+# Every retry( call inside ProcessBatch — including inside its closures:
+hprscript -p 'retry\(' -in-scope 'ProcessBatch' -llm '**/*.go'
+
+# Only in the region a stack trace pointed at:
+hprscript -p 'lock' -lines 120:180 -llm src/worker.go
+```
+
+**`-list-scopes`** — dump the scope index instead of searching: one record
+per detected function/class, no patterns involved. Honors
+`-in-scope`/`-in-scope-kind` as a filter and `-limit` as a cap; `-scope`
+defaults to `auto`. A ctags-lite outline in one call, and the natural first
+step before a scope-addressed edit: list → pick a name → `edit -in-scope
+'^Name$' -expect 1`.
+
+```bash
+hprscript -list-scopes src/data.go
+# {"type":"scope","file":"src/data.go","name":"LoadData","kind":"func","line_start":12,"line_end":40}
+hprscript -list-scopes -llm -glob '**/*.go'      # flat: path:12-40 func LoadData
+```
+
+---
+
 ## Pattern relations (`-near` / `-far`)
 
 Filter matches of one pattern by proximity (or distance) to matches of
@@ -1962,6 +2013,218 @@ hprscript -p 'TODO' -llm -limit 1 -glob '**/*.go'
 
 ---
 
+## Edit mode (`hprscript edit`)
+
+The `edit` subcommand is the **only** part of hprscript that can modify
+files. Search (`-p`) and script (`-s`) modes remain strictly read-only, and
+edit-mode flags like `-write` stay unknown-flag errors outside the
+subcommand — so command-prefix permission rules (agent harnesses,
+allowlists) can gate write capability separately from search.
+
+Edit mode turns the search pipeline into an edit-targeting language: the
+pattern that finds the sites is the pattern that edits them, and every
+search-mode targeting flag — `-glob`, `-exclude`, `-files-from`, `-git-*`,
+`-git-added-lines`, `-near`/`-far`, `-file-where`, `-m`/`-limit` — works
+unchanged as an edit qualifier.
+
+```bash
+# The canonical agent workflow — a two-step contract:
+hprscript edit -F 'retry(3)' -content 'retry(5)' src/worker.go   # 1. dry-run: diff + count
+hprscript edit -F 'retry(3)' -content 'retry(5)' -expect 1 -write src/worker.go   # 2. apply
+# If anything changed between the steps, the count mismatches, nothing is
+# written, and the exit code is 3.
+```
+
+### The safety contract
+
+1. **Dry-run is the default.** Without `-write`, nothing is touched: you get
+   a unified diff of the would-be changes plus a summary record. The diff is
+   computed from the same splice plan that `-write` applies — what you
+   preview is exactly what you get.
+2. **Guards refuse before anything is written.** All guards are evaluated
+   across ALL files first; any violation prints `{"type":"guard",...}`
+   records and exits **3** with zero bytes written.
+3. **Writes are atomic and byte-exact.** Per file: temp file in the same
+   directory, permissions copied, `rename(2)` over the target. Splices never
+   re-encode or re-serialize lines — CRLF endings, missing trailing
+   newlines, and non-UTF-8 bytes pass through untouched.
+4. **Reruns are safe.** A site whose replacement equals the current content
+   is a `noop`: counted, reported, never rewritten, exit 0.
+
+### Spans — what each match edits (`-span`)
+
+| `-span` | Byte range | Requires |
+|---|---|---|
+| `match` (default) | the match itself | — |
+| `line` | full line(s) containing the match, **including** the trailing newline | — |
+| `block` | same range as `$BLOCK`: opening delimiter through closing delimiter | `-block-open`/`-block-close` |
+| `block-full` | same range as `$BLOCK_FULL`: match start through block end | `-block-open`/`-block-close` |
+| `scope` | the enclosing scope: signature start through closing delimiter | active `-scope`, or `-in-scope` (implies auto) |
+| `scope-body` | the enclosing scope's body block (delimiters included) | same |
+
+Two matches resolving to the same span with the same content collapse into
+one edit site (e.g. two hits inside one function with a scope span).
+
+For scope spans, "enclosing" means the innermost containing scope — except
+when `-in-scope` is active, where it means the innermost scope **satisfying
+the filter**: `-p 'retry' -in-scope 'ProcessBatch' -span scope` targets
+`ProcessBatch`, not an anonymous closure the match happens to sit in. A
+match outside any recognized scope is a `scope-not-found` guard violation
+(exit 3), never a silent skip.
+
+### Anchorless scope edits — "replace the function named X"
+
+With `-in-scope`/`-in-scope-kind` and `-span scope|scope-body`, the pattern
+is optional: with **no `-p` at all**, every scope matching the filter
+becomes an edit site directly. This is the cleanest whole-function swap —
+no signature regex, no brace flags; the scope pack already knows the
+language:
+
+```bash
+# List candidates, then replace by name:
+hprscript -list-scopes src/data.go
+hprscript edit -in-scope '^LoadData$' -span scope \
+    -content-file /tmp/new_loaddata.go -expect 1 -write src/data.go
+
+# Append a statement at the end of main()'s body:
+hprscript edit -in-scope '^main$' -span scope-body -insert end \
+    -content '\tflush()\n' -expect 1 -write cmd/run.go
+```
+
+In anchorless sites the edit record's `pat` is the scope's name, `$MATCH`
+expands empty, and `$ENCLOSING_NAME`/`$ENCLOSING_KIND` refer to the scope
+itself. Nested scopes that both match the filter produce overlapping sites
+— reported as a conflict (tighten the regex or add `-in-scope-kind`).
+
+> **Newline gotcha for block spans:** the span ends at the closing
+> delimiter, not at end-of-line. If your `-content-file` ends with a
+> newline, a `block`/`block-full` replacement introduces a blank line —
+> the dry-run diff will show it. Trim the trailing newline
+> (`printf '%s' "$(cat f)" > f`) or write the file without one.
+
+### Content — what goes in
+
+Exactly one source (none with `-delete`):
+
+| Flag | Semantics |
+|---|---|
+| `-content '<tmpl>'` | Inline template. Backslash escapes `\n` `\t` `\r` `\\` are interpreted once; `$`-tokens expand per site (below). |
+| `-content-file <f>` | File bytes, **verbatim** — no escapes, no tokens. The way to pass multi-line code: no shell quoting, ever. |
+| `-content-stdin` | Same, from stdin. |
+
+Template tokens: `$MATCH` (the matched text), `$FILE`, `$LINE`, `$PAT_ID`,
+`$EXTRACT_<NAME>` (capture groups via `-extract`, name-insensitive),
+`$ENCLOSING_NAME` / `$ENCLOSING_KIND` (with `-scope`), `$$` for a literal
+`$`. Unknown tokens stay literal, like `-format`.
+
+```bash
+# sed-style substitution with a capture group:
+hprscript edit -p 'log\.Printf\("([^"]*)"' -extract fmt \
+    -content 'logger.Infof("$EXTRACT_FMT"' -write -glob '**/*.go'
+```
+
+### Verbs
+
+- **Replace** (default): the span becomes the content.
+- **Insert** (`-insert before|after|start|end`): content is added at a span
+  edge; no old text is removed or reproduced. `before`/`after` = the span's
+  outer edges (any span); `start`/`end` = just inside the delimiters
+  (`block` and `scope-body` spans).
+- **Delete** (`-delete`): the span is removed. With `-span line` the
+  trailing newline goes too — no blank line left behind.
+
+```bash
+# Add an import inside Go's import ( ... ) block:
+hprscript edit -p '^import \(' -block-open '(' -block-close ')' \
+    -span block -insert end -content '\t"corp/log"\n' -expect 1 -write main.go
+
+# Swap an entire function implementation — new body from a file, old body
+# never reproduced:
+hprscript edit -p 'func\s+LoadData\b' -block-open '{' -block-close '}' \
+    -span block-full -content-file /tmp/new_loaddata.go -expect 1 -write src/data.go
+
+# Delete every debug print, but only if exactly 6 exist:
+hprscript edit -p '^\s*debugPrint\(' -span line -delete -expect 6 -write -glob '**/*.go'
+```
+
+### Reference-only patterns (`-ref`)
+
+In multi-pattern edits, a pattern that exists only to *qualify* other
+patterns (the B side of `-near`/`-far`, a `-file-where` operand) must not
+have its own matches edited. Mark it `-ref`:
+
+```bash
+# Replace p(N) calls EXCEPT on lines carrying "keep" — without -ref the
+# 'keep' matches themselves would be rewritten too:
+hprscript edit -p 'p\([0-9]\)' -name hit -p 'keep' -name allow -ref \
+    -far hit:allow:0 -content 'q()' -write src.txt
+```
+
+In `-patterns-from` rule files, the same is expressed with a `"ref": true
+` field on the entry. A pattern set where *everything* is reference-only is
+a usage error — something has to produce edits.
+
+### Guards — every failure is exit 3, nothing written
+
+| Guard | Meaning |
+|---|---|
+| `-expect <n>` | Refuse unless exactly n edit sites exist (after dedup, including noops). The dry-run count feeds this: plan, read the count, apply with `-expect <count>` — drift between the two steps becomes a refusal. |
+| `-max-span-lines <n>` | Refuse spans over n lines (default **500**, `0` = off). The safety net for lexically skewed blocks — a brace inside a string literal makes the block run away, and the runaway shows up as an absurd span. |
+| `-assert-contains <re>` | Refuse unless every target span matches (ECMAScript regex, search semantics). The staleness tripwire: "replace this only if it still contains X". |
+| overlap (always on) | Two edits overlapping or nesting — including an insert landing inside a replaced span, or two different-content edits on identical ranges — refuse, naming both sites. |
+| block-not-found (always on) | A match whose balanced block cannot be resolved refuses instead of being silently skipped. |
+| scope-not-found (always on) | A scope-span match outside any recognized scope refuses instead of being silently skipped. |
+| changed-during-run (always on) | File size/mtime re-checked between planning and writing; drift refuses. |
+
+### Output
+
+- **Dry-run (default):** unified diff (git-style `a/` `b/` headers, 3
+  context lines, `\ No newline at end of file` markers) + a trailing
+  `edit-summary` record. `-j` switches to JSONL edit records instead.
+- **`-write`:** JSONL edit records + summary — the machine-readable receipt.
+  `-diff` additionally prints the diff.
+
+```json
+{"type":"edit","file":"src/a.go","pat":"p0","verb":"replace","span":"match",
+ "line_start":12,"line_end":12,"bytes_removed":8,"bytes_added":8,"status":"changed"}
+{"type":"edit-summary","sites":3,"changed":2,"noops":1,"files_changed":1,
+ "dry_run":false,"applied":true}
+```
+
+`-summary` / `-diagnostics` / `-require-complete` work as in search mode
+(scan accounting is emitted before the edit summary).
+
+### Exit codes
+
+| Code | Meaning |
+|---|---|
+| 0 | ≥1 edit site; previewed (dry-run) or applied (`-write`) |
+| 1 | no edit sites matched — nothing to do |
+| 2 | usage / pattern-compile / IO error |
+| **3** | **guard violation — refused, nothing written** |
+
+Exit 3 is the "my assumption was wrong" signal: agents can branch on it
+without parsing stderr.
+
+### Semantics worth knowing
+
+- **Site order and dedup**: sites sort by byte offset; identical
+  (range, content) pairs dedup to one site; identical ranges with different
+  content conflict. An insert exactly at a replaced span's boundary is
+  allowed (inserts sort before the replacement at the same offset).
+- **`-m`/`-limit`** bound the matches considered, silently — prefer
+  `-expect` when exactness matters.
+- **Symlinks** are resolved; the target file is rewritten and the edit
+  record carries `symlink_target`.
+- **Binary files** (NUL in the first 512 bytes) are skipped like search
+  mode; `-diagnostics` surfaces them.
+- **Not available in edit mode**: `-o`/`-f`/`-c`/`-llm`/`-absent`/`-format`,
+  `-A`/`-B`/`-C`, `-sample`, `-records`, `-s`/`-script`, and stdin as a scan
+  target — every input must be an explicit file, glob, list, or git
+  selection.
+
+---
+
 ## Build and install
 
 ```bash
@@ -1997,4 +2260,4 @@ The binary depends only on the platform C library — on Linux verify with `ldd 
 - **Use `-sample N` for "show me representative usages"** when an agent doesn't need every match — diversifying by file and surrounding-line shape produces a better picture in fewer tokens than `-limit N`.
 - **Set byte budgets defensively.** A `-max-context-bytes 500 -max-output-bytes 200000` floor protects an agent from a single minified line wiping out its context. Truncation is reported explicitly via per-field `*_truncated` flags and a final `output_truncated` info record — never silent.
 - **Prefer `-llm` over `-j` when piping matches into an LLM.** It strips JSON noise, dedupes file headers, tags each line with its pattern id when several patterns are active, and adapts to `-block-open`/`-scope` automatically — same information, ~30–50% fewer tokens. Switch back to `-j` only when you need byte offsets or `extracted` capture groups.
-- **hprscript does not modify files.** It is a read-only search tool — any action that would alter file contents on disk is rejected, as are the `--write`/`--backup` flags.
+- **Search and script modes never modify files.** All writes live in the explicit `hprscript edit` subcommand (see [Edit mode](#edit-mode-hprscript-edit)): dry-run by default, guarded by `-expect`, refusing with exit 3 instead of writing when any assumption fails. Outside the subcommand, write-shaped flags like `-write` remain unknown-flag errors.
