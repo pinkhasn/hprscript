@@ -49,6 +49,16 @@
 namespace hpr {
 namespace {
 
+// glibc (Linux) names `struct stat`'s POSIX nanosecond mtime field
+// `st_mtim`; BSD/Darwin (macOS) names the same struct timespec
+// `st_mtimespec`. Centralize the one platform difference here instead of
+// scattering #ifdefs at each read site.
+#if defined(__APPLE__)
+struct timespec stat_mtime(const struct stat &st) { return st.st_mtimespec; }
+#else
+struct timespec stat_mtime(const struct stat &st) { return st.st_mtim; }
+#endif
+
 // One planned splice: bytes [start,end) of the file are replaced by `text`.
 // Inserts are zero-width (start == end). `span_*` is the resolved span the
 // site was derived from — for replace/delete it equals [start,end); for
@@ -599,6 +609,14 @@ int run_edit(const Cli &cli) {
     const bool any_scope_rel = any_scope_relation(rels);
     FileWhere fw;
     if (!fw.init(cli.file_where, patterns)) return 2;
+    std::map<int, std::unordered_map<std::string, uint32_t>> churn_map;
+    if (!fw.churn_windows().empty()) {
+        std::string cerr;
+        if (!build_churn_map(fw.churn_windows(), churn_map, cerr)) {
+            std::fprintf(stderr, "hprscript: git: %s\n", cerr.c_str());
+            return 2;
+        }
+    }
 
     Matcher matcher;
     if (!anchorless) {
@@ -742,7 +760,9 @@ int run_edit(const Cli &cli) {
             collector.collect(matcher, content, idx, scope_ptr, al, kept);
             tf.apply(kept, idx, scope_ptr);
             if (kept.empty()) return true;
-            if (fw.active() && !fw.pass(kept, patterns.size())) return true;
+            if (fw.active() &&
+                !fw.pass(kept, patterns.size(), it.path, churn_map))
+                return true;
             stats.matches_seen += kept.size();
 
             // -ref patterns qualify (relations above, -file-where just now)
@@ -795,7 +815,7 @@ int run_edit(const Cli &cli) {
         struct stat stbuf;
         if (::stat(pf.write_path.c_str(), &stbuf) == 0) {
             pf.st_size = stbuf.st_size;
-            pf.st_mtim = stbuf.st_mtim;
+            pf.st_mtim = stat_mtime(stbuf);
             pf.st_mode = stbuf.st_mode & 07777;
         }
 
@@ -1165,8 +1185,8 @@ int run_edit(const Cli &cli) {
         struct stat stbuf;
         bool drifted = ::stat(pf.write_path.c_str(), &stbuf) != 0 ||
                        stbuf.st_size != pf.st_size ||
-                       stbuf.st_mtim.tv_sec != pf.st_mtim.tv_sec ||
-                       stbuf.st_mtim.tv_nsec != pf.st_mtim.tv_nsec;
+                       stat_mtime(stbuf).tv_sec != pf.st_mtim.tv_sec ||
+                       stat_mtime(stbuf).tv_nsec != pf.st_mtim.tv_nsec;
         if (drifted) {
             Violation v;
             v.guard = "changed-during-run";

@@ -1889,6 +1889,505 @@ expect_contains "-list-scopes rejects -lines" "does not apply" "$OUT"
 rm -rf "$SC"
 
 # ---------------------------------------------------------------------------
+section "elided scope output (-elide)"
+EL=$(mktemp -d)
+cat > "$EL/el.go" <<'GOEOF'
+package main
+
+// target: top-level marker
+
+func ShortFn() {
+    target()
+}
+
+func LongFn() {
+    target()
+    step1()
+    step2()
+    step3()
+    step4()
+    step5()
+    step6()
+    step7()
+    step8()
+    target()
+}
+GOEOF
+
+OUT=$("$BIN" -p 'target' -elide -scope go "$EL/el.go")
+expect_contains "-elide: file header" "$EL/el.go" "$OUT"
+expect_contains "-elide: scope header shows kind+name" "5-7 func ShortFn" "$OUT"
+expect_contains "-elide: signature line kept" "func LongFn() {" "$OUT"
+expect_contains "-elide: big gap elided" "… (+8 lines)" "$OUT"
+expect_contains "-elide: closing line kept" "}" "$OUT"
+expect_contains "-elide: orphan match outside any scope" "3: // target: top-level marker" "$OUT"
+SHORT_BLOCK=$(printf '%s\n' "$OUT" | awk '/5-7 func ShortFn/{f=1} f{print} f && /^$/{exit}')
+if [[ "$SHORT_BLOCK" != *"…"* ]]; then
+    report ok "-elide: short function has no elision marker"
+else
+    report fail "-elide: short function has no elision marker"
+fi
+
+# --- implicit -scope auto: no -scope flag needed to trigger eliding
+OUT=$("$BIN" -p 'target' -elide "$EL/el.go")
+expect_contains "-elide implies -scope auto" "func ShortFn" "$OUT"
+
+# --- mutually exclusive with other output modes and with -sample
+OUT=$("$BIN" -p x -elide -llm 2>&1) ; RC=$?
+expect_contains "-elide output-mode conflict" "mutually exclusive" "$OUT"
+[[ "$RC" == "2" ]] && report ok "-elide output-mode conflict exit 2" || report fail "-elide output-mode conflict exit (got $RC)"
+OUT=$("$BIN" -p x -elide -sample 5 2>&1) ; RC=$?
+expect_contains "-elide + -sample rejected" "doesn't compose with -sample" "$OUT"
+[[ "$RC" == "2" ]] && report ok "-elide + -sample exit 2" || report fail "-elide + -sample exit (got $RC)"
+
+# --- -m caps how many matches participate in the render (pattern excludes
+# the top-level orphan so match #1 is unambiguously the ShortFn hit)
+OUT=$("$BIN" -p 'target\(\)' -elide -scope go -m 1 "$EL/el.go")
+expect_contains "-elide -m 1 renders first match's scope" "func ShortFn" "$OUT"
+if [[ "$OUT" != *"LongFn"* ]]; then
+    report ok "-elide -m 1 excludes later matches"
+else
+    report fail "-elide -m 1 excludes later matches"
+fi
+
+rm -rf "$EL"
+
+# ---------------------------------------------------------------------------
+section "hotspot ranking (-hotspots)"
+HS=$(mktemp -d)
+cat > "$HS/hot.go" <<'GOEOF'
+package main
+
+func Busy() {
+    alpha()
+    beta()
+}
+GOEOF
+cat > "$HS/cold.go" <<'GOEOF'
+package main
+
+func Quiet() {
+    alpha()
+}
+GOEOF
+
+# hot.go matches both patterns (full coverage + a proximity cluster) so it
+# must outrank cold.go, which matches only one.
+OUT=$("$BIN" -p 'alpha\(\)' -p 'beta\(\)' -hotspots 2 "$HS/hot.go" "$HS/cold.go")
+FIRST_LINE=$(printf '%s\n' "$OUT" | head -n1)
+expect_contains "-hotspots ranks fuller-coverage file first" "hot.go" "$FIRST_LINE"
+expect_lines "-hotspots emits one row per file" 2 "$OUT"
+expect_contains "-hotspots JSONL shape" '"type":"hotspot"' "$OUT"
+
+OUT=$("$BIN" -p 'alpha\(\)' -p 'beta\(\)' -hotspots 1 -llm "$HS/hot.go" "$HS/cold.go")
+expect_contains "-hotspots -llm flat line" "hot.go:" "$OUT"
+expect_contains "-hotspots -llm shows patterns" "patterns=" "$OUT"
+
+OUT=$("$BIN" -p 'alpha\(\)' -p 'beta\(\)' -hotspots 1 -elide -scope go "$HS/hot.go" "$HS/cold.go")
+expect_contains "-hotspots -elide renders top file's scope" "func Busy" "$OUT"
+if [[ "$OUT" != *"Quiet"* ]]; then
+    report ok "-hotspots 1 -elide excludes lower-ranked file"
+else
+    report fail "-hotspots 1 -elide excludes lower-ranked file"
+fi
+
+# --- validation
+OUT=$("$BIN" -p x -hotspots 5 -sample 3 2>&1) ; RC=$?
+expect_contains "-hotspots + -sample rejected" "cannot combine with -sample" "$OUT"
+[[ "$RC" == "2" ]] && report ok "-hotspots + -sample exit 2" || report fail "-hotspots + -sample exit (got $RC)"
+OUT=$("$BIN" -p x -hotspots 5 -f 2>&1) ; RC=$?
+expect_contains "-hotspots rejects -f output mode" "JSONL (default), -llm, or -elide" "$OUT"
+[[ "$RC" == "2" ]] && report ok "-hotspots -f exit 2" || report fail "-hotspots -f exit (got $RC)"
+OUT=$("$BIN" edit -p x -hotspots 5 -content y "$HS/hot.go" 2>&1) ; RC=$?
+expect_contains "edit mode rejects -hotspots" "cannot combine with -hotspots" "$OUT"
+[[ "$RC" == "2" ]] && report ok "edit mode -hotspots exit 2" || report fail "edit mode -hotspots exit (got $RC)"
+OUT=$("$BIN" -p 'zzz_no_such_token_zzz' -hotspots 5 "$HS/hot.go" ; echo "rc=$?")
+expect_contains "-hotspots no matches exit 1" "rc=1" "$OUT"
+
+rm -rf "$HS"
+
+# ---------------------------------------------------------------------------
+section "budget-packed context (-budget)"
+BG=$(mktemp -d)
+cat > "$BG/hot.go" <<'GOEOF'
+package main
+
+func Busy() {
+    alpha()
+    beta()
+}
+GOEOF
+cat > "$BG/cold.go" <<'GOEOF'
+package main
+
+func Quiet() {
+    alpha()
+}
+GOEOF
+
+# Measure each file's standalone full-render size so budget thresholds are
+# derived, not hardcoded — robust to any future change in -elide's shape.
+HOT_ELIDE=$("$BIN" -p 'alpha\(\)' -p 'beta\(\)' -elide -scope go "$BG/hot.go")
+HOT_LEN=$(printf '%s' "$HOT_ELIDE" | wc -c)
+COLD_ELIDE=$("$BIN" -p 'alpha\(\)' -p 'beta\(\)' -elide -scope go "$BG/cold.go")
+COLD_LEN=$(printf '%s' "$COLD_ELIDE" | wc -c)
+
+# --- huge budget: both files render in full, no footer at all
+OUT=$("$BIN" -p 'alpha\(\)' -p 'beta\(\)' -budget $((HOT_LEN + COLD_LEN + 1000)) "$BG/hot.go" "$BG/cold.go")
+expect_contains "-budget huge: hot.go in full" "func Busy" "$OUT"
+expect_contains "-budget huge: cold.go in full" "func Quiet" "$OUT"
+if [[ "$OUT" != *"--- budget:"* ]]; then
+    report ok "-budget huge: no footer when nothing degraded"
+else
+    report fail "-budget huge: no footer when nothing degraded"
+fi
+
+# --- mid budget: only room for the top-ranked file (hot.go: full coverage +
+# proximity cluster outranks cold.go), cold.go can't fit in any form
+OUT=$("$BIN" -p 'alpha\(\)' -p 'beta\(\)' -budget $((HOT_LEN + 3)) "$BG/hot.go" "$BG/cold.go")
+expect_contains "-budget mid: top file rendered in full" "func Busy" "$OUT"
+if [[ "$OUT" != *"Quiet"* ]]; then
+    report ok "-budget mid: lower-ranked file not shown in any form"
+else
+    report fail "-budget mid: lower-ranked file not shown in any form"
+fi
+expect_contains "-budget mid: footer counts one file in full" "1 file(s) in full" "$OUT"
+expect_contains "-budget mid: footer names the dropped file" "cold.go" "$OUT"
+
+# --- a budget below the full render but above the compact line degrades to
+# the one-line compact summary instead of the source text. A single tiny
+# function's full render can be as small as (or smaller than) its own
+# compact line, especially under a long mktemp path, so use a file with
+# several matched functions — its multi-block full render is reliably
+# bigger than one compact line regardless of path length — and probe a
+# range rather than assume a fixed threshold.
+cat > "$BG/multi.go" <<'GOEOF'
+package main
+
+func Busy1() {
+    alpha()
+    beta()
+}
+
+func Busy2() {
+    alpha()
+    beta()
+}
+
+func Busy3() {
+    alpha()
+    beta()
+}
+
+func Busy4() {
+    alpha()
+    beta()
+}
+GOEOF
+MULTI_ELIDE=$("$BIN" -p 'alpha\(\)' -p 'beta\(\)' -elide -scope go "$BG/multi.go")
+MULTI_LEN=$(printf '%s' "$MULTI_ELIDE" | wc -c)
+COMPACT_OUT=""
+for b in $(seq 20 10 "$MULTI_LEN"); do
+    PROBE=$("$BIN" -p 'alpha\(\)' -p 'beta\(\)' -budget "$b" "$BG/multi.go")
+    if [[ "$PROBE" == *"(compact"* ]]; then COMPACT_OUT="$PROBE"; break; fi
+done
+expect_contains "-budget: compact summary reachable" "(compact — full render didn't fit the budget)" "$COMPACT_OUT"
+if [[ "$COMPACT_OUT" != *"func Busy"* ]]; then
+    report ok "-budget: compact summary omits source text"
+else
+    report fail "-budget: compact summary omits source text"
+fi
+
+# --- essentially zero budget: everything dropped, exit 1
+OUT=$("$BIN" -p 'alpha\(\)' -p 'beta\(\)' -budget 1 "$BG/hot.go" "$BG/cold.go" ; echo "rc=$?")
+expect_contains "-budget ~0: both dropped" "2 dropped" "$OUT"
+expect_contains "-budget ~0: exit 1" "rc=1" "$OUT"
+
+# --- validation
+OUT=$("$BIN" -p x -budget 1000 -llm 2>&1) ; RC=$?
+expect_contains "-budget + explicit output mode rejected" "defines its own output shape" "$OUT"
+[[ "$RC" == "2" ]] && report ok "-budget + -llm exit 2" || report fail "-budget + -llm exit (got $RC)"
+OUT=$("$BIN" -p x -budget 1000 -sample 5 2>&1) ; RC=$?
+expect_contains "-budget + -sample rejected" "cannot combine with -sample/-hotspots" "$OUT"
+[[ "$RC" == "2" ]] && report ok "-budget + -sample exit 2" || report fail "-budget + -sample exit (got $RC)"
+OUT=$("$BIN" edit -p x -budget 1000 -content y "$BG/hot.go" 2>&1) ; RC=$?
+expect_contains "edit mode rejects -budget" "cannot combine with -budget" "$OUT"
+[[ "$RC" == "2" ]] && report ok "edit mode -budget exit 2" || report fail "edit mode -budget exit (got $RC)"
+
+rm -rf "$BG"
+
+# ---------------------------------------------------------------------------
+section "identifier matching (-ident)"
+ID=$(mktemp -d)
+cat > "$ID/id.go" <<'GOEOF'
+package main
+
+func parseConfig() {}
+func ParseConfig() {}
+func parse_config() {}
+func ConfigParser() {}
+func HTTPServerConfig() {}
+func utf8Decoder() {}
+func unrelated() {}
+func MAX_RETRY_COUNT() {}
+GOEOF
+
+# --- casing/separator-agnostic AND-within-group matching
+OUT=$("$BIN" -ident 'parse config' -o "$ID/id.go")
+expect_lines "-ident: matches all casing variants" 4 "$OUT"
+expect_contains "-ident: camelCase" "parseConfig" "$OUT"
+expect_contains "-ident: PascalCase" "ParseConfig" "$OUT"
+expect_contains "-ident: snake_case" "parse_config" "$OUT"
+expect_contains "-ident: reversed word order still matches (AND, not sequence)" "ConfigParser" "$OUT"
+if [[ "$OUT" != *"unrelated"* && "$OUT" != *"HTTPServerConfig"* ]]; then
+    report ok "-ident: non-matching identifiers excluded"
+else
+    report fail "-ident: non-matching identifiers excluded"
+fi
+
+# --- acronym and digit-boundary splitting
+OUT=$("$BIN" -ident 'http server' -o "$ID/id.go")
+expect_eq "-ident: acronym split (HTTPServer)" "HTTPServerConfig" "$OUT"
+OUT=$("$BIN" -ident 'utf8' -o "$ID/id.go")
+expect_eq "-ident: digit-spanning term" "utf8Decoder" "$OUT"
+OUT=$("$BIN" -ident 'max retry' -o "$ID/id.go")
+expect_eq "-ident: underscore-separated all-caps" "MAX_RETRY_COUNT" "$OUT"
+
+# --- OR across repeated -ident groups
+OUT=$("$BIN" -ident 'parse config' -ident 'unrelated' -f "$ID/id.go")
+expect_contains "-ident: repeated groups OR together" "id.go" "$OUT"
+COUNT=$("$BIN" -ident 'parse config' -ident 'unrelated' -o "$ID/id.go" | wc -l)
+[[ "$COUNT" -eq 5 ]] && report ok "-ident: OR group adds its own matches" || report fail "-ident: OR group adds its own matches (got $COUNT)"
+
+# --- synthetic pattern id: auto ident0/ident1 and explicit -name
+OUT=$("$BIN" -ident 'parse config' -format '$PAT_ID' "$ID/id.go")
+expect_eq "-ident: auto id is ident0" "ident0" "$(printf '%s\n' "$OUT" | head -n1)"
+OUT=$("$BIN" -ident 'parse config' -name myid -format '$PAT_ID' "$ID/id.go")
+expect_eq "-ident: -name overrides auto id" "myid" "$(printf '%s\n' "$OUT" | head -n1)"
+OUT=$("$BIN" -p 'func' -ident 'parse config' -name pc -format '$PAT_ID' "$ID/id.go")
+if [[ "$OUT" == *"p0"* && "$OUT" == *"pc"* ]]; then
+    report ok "-ident: coexists with -p's independent p<i> numbering"
+else
+    report fail "-ident: coexists with -p's independent p<i> numbering"
+fi
+
+# --- composes with relations and -file-where
+cat > "$ID/rel.go" <<'GOEOF'
+package main
+
+func Handler() {
+    parseConfig()
+    doWork()
+}
+
+func Other() {
+    doWork()
+}
+GOEOF
+OUT=$("$BIN" -p 'doWork' -name work -ident 'parse config' -name pc -near work:pc:2 -format '$LINE $PAT_ID' "$ID/rel.go")
+expect_eq "-ident: participates in -near" "$(printf '4 pc\n5 work')" "$OUT"
+OUT=$("$BIN" -p 'Other' -name has_other -ident 'parse config' -name pc -file-where 'NOT has_other' -f "$ID/rel.go" ; true)
+expect_lines "-ident: participates in -file-where" 0 "$OUT"
+
+# --- validation
+OUT=$("$BIN" -ident 'parse config' -extract x "$ID/id.go" 2>&1) ; RC=$?
+expect_contains "-extract after -ident rejected" "cannot follow -ident" "$OUT"
+[[ "$RC" == "2" ]] && report ok "-extract after -ident exit 2" || report fail "-extract after -ident exit (got $RC)"
+OUT=$("$BIN" -ident '   ' "$ID/id.go" 2>&1) ; RC=$?
+expect_contains "-ident: empty terms rejected" "at least one term required" "$OUT"
+[[ "$RC" == "2" ]] && report ok "-ident empty terms exit 2" || report fail "-ident empty terms exit (got $RC)"
+OUT=$("$BIN" edit -ident 'parse config' -content x "$ID/id.go" 2>&1) ; RC=$?
+expect_contains "edit mode rejects -ident" "cannot combine with -ident" "$OUT"
+[[ "$RC" == "2" ]] && report ok "edit mode -ident exit 2" || report fail "edit mode -ident exit (got $RC)"
+OUT=$("$BIN" -ident 'zzz nonexistent' "$ID/id.go" ; echo "rc=$?")
+expect_contains "-ident: no matches exit 1" "rc=1" "$OUT"
+
+rm -rf "$ID"
+
+# ---------------------------------------------------------------------------
+section "-file-where metadata conditions (count/churn/lang)"
+FW=$(mktemp -d)
+printf 'foo\nfoo\nfoo\n' > "$FW/hot.txt"
+printf 'foo\n' > "$FW/cold.txt"
+printf 'package main\n' > "$FW/a.go"
+
+# --- count(pat)
+OUT=$("$BIN" -p foo -name f -file-where 'count(f) >= 2' -f "$FW/hot.txt" "$FW/cold.txt")
+expect_eq "-file-where count(): threshold met" "$FW/hot.txt" "$OUT"
+OUT=$("$BIN" -p foo -name f -file-where 'count(f) >= 5' -f "$FW/hot.txt" "$FW/cold.txt" ; true)
+expect_lines "-file-where count(): threshold not met" 0 "$OUT"
+
+# --- lang
+OUT=$("$BIN" -p 'package' -file-where 'lang == go' -f "$FW/a.go" "$FW/hot.txt")
+expect_eq "-file-where lang ==" "$FW/a.go" "$OUT"
+OUT=$("$BIN" -p 'foo' -file-where 'lang != go' -f "$FW/a.go" "$FW/hot.txt")
+expect_eq "-file-where lang !=" "$FW/hot.txt" "$OUT"
+
+# --- compound
+OUT=$("$BIN" -p foo -name f -file-where 'count(f) >= 2 AND lang != go' -f "$FW/hot.txt" "$FW/cold.txt" "$FW/a.go")
+expect_eq "-file-where compound count+lang" "$FW/hot.txt" "$OUT"
+
+# --- churn(): fresh repo, commit hot.txt 3x and cold.txt once, all "now" —
+# well within any day-window regardless of when the test runs.
+GITREPO=$(mktemp -d)
+(
+    cd "$GITREPO"
+    git init -q
+    git config user.email test@example.com
+    git config user.name Test
+    printf 'foo\n' > hot.txt
+    printf 'foo\n' > cold.txt
+    git add -A && git commit -q -m 1
+    printf 'foo\nfoo\n' > hot.txt
+    git add -A && git commit -q -m 2
+    printf 'foo\nfoo\nfoo\n' > hot.txt
+    git add -A && git commit -q -m 3
+)
+OUT=$(cd "$GITREPO" && "$BIN" -p foo -file-where 'churn(1) > 1' -f hot.txt cold.txt)
+expect_eq "-file-where churn(): more-committed file selected" "hot.txt" "$OUT"
+OUT=$(cd "$GITREPO" && "$BIN" -p foo -file-where 'churn(1) > 5' -f hot.txt cold.txt ; true)
+expect_lines "-file-where churn(): threshold not met" 0 "$OUT"
+
+# --- edit mode: same predicates work for targeting
+OUT=$(cd "$GITREPO" && "$BIN" edit -p foo -file-where 'churn(1) > 1' -content bar -j hot.txt)
+expect_contains "edit mode: churn() predicate targets correctly" '"file":"hot.txt"' "$OUT"
+OUT=$(cd "$GITREPO" && "$BIN" edit -p foo -file-where 'churn(1) > 1' -content bar -j cold.txt 2>&1) ; RC=$?
+[[ "$RC" == "1" ]] && report ok "edit mode: churn() predicate excludes non-matching file" || report fail "edit mode: churn() exclude (got $RC)"
+
+rm -rf "$GITREPO"
+
+# --- validation
+OUT=$("$BIN" -p x -file-where 'churn(abc) > 2' 2>&1) ; RC=$?
+expect_contains "-file-where: non-numeric churn arg rejected" "positive integer day-window" "$OUT"
+[[ "$RC" == "2" ]] && report ok "-file-where churn(abc) exit 2" || report fail "-file-where churn(abc) exit (got $RC)"
+OUT=$("$BIN" -p x -file-where 'lang > go' 2>&1) ; RC=$?
+expect_contains "-file-where: lang ordering operator rejected" "only supports == and !=" "$OUT"
+[[ "$RC" == "2" ]] && report ok "-file-where lang> exit 2" || report fail "-file-where lang> exit (got $RC)"
+OUT=$("$BIN" -p x -file-where 'foo(bar) > 2' 2>&1) ; RC=$?
+expect_contains "-file-where: unknown condition function rejected" "unknown condition" "$OUT"
+[[ "$RC" == "2" ]] && report ok "-file-where foo(bar) exit 2" || report fail "-file-where foo(bar) exit (got $RC)"
+OUT=$("$BIN" -p x -name f -file-where 'count(zzz) > 2' 2>&1) ; RC=$?
+expect_contains "-file-where: unknown pattern in count() rejected" "unknown pattern" "$OUT"
+[[ "$RC" == "2" ]] && report ok "-file-where count(zzz) exit 2" || report fail "-file-where count(zzz) exit (got $RC)"
+
+rm -rf "$FW"
+
+# ---------------------------------------------------------------------------
+section "sorting file-grouped output (-order-by)"
+OB=$(mktemp -d)
+printf 'foo\nfoo\nfoo\n' > "$OB/c_three.txt"
+printf 'foo\n' > "$OB/a_one.txt"
+printf 'foo\nfoo\n' > "$OB/b_two.txt"
+
+OUT=$("$BIN" -p foo -c -order-by path "$OB/c_three.txt" "$OB/a_one.txt" "$OB/b_two.txt")
+expect_eq "-order-by path" "$(printf '%s:1\n%s:2\n%s:3' "$OB/a_one.txt" "$OB/b_two.txt" "$OB/c_three.txt")" "$OUT"
+
+OUT=$("$BIN" -p foo -c -order-by count "$OB/c_three.txt" "$OB/a_one.txt" "$OB/b_two.txt")
+FIRST_LINE=$(printf '%s\n' "$OUT" | head -n1)
+expect_eq "-order-by count: highest first" "$OB/c_three.txt:3" "$FIRST_LINE"
+
+OUT=$("$BIN" -p foo -f -order-by score "$OB/c_three.txt" "$OB/a_one.txt" "$OB/b_two.txt")
+expect_eq "-order-by score: densest file first" "$OB/c_three.txt" "$(printf '%s\n' "$OUT" | head -n1)"
+
+# --- -c lists every file (including :0) even when ordered
+printf 'nothing\n' > "$OB/d_zero.txt"
+OUT=$("$BIN" -p foo -c -order-by path "$OB/d_zero.txt" "$OB/a_one.txt" ; echo "rc=$?")
+expect_contains "-order-by: -c still lists 0-match files" "d_zero.txt:0" "$OUT"
+expect_contains "-order-by: exit code reflects matches, not rows" "rc=0" "$OUT"
+OUT=$("$BIN" -p foo -c -order-by path "$OB/d_zero.txt" ; echo "rc=$?")
+expect_contains "-order-by: exit 1 when the only row has 0 matches" "rc=1" "$OUT"
+
+# --- validation
+OUT=$("$BIN" -p foo -order-by path 2>&1) ; RC=$?
+expect_contains "-order-by requires -f/-c" "requires -f or -c output" "$OUT"
+[[ "$RC" == "2" ]] && report ok "-order-by without -f/-c exit 2" || report fail "-order-by without -f/-c exit (got $RC)"
+OUT=$("$BIN" -p foo -order-by bogus 2>&1) ; RC=$?
+expect_contains "-order-by: unknown field rejected" "unknown field" "$OUT"
+[[ "$RC" == "2" ]] && report ok "-order-by bogus field exit 2" || report fail "-order-by bogus field exit (got $RC)"
+OUT=$("$BIN" edit -p foo -order-by path -content bar "$OB/a_one.txt" 2>&1) ; RC=$?
+expect_contains "edit mode rejects -order-by" "cannot combine with -order-by" "$OUT"
+[[ "$RC" == "2" ]] && report ok "edit mode -order-by exit 2" || report fail "edit mode -order-by exit (got $RC)"
+
+rm -rf "$OB"
+
+# ---------------------------------------------------------------------------
+section "cross-invocation dedup (-seen)"
+SN=$(mktemp -d)
+cat > "$SN/f.go" <<'GOEOF'
+package main
+
+func Alpha() {
+    target()
+}
+
+func Beta() {
+    target()
+}
+GOEOF
+
+# --- first run: full render, state file written in the documented format
+OUT=$("$BIN" -p target -elide -scope go -seen "$SN/state.txt" "$SN/f.go")
+expect_contains "-seen first run: full render" "func Alpha() {" "$OUT"
+expect_contains "-seen first run: full render (2nd fn)" "func Beta() {" "$OUT"
+[[ -f "$SN/state.txt" ]] && report ok "-seen: state file created" || report fail "-seen: state file created"
+STATE_LINES=$(wc -l < "$SN/state.txt")
+[[ "$STATE_LINES" -eq 2 ]] && report ok "-seen: one state line per scope" || report fail "-seen: one state line per scope (got $STATE_LINES)"
+
+# --- second run, nothing changed: both collapse
+OUT=$("$BIN" -p target -elide -scope go -seen "$SN/state.txt" "$SN/f.go")
+expect_contains "-seen: unchanged Alpha collapses" "func Alpha (unchanged, already shown)" "$OUT"
+expect_contains "-seen: unchanged Beta collapses" "func Beta (unchanged, already shown)" "$OUT"
+if [[ "$OUT" != *"func Alpha() {"* && "$OUT" != *"func Beta() {"* ]]; then
+    report ok "-seen: collapsed chunks omit source text"
+else
+    report fail "-seen: collapsed chunks omit source text"
+fi
+
+# --- change one function's body (same line count/range): hash mismatch
+# still forces a full re-render even though the range didn't move.
+cat > "$SN/f.go" <<'GOEOF'
+package main
+
+func Alpha() {
+    target2()
+}
+
+func Beta() {
+    target()
+}
+GOEOF
+OUT=$("$BIN" -p 'target2|target' -elide -scope go -seen "$SN/state.txt" "$SN/f.go")
+expect_contains "-seen: content change at same range re-renders" "func Alpha() {" "$OUT"
+expect_contains "-seen: untouched function still collapses" "func Beta (unchanged, already shown)" "$OUT"
+
+# --- -budget: a render measured to decide fit, then degraded/dropped, must
+# NOT be recorded as seen — a later run with enough budget renders in full.
+rm -f "$SN/bstate.txt"
+"$BIN" -p target -budget 10 -seen "$SN/bstate.txt" "$SN/f.go" > /dev/null
+if [[ ! -s "$SN/bstate.txt" ]]; then
+    report ok "-seen + -budget: dropped render isn't marked seen"
+else
+    report fail "-seen + -budget: dropped render isn't marked seen"
+fi
+OUT=$("$BIN" -p target -elide -scope go -seen "$SN/bstate.txt" "$SN/f.go")
+expect_contains "-seen + -budget: later full run still shows real content" "func Beta() {" "$OUT"
+
+# --- missing state file on first use: no error, just an empty store
+rm -f "$SN/fresh.txt"
+OUT=$("$BIN" -p target -elide -scope go -seen "$SN/fresh.txt" "$SN/f.go" 2>&1) ; RC=$?
+[[ "$RC" == "0" ]] && report ok "-seen: missing state file is not an error" || report fail "-seen: missing state file (got rc=$RC)"
+
+# --- validation
+OUT=$("$BIN" -p target -seen "$SN/state.txt" "$SN/f.go" 2>&1) ; RC=$?
+expect_contains "-seen requires -elide/-budget" "requires -elide or -budget" "$OUT"
+[[ "$RC" == "2" ]] && report ok "-seen without -elide/-budget exit 2" || report fail "-seen without -elide/-budget exit (got $RC)"
+OUT=$("$BIN" edit -p target -seen "$SN/state.txt" -content x "$SN/f.go" 2>&1) ; RC=$?
+expect_contains "edit mode rejects -seen" "cannot combine with -seen" "$OUT"
+[[ "$RC" == "2" ]] && report ok "edit mode -seen exit 2" || report fail "edit mode -seen exit (got $RC)"
+
+rm -rf "$SN"
+
+# ---------------------------------------------------------------------------
 section "summary"
 TOTAL=$((PASS + FAIL))
 if [[ "$FAIL" -eq 0 ]]; then

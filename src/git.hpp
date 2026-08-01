@@ -45,4 +45,11 @@ bool git_added_lines(const GitSelection &sel,
                      std::unordered_map<std::string, AddedLines> &out,
                      std::string &err);
 
+// Commit-churn table: number of commits touching each file in the last
+// `days` days (`git log --since=<days>.days.ago --name-only`), one `git`
+// invocation regardless of how many files exist — never one subprocess per
+// file. Files with no commits in the window are simply absent from `out`.
+bool git_churn(int days, std::unordered_map<std::string, uint32_t> &out,
+               std::string &err);
+
 } // namespace hpr

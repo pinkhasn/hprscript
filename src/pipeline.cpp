@@ -14,13 +14,19 @@
 namespace {
 
 using WhereNode = hpr::FileWhere::Node;
+using WhereOp = hpr::FileWhere::Op;
 
 // ---- -file-where expression -------------------------------------------------
 // Grammar:
 //   expr  := and (OR|'||' and)*
 //   and   := unary (AND|'&&' unary)*
-//   unary := (NOT|'!') unary | '(' expr ')' | pattern-id
-// Keywords are case-insensitive; ids are names, `p<i>`, or numeric indices.
+//   unary := (NOT|'!') unary | '(' expr ')' | leaf
+//   leaf  := ident '(' [arg] ')' cmp number    -- churn(30) > 2, count(p0) >= 3
+//          | 'lang' cmp ident                  -- lang == go
+//          | ident                             -- bare pattern id (presence)
+//   cmp   := '>=' | '<=' | '==' | '!=' | '>' | '<'
+// Keywords are case-insensitive; pattern ids are names, `p<i>`/`ident<i>`,
+// or numeric indices.
 struct WhereParser {
     std::string_view src;
     size_t pos = 0;
@@ -62,6 +68,33 @@ struct WhereParser {
             return true;
         }
         return false;
+    }
+    // Longest-symbol-first so ">=" isn't swallowed as "> ' '='".
+    bool parse_cmp_op(WhereOp &op) {
+        skip_ws();
+        if (eat_sym(">=")) { op = WhereOp::Ge; return true; }
+        if (eat_sym("<=")) { op = WhereOp::Le; return true; }
+        if (eat_sym("=="))  { op = WhereOp::Eq; return true; }
+        if (eat_sym("!="))  { op = WhereOp::Ne; return true; }
+        if (eat_sym(">"))   { op = WhereOp::Gt; return true; }
+        if (eat_sym("<"))   { op = WhereOp::Lt; return true; }
+        return false;
+    }
+    bool parse_number(double &out) {
+        skip_ws();
+        size_t s = pos;
+        size_t p = pos;
+        if (p < src.size() && (src[p] == '-' || src[p] == '+')) ++p;
+        bool any_digit = false;
+        while (p < src.size() && std::isdigit((unsigned char)src[p])) { ++p; any_digit = true; }
+        if (p < src.size() && src[p] == '.') {
+            ++p;
+            while (p < src.size() && std::isdigit((unsigned char)src[p])) { ++p; any_digit = true; }
+        }
+        if (!any_digit) return false;
+        out = std::strtod(std::string(src.substr(s, p - s)).c_str(), nullptr);
+        pos = p;
+        return true;
     }
 
     bool parse_expr(WhereNode &out) { return parse_or(out); }
@@ -108,29 +141,153 @@ struct WhereParser {
             return true;
         }
         std::string w;
-        if (!word(w)) { err = "expected a pattern id"; return false; }
+        if (!word(w)) { err = "expected a pattern id or condition"; return false; }
         if (is_kw(w, "and") || is_kw(w, "or") || is_kw(w, "not")) {
             err = "misplaced keyword '" + w + "'";
             return false;
         }
+
+        // Function-style condition: churn(N) OP number | count(pat) OP number.
+        skip_ws();
+        if (pos < src.size() && src[pos] == '(') {
+            ++pos;
+            std::string arg;
+            skip_ws();
+            if (pos < src.size() && src[pos] != ')') {
+                if (!word(arg)) {
+                    err = "expected an argument inside " + w + "(...)";
+                    return false;
+                }
+            }
+            if (!eat_sym(")")) { err = "expected ')' after " + w + "(...)"; return false; }
+            WhereOp op;
+            if (!parse_cmp_op(op)) {
+                err = w + "(...) must be followed by a comparison "
+                          "(>, <, >=, <=, ==, !=)";
+                return false;
+            }
+            double num;
+            if (!parse_number(num)) {
+                err = "expected a number after " + w + "(...) " "comparison";
+                return false;
+            }
+            out = WhereNode{};
+            out.kind = WhereNode::Leaf;
+            out.op = op;
+            out.num_rhs = num;
+            if (is_kw(w, "churn")) {
+                char *endp = nullptr;
+                long days = arg.empty() ? 0 : std::strtol(arg.c_str(), &endp, 10);
+                if (arg.empty() || endp != arg.c_str() + arg.size() || days <= 0) {
+                    err = "churn(...) needs a positive integer day-window, "
+                          "e.g. churn(30)";
+                    return false;
+                }
+                out.leaf_kind = WhereNode::Churn;
+                out.churn_days = static_cast<int>(days);
+            } else if (is_kw(w, "count")) {
+                if (arg.empty()) {
+                    err = "count(...) needs a pattern id, e.g. count(p0)";
+                    return false;
+                }
+                out.leaf_kind = WhereNode::Count;
+                out.id = arg;
+            } else {
+                err = "unknown condition '" + w +
+                      "(...)' (supported: churn, count)";
+                return false;
+            }
+            return true;
+        }
+
+        // Bare-ident comparison: currently just `lang == go` / `lang != go`.
+        {
+            size_t save = pos;
+            WhereOp op;
+            if (parse_cmp_op(op)) {
+                if (!is_kw(w, "lang")) {
+                    err = "unknown condition field '" + w +
+                          "' (supported: lang)";
+                    return false;
+                }
+                if (op != WhereOp::Eq && op != WhereOp::Ne) {
+                    err = "lang only supports == and !=";
+                    return false;
+                }
+                std::string rhs;
+                if (!word(rhs)) {
+                    err = "expected a language name after 'lang " +
+                          std::string(op == WhereOp::Eq ? "==" : "!=") + "'";
+                    return false;
+                }
+                for (auto &c : rhs) c = static_cast<char>(std::tolower((unsigned char)c));
+                out = WhereNode{};
+                out.kind = WhereNode::Leaf;
+                out.leaf_kind = WhereNode::Lang;
+                out.op = op;
+                out.str_rhs = std::move(rhs);
+                return true;
+            }
+            pos = save;
+        }
+
         out = WhereNode{};
         out.kind = WhereNode::Leaf;
+        out.leaf_kind = WhereNode::PatternPresent;
         out.id = std::move(w);
         return true;
     }
 };
 
-bool eval_where(const WhereNode &n, const std::vector<char> &matched) {
+bool compare_num(double v, WhereOp op, double rhs) {
+    switch (op) {
+        case WhereOp::Gt: return v > rhs;
+        case WhereOp::Lt: return v < rhs;
+        case WhereOp::Ge: return v >= rhs;
+        case WhereOp::Le: return v <= rhs;
+        case WhereOp::Eq: return v == rhs;
+        case WhereOp::Ne: return v != rhs;
+    }
+    return false;
+}
+
+bool eval_where(const WhereNode &n, const std::vector<char> &matched,
+               const std::vector<uint32_t> &counts, const std::string &file,
+               const std::map<int, std::unordered_map<std::string, uint32_t>> &churn,
+               const std::string &lang) {
     switch (n.kind) {
-        case WhereNode::Leaf: return matched[n.pat] != 0;
-        case WhereNode::Not:  return !eval_where(n.kids[0], matched);
+        case WhereNode::Leaf:
+            switch (n.leaf_kind) {
+                case WhereNode::PatternPresent:
+                    return matched[n.pat] != 0;
+                case WhereNode::Count:
+                    return compare_num(static_cast<double>(counts[n.pat]), n.op,
+                                       n.num_rhs);
+                case WhereNode::Churn: {
+                    double v = 0.0;
+                    auto wit = churn.find(n.churn_days);
+                    if (wit != churn.end()) {
+                        auto fit = wit->second.find(file);
+                        if (fit != wit->second.end())
+                            v = static_cast<double>(fit->second);
+                    }
+                    return compare_num(v, n.op, n.num_rhs);
+                }
+                case WhereNode::Lang: {
+                    bool eq = lang == n.str_rhs;
+                    return n.op == WhereOp::Eq ? eq : !eq;
+                }
+            }
+            return false;
+        case WhereNode::Not:
+            return !eval_where(n.kids[0], matched, counts, file, churn, lang);
         case WhereNode::And:
             for (const auto &k : n.kids)
-                if (!eval_where(k, matched)) return false;
+                if (!eval_where(k, matched, counts, file, churn, lang)) return false;
             return true;
         case WhereNode::Or:
             for (const auto &k : n.kids)
-                if (eval_where(k, matched)) return true;
+                if (eval_where(k, matched, counts, file, churn, lang)) return true;
             return false;
     }
     return false;
@@ -140,15 +297,28 @@ template <typename Resolve>
 bool resolve_where_leaves(WhereNode &n, const Resolve &resolve,
                           std::string &err) {
     if (n.kind == WhereNode::Leaf) {
-        if (!resolve(n.id, n.pat)) {
-            err = "unknown pattern '" + n.id + "' in -file-where";
-            return false;
+        if (n.leaf_kind == WhereNode::PatternPresent ||
+            n.leaf_kind == WhereNode::Count) {
+            if (!resolve(n.id, n.pat)) {
+                err = "unknown pattern '" + n.id + "' in -file-where";
+                return false;
+            }
         }
         return true;
     }
     for (auto &k : n.kids)
         if (!resolve_where_leaves(k, resolve, err)) return false;
     return true;
+}
+
+void collect_churn_windows(const WhereNode &n, std::vector<int> &out) {
+    if (n.kind == WhereNode::Leaf) {
+        if (n.leaf_kind == WhereNode::Churn &&
+            std::find(out.begin(), out.end(), n.churn_days) == out.end())
+            out.push_back(n.churn_days);
+        return;
+    }
+    for (const auto &k : n.kids) collect_churn_windows(k, out);
 }
 
 } // namespace
@@ -235,12 +405,21 @@ bool add_walker_inputs(const Cli &cli, Walker &walker, ScanStats &stats,
 std::vector<Pattern> build_patterns(const Cli &cli) {
     // Per-pattern name/word_boundary/utf8 overrides come from -name /
     // -patterns-from entries; -1 means inherit the global flag.
+    //
+    // Two passes, not one: regex-backed patterns (p0/p1/...) always end up
+    // as the vector's prefix and -ident groups (ident0/ident1/...) as its
+    // suffix, regardless of how the user interleaved -p/-ident on the
+    // command line. That ordering is what lets Matcher compile just the
+    // prefix while its reported pattern ids still index correctly into
+    // this vector (see run_search() in runner.cpp) — and as a side effect,
+    // adding an -ident group never renumbers existing -p patterns' ids.
     std::vector<Pattern> patterns;
     patterns.reserve(cli.patterns.size());
-    for (size_t i = 0; i < cli.patterns.size(); ++i) {
-        const CliPattern &cp = cli.patterns[i];
+    size_t regex_i = 0;
+    for (const auto &cp : cli.patterns) {
+        if (!cp.ident_terms.empty()) continue;
         Pattern p;
-        p.id = cp.name.empty() ? "p" + std::to_string(i) : cp.name;
+        p.id = cp.name.empty() ? "p" + std::to_string(regex_i) : cp.name;
         p.regexp = cp.regexp;
         p.case_insensitive = cp.case_insensitive;
         p.word_boundary =
@@ -250,6 +429,17 @@ std::vector<Pattern> build_patterns(const Cli &cli) {
         p.extract_names = cp.extract_names;
         p.ref = cp.ref;
         patterns.push_back(std::move(p));
+        ++regex_i;
+    }
+    size_t ident_i = 0;
+    for (const auto &cp : cli.patterns) {
+        if (cp.ident_terms.empty()) continue;
+        Pattern p;
+        p.id = cp.name.empty() ? "ident" + std::to_string(ident_i) : cp.name;
+        // regexp deliberately left empty — ident-backed patterns never
+        // reach Matcher::compile.
+        patterns.push_back(std::move(p));
+        ++ident_i;
     }
     return patterns;
 }
@@ -316,15 +506,36 @@ bool FileWhere::init(const std::string &expr,
         std::fprintf(stderr, "hprscript: %s\n", werr.c_str());
         return false;
     }
+    collect_churn_windows(root_, churn_windows_);
     active_ = true;
     return true;
 }
 
-bool FileWhere::pass(const std::vector<Match> &kept,
-                     size_t pattern_count) const {
+bool FileWhere::pass(
+    const std::vector<Match> &kept, size_t pattern_count,
+    const std::string &file,
+    const std::map<int, std::unordered_map<std::string, uint32_t>> &churn) const {
     std::vector<char> matched(pattern_count, 0);
-    for (const auto &mm : kept) matched[mm.pattern_index] = 1;
-    return eval_where(root_, matched);
+    std::vector<uint32_t> counts(pattern_count, 0);
+    for (const auto &mm : kept) {
+        matched[mm.pattern_index] = 1;
+        ++counts[mm.pattern_index];
+    }
+    std::string lang = auto_lang_for_path(file);
+    for (auto &c : lang) c = static_cast<char>(std::tolower((unsigned char)c));
+    return eval_where(root_, matched, counts, file, churn, lang);
+}
+
+bool build_churn_map(
+    const std::vector<int> &windows,
+    std::map<int, std::unordered_map<std::string, uint32_t>> &out,
+    std::string &err) {
+    for (int days : windows) {
+        std::unordered_map<std::string, uint32_t> m;
+        if (!git_churn(days, m, err)) return false;
+        out[days] = std::move(m);
+    }
+    return true;
 }
 
 const ScopeIndex *build_file_scope(const std::string &scope_lang,
@@ -404,9 +615,12 @@ void TargetFilter::apply(std::vector<Match> &kept, const LineIndex &idx,
 
 MatchCollector::MatchCollector(const std::vector<Pattern> &patterns,
                                std::vector<ResolvedRelation> rels,
-                               bool git_added_lines)
-    : patterns_(patterns), rels_(std::move(rels)), git_added_(git_added_lines) {
+                               bool git_added_lines,
+                               std::vector<IdentGroup> ident_groups)
+    : patterns_(patterns), rels_(std::move(rels)), git_added_(git_added_lines),
+      ident_groups_(std::move(ident_groups)) {
     any_scope_rel_ = any_scope_relation(rels_);
+    ident_base_ = static_cast<uint32_t>(patterns_.size() - ident_groups_.size());
 }
 
 void MatchCollector::collect(Matcher &matcher, std::string_view content,
@@ -423,6 +637,8 @@ void MatchCollector::collect(Matcher &matcher, std::string_view content,
         return true;
     };
     matcher.scan(content, cb);
+    if (!ident_groups_.empty())
+        scan_identifiers(content, ident_groups_, ident_base_, raw_);
 
     // Single sort-based dedup pass: by (pattern, from, -to). Within a
     // pattern, after this sort the longest match at each `from` comes

@@ -232,4 +232,41 @@ bool git_added_lines(const GitSelection &sel,
     return true;
 }
 
+bool git_churn(int days, std::unordered_map<std::string, uint32_t> &out,
+               std::string &err) {
+    std::string prefix;
+    if (!repo_prefix(prefix, err)) return false;
+
+    std::string since = "--since=" + std::to_string(days) + ".days.ago";
+    std::string blob;
+    if (!run_git({"-c", "core.quotePath=false", "log", since, "--name-only",
+                  "--pretty=format:%H"},
+                 blob, err))
+        return false;
+
+    // Walk the blob line by line without relying on git's blank-line
+    // conventions between commits (those vary with --pretty=format:): any
+    // line that's a bare 40- or 64-char hex string is a commit hash
+    // (%H's exact width for SHA-1/SHA-256 repos), everything else
+    // non-blank is a changed filename belonging to the commit above it.
+    auto looks_like_hash = [](std::string_view s) {
+        if (s.size() != 40 && s.size() != 64) return false;
+        for (char c : s) {
+            bool hex = (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+            if (!hex) return false;
+        }
+        return true;
+    };
+    size_t pos = 0;
+    while (pos < blob.size()) {
+        size_t eol = blob.find('\n', pos);
+        if (eol == std::string::npos) eol = blob.size();
+        std::string_view line(blob.data() + pos, eol - pos);
+        pos = eol + 1;
+        if (line.empty() || looks_like_hash(line)) continue;
+        ++out[prefix + std::string(line)];
+    }
+    return true;
+}
+
 } // namespace hpr

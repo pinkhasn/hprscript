@@ -1,6 +1,7 @@
 #include "output.hpp"
 
 #include "block.hpp"
+#include "seen.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -505,6 +506,186 @@ void Formatter::emit_llm(const std::string &file, const Pattern &pattern,
     write_out(s);
 }
 
+namespace {
+
+// Small gaps inside a scope are shown plainly rather than elided — "…
+// (+1 lines)" saves nothing and reads worse than just printing the line.
+constexpr uint32_t ELIDE_MERGE_GAP = 2;
+
+struct LineWindow {
+    uint32_t lo, hi;
+};
+
+} // namespace
+
+void Formatter::on_file_elide(const std::string &file,
+                              const std::vector<Match> &kept,
+                              std::string_view buf, const LineIndex &idx,
+                              const ScopeIndex *scope, const SeenStore *seen,
+                              std::vector<SeenMark> *marks_out) {
+    if (kept.empty()) return;
+    emitted_ += static_cast<uint64_t>(kept.size());
+
+    bool first_block = true;
+    auto &s = scratch_;
+
+    auto print_file_header = [&]() {
+        if (llm_last_file_ != file) {
+            llm_last_file_ = file;
+            s.clear();
+            s.append(file);
+            s += '\n';
+            write_out(s);
+        }
+    };
+
+    auto print_line_range = [&](uint32_t lo, uint32_t hi) {
+        for (uint32_t L = lo; L <= hi; ++L) {
+            std::string_view t = idx.line_text(L);
+            s.clear();
+            s.append(t.data(), t.size());
+            if (t.empty() || t.back() != '\n') s += '\n';
+            write_out(s);
+        }
+    };
+
+    // Lines strictly between from_excl and to_excl: shown plainly if few,
+    // elided as "… (+N lines)" otherwise.
+    auto print_gap = [&](uint32_t from_excl, uint32_t to_excl) {
+        if (to_excl <= from_excl + 1) return;
+        uint32_t n = to_excl - from_excl - 1;
+        if (n <= ELIDE_MERGE_GAP) {
+            print_line_range(from_excl + 1, to_excl - 1);
+        } else {
+            s.clear();
+            s += "  \xE2\x80\xA6 (+";
+            append_uint32(s, n);
+            s += " lines)\n";
+            write_out(s);
+        }
+    };
+
+    auto render_scope_block = [&](const ScopeRange &sr,
+                                  const std::vector<const Match *> &ms) {
+        uint64_t hash = 0;
+        bool collapse = false;
+        if (seen || marks_out) {
+            hash = fnv1a(std::string_view(
+                buf.data() + sr.start_off, sr.end_off - sr.start_off));
+            if (marks_out)
+                marks_out->push_back({file, sr.line_start, sr.line_end, hash});
+            if (seen && seen->seen_unchanged(file, sr.line_start, sr.line_end, hash))
+                collapse = true;
+        }
+
+        print_file_header();
+        s.clear();
+        if (!first_block) s += '\n';
+        first_block = false;
+        s += "  ";
+        append_uint32(s, sr.line_start);
+        s += '-';
+        append_uint32(s, sr.line_end);
+        s += ' ';
+        s += sr.kind;
+        s += ' ';
+        s += sr.name;
+        if (collapse) s += " (unchanged, already shown)";
+        s += '\n';
+        write_out(s);
+        if (collapse) return;
+        print_line_range(sr.line_start, sr.line_start); // signature line
+
+        std::vector<LineWindow> windows;
+        windows.reserve(ms.size());
+        for (const Match *m : ms) {
+            uint32_t line = idx.line_of(m->from);
+            uint32_t lo = (line > static_cast<uint32_t>(opts_.context_before))
+                ? line - static_cast<uint32_t>(opts_.context_before)
+                : 1;
+            uint32_t hi = line + static_cast<uint32_t>(opts_.context_after);
+            lo = std::max(lo, sr.line_start + 1);
+            hi = std::min({hi, sr.line_end, idx.line_count()});
+            if (lo > hi) continue; // whole window swallowed by the signature line
+            windows.push_back({lo, hi});
+        }
+        // Merge overlapping/near windows (already position-sorted, since
+        // `ms` follows the position-sorted `kept` order).
+        std::vector<LineWindow> merged;
+        for (const auto &w : windows) {
+            if (!merged.empty() &&
+                w.lo <= merged.back().hi + ELIDE_MERGE_GAP + 1) {
+                merged.back().hi = std::max(merged.back().hi, w.hi);
+            } else {
+                merged.push_back(w);
+            }
+        }
+
+        uint32_t prev_end = sr.line_start;
+        for (const auto &w : merged) {
+            print_gap(prev_end, w.lo);
+            print_line_range(w.lo, w.hi);
+            prev_end = w.hi;
+        }
+        if (prev_end < sr.line_end) {
+            print_gap(prev_end, sr.line_end);
+            print_line_range(sr.line_end, sr.line_end); // closing line
+        }
+    };
+
+    auto render_orphan = [&](const Match *m) {
+        print_file_header();
+        if (!first_block) {
+            s.clear();
+            s += '\n';
+            write_out(s);
+        }
+        first_block = false;
+        uint32_t line = idx.line_of(m->from);
+        std::string_view ctx = context_block(buf, idx, *m);
+        std::string_view ctx_view =
+            truncate_safe(ctx, opts_.max_context_bytes, nullptr);
+        s.clear();
+        s += "  ";
+        append_uint32(s, line);
+        s += ": ";
+        s.append(ctx_view.data(), ctx_view.size());
+        if (s.empty() || s.back() != '\n') s += '\n';
+        write_out(s);
+    };
+
+    // Walk in position order, flushing an accumulated run whenever the
+    // innermost enclosing scope changes. `kept` is sorted by `from`, so
+    // same-scope matches are contiguous except for nesting, which — being
+    // rare in practice — isn't special-cased further.
+    const ScopeRange *cur_scope = nullptr;
+    bool run_is_scope = false;
+    std::vector<const Match *> run;
+
+    auto flush = [&]() {
+        if (run.empty()) return;
+        if (run_is_scope) {
+            render_scope_block(*cur_scope, run);
+        } else {
+            for (const Match *m : run) render_orphan(m);
+        }
+        run.clear();
+    };
+
+    for (const auto &m : kept) {
+        const ScopeRange *sr = scope ? scope->find_innermost(m.from) : nullptr;
+        bool is_scope = sr != nullptr;
+        if (!run.empty() && (is_scope != run_is_scope || sr != cur_scope))
+            flush();
+        if (run.empty()) {
+            run_is_scope = is_scope;
+            cur_scope = sr;
+        }
+        run.push_back(&m);
+    }
+    flush();
+}
+
 void Formatter::on_match(const std::string &file, const Pattern &pattern,
                          const Match &m, std::string_view buf,
                          const LineIndex &idx, const ScopeIndex *scope) {
@@ -524,6 +705,12 @@ void Formatter::on_match(const std::string &file, const Pattern &pattern,
         case OutputMode::MatchOnly:   emit_match_only(buf, m, idx); break;
         case OutputMode::Custom:      emit_custom(file, pattern, m, buf, idx, scope); break;
         case OutputMode::Llm:         emit_llm(file, pattern, m, buf, idx, scope); break;
+        case OutputMode::Elide:
+            // Elide renders a whole file's matches at once via
+            // on_file_elide(); it never streams through on_match(). Undo
+            // the ++emitted_ above so callers can't double-count by mistake.
+            --emitted_;
+            break;
         case OutputMode::Absent:
             // Absent mode tracks per-file presence, no per-match output.
             per_file_counts_[file]++;
@@ -554,7 +741,7 @@ void Formatter::on_file_end(const std::string &file, bool had_match) {
 }
 
 void Formatter::on_complete() {
-    if (opts_.mode == OutputMode::Llm) {
+    if (opts_.mode == OutputMode::Llm || opts_.mode == OutputMode::Elide) {
         char buf[160];
         if (limit_hit_) {
             int n = std::snprintf(buf, sizeof(buf),

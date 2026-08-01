@@ -63,7 +63,7 @@ bool parse_nonneg(const char *s, int64_t &out) {
 bool set_output_mode(Cli &cli, OutputMode mode) {
     if (cli.out_mode_set) {
         cli.error = true;
-        cli.error_message = "output modes -j/-f/-c/-o/-format/-absent/-llm are mutually exclusive";
+        cli.error_message = "output modes -j/-f/-c/-o/-format/-absent/-llm/-elide are mutually exclusive";
         return false;
     }
     cli.out_mode = mode;
@@ -83,9 +83,20 @@ void validate_edit_cli(Cli &cli) {
 
     if (cli.out_mode_set && cli.out_mode != OutputMode::JsonLines)
         return fail("edit mode: output is a dry-run diff or -j edit records; "
-                    "-f/-c/-o/-llm/-absent/-format do not apply");
+                    "-f/-c/-o/-llm/-elide/-absent/-format do not apply");
     if (cli.sample_n > 0)
         return fail("edit mode cannot combine with -sample");
+    if (cli.hotspots_n > 0)
+        return fail("edit mode cannot combine with -hotspots");
+    if (cli.budget_bytes > 0)
+        return fail("edit mode cannot combine with -budget");
+    for (const auto &p : cli.patterns)
+        if (!p.ident_terms.empty())
+            return fail("edit mode cannot combine with -ident");
+    if (cli.order_by != Cli::OrderBy::None)
+        return fail("edit mode cannot combine with -order-by");
+    if (!cli.seen_path.empty())
+        return fail("edit mode cannot combine with -seen");
     if (cli.records != Cli::RecordMode::None)
         return fail("edit mode cannot combine with -records");
     if (cli.context_before != 0 || cli.context_after != 0)
@@ -176,6 +187,11 @@ void print_help(FILE *out) {
 "                   line {id, regexp|literal, case_insensitive, word_boundary,\n"
 "                   utf8}; '#' comment lines allowed (repeatable)\n"
 "  -extract n1,n2,…  Re-extract capture groups from the preceding -p/-pi\n"
+"  -ident 't1 t2 …'  Match identifiers whose subtokens include ALL given\n"
+"                   terms, regardless of casing/separator (parseConfig ~\n"
+"                   parse_config ~ ConfigParser); repeatable, each\n"
+"                   occurrence ORs with the others; search-mode only\n"
+"                   (not edit mode)\n"
 "  -glob <glob>     Scan glob (e.g. \"**/*.go\"; repeatable)\n"
 "  -exclude <pat>   Exclude rule: glob, bare dir name, or path prefix (repeatable)\n"
 "  -files-from <f>  Scan the literal paths listed in f, one per line ('-' = stdin)\n"
@@ -210,6 +226,9 @@ void print_help(FILE *out) {
 "  -llm             Token-efficient text for LLM consumption (auto-detects\n"
 "                   block/scope; dedupes file paths; prints a 'limit reached'\n"
 "                   footer when -limit or -max-output-bytes truncates output)\n"
+"  -elide           Scope-aware chunks: signature + matched lines with -A/-B\n"
+"                   context; untouched interior lines fold as \"… (+N lines)\"\n"
+"                   (implies -scope auto when no -scope config is given)\n"
 "\n"
 "Block extraction (with -p):\n"
 "  -block-open <s>   Opening delimiter (e.g. \"{\")\n"
@@ -224,6 +243,23 @@ void print_help(FILE *out) {
 "Sample mode:\n"
 "  -sample <n>      Buffer & return n diverse matches (file/shape-stratified)\n"
 "\n"
+"Ranking:\n"
+"  -hotspots <n>    Buffer the whole scan, emit the top n files by a\n"
+"                   rarity/coverage/proximity score (same formula as script\n"
+"                   mode's rank), each with its densest match window.\n"
+"                   Composes with -llm (flat line) / -elide (rendered chunk);\n"
+"                   default output is JSONL hotspot records.\n"
+"  -budget <n>      Rank every matching file, then render score-descending\n"
+"                   in -elide's shape until n bytes are spent — degrading to\n"
+"                   a one-line summary and finally to \"dropped\" once a\n"
+"                   file no longer fits. Defines its own output shape\n"
+"                   (mutually exclusive with -j/-f/-c/-o/-format/-absent/\n"
+"                   -llm/-elide/-sample/-hotspots).\n"
+"  -seen <path>     Cross-invocation dedup for -elide/-budget: a chunk\n"
+"                   unchanged since the last run against this state file\n"
+"                   collapses to a one-line pointer instead of full source.\n"
+"                   The file is rewritten after each run.\n"
+"\n"
 "Pattern relations (filter matches by proximity/containment, repeatable):\n"
 "  -near A:B:K      Emit pattern A's matches with a B-match within K lines\n"
 "  -far  A:B:K      Emit A's matches with NO B-match within K lines (K=0=same)\n"
@@ -235,6 +271,11 @@ void print_help(FILE *out) {
 "  -file-where <expr>   Emit a file's matches only when the predicate over\n"
 "                       matched patterns holds: 'err AND NOT recovery',\n"
 "                       AND/OR/NOT or &&/||/!, parentheses, ids or p0/p1…\n"
+"                       Conditions: count(pat) > n, churn(days) > n (git\n"
+"                       commits touching the file), lang == <name>\n"
+"  -order-by <f>        Sort -f/-c output by score|count|path instead of\n"
+"                       walk order (mutually exclusive with -sample/\n"
+"                       -hotspots/-budget, which define their own order)\n"
 "\n"
 "Enclosing-scope annotation (with -p):\n"
 "  -scope <lang|auto>       Built-in pack (auto, go, rust, c, cpp, java, js, ts)\n"
@@ -336,6 +377,27 @@ Cli parse_cli(int argc, char **argv) {
             cli.patterns.push_back(std::move(p));
             continue;
         }
+        if (eq(a, "-ident")) {
+            const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
+            CliPattern p;
+            const char *s = v;
+            while (*s) {
+                while (*s && std::isspace((unsigned char)*s)) ++s;
+                if (!*s) break;
+                const char *start = s;
+                while (*s && !std::isspace((unsigned char)*s)) ++s;
+                std::string term(start, static_cast<size_t>(s - start));
+                for (auto &c : term) c = static_cast<char>(std::tolower((unsigned char)c));
+                p.ident_terms.push_back(std::move(term));
+            }
+            if (p.ident_terms.empty()) {
+                cli.error = true;
+                cli.error_message = "-ident: at least one term required";
+                return cli;
+            }
+            cli.patterns.push_back(std::move(p));
+            continue;
+        }
         if (eq(a, "-patterns-from") || eq(a, "--patterns-from")) {
             const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
             cli.patterns_from.emplace_back(v);
@@ -349,6 +411,13 @@ Cli parse_cli(int argc, char **argv) {
                 return cli;
             }
             CliPattern &last = cli.patterns.back();
+            if (!last.ident_terms.empty()) {
+                cli.error = true;
+                cli.error_message =
+                    "-extract cannot follow -ident (no capture groups on "
+                    "identifier matches)";
+                return cli;
+            }
             if (!last.extract_names.empty()) {
                 cli.error = true;
                 cli.error_message = "-extract repeated for the same pattern";
@@ -450,6 +519,24 @@ Cli parse_cli(int argc, char **argv) {
             cli.file_where = v;
             continue;
         }
+        if (eq(a, "-order-by")) {
+            const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
+            if (eq(v, "score")) cli.order_by = Cli::OrderBy::Score;
+            else if (eq(v, "count")) cli.order_by = Cli::OrderBy::Count;
+            else if (eq(v, "path")) cli.order_by = Cli::OrderBy::Path;
+            else {
+                cli.error = true;
+                cli.error_message = std::string("-order-by: unknown field '") +
+                                    v + "' (supported: score, count, path)";
+                return cli;
+            }
+            continue;
+        }
+        if (eq(a, "-seen")) {
+            const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
+            cli.seen_path = v;
+            continue;
+        }
         if (eq(a, "-w")) { cli.word_boundary = true; continue; }
         if (eq(a, "-no-utf8")) { cli.no_utf8 = true; continue; }
         if (eq(a, "-ucp"))     { cli.ucp = true; continue; }
@@ -486,6 +573,7 @@ Cli parse_cli(int argc, char **argv) {
         if (eq(a, "-o")) { if (!set_output_mode(cli, OutputMode::MatchOnly)) return cli; continue; }
         if (eq(a, "-absent")) { if (!set_output_mode(cli, OutputMode::Absent)) return cli; continue; }
         if (eq(a, "-llm"))    { if (!set_output_mode(cli, OutputMode::Llm))    return cli; continue; }
+        if (eq(a, "-elide"))  { if (!set_output_mode(cli, OutputMode::Elide))  return cli; continue; }
         if (eq(a, "-format")) {
             const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
             if (!set_output_mode(cli, OutputMode::Custom)) return cli;
@@ -602,6 +690,17 @@ Cli parse_cli(int argc, char **argv) {
             const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
             cli.sample_n = std::atoi(v);
             if (cli.sample_n < 0) cli.sample_n = 0;
+            continue;
+        }
+        if (eq(a, "-hotspots")) {
+            const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
+            cli.hotspots_n = std::atoi(v);
+            if (cli.hotspots_n < 0) cli.hotspots_n = 0;
+            continue;
+        }
+        if (eq(a, "-budget")) {
+            const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
+            cli.budget_bytes = static_cast<uint64_t>(std::atoll(v));
             continue;
         }
 
@@ -955,11 +1054,20 @@ bool load_patterns_from(Cli &cli) {
 // collide with another pattern's name or auto `p<i>` id, making relations
 // and `pat` attribution ambiguous. Called after -patterns-from loading.
 bool validate_pattern_ids(Cli &cli) {
+    // Mirrors build_patterns()'s numbering: regex patterns auto-number as
+    // p0/p1/... and -ident groups separately as ident0/ident1/..., each in
+    // the order given — independent counters, not a single shared index.
     std::vector<std::string> ids;
     ids.reserve(cli.patterns.size());
-    for (size_t i = 0; i < cli.patterns.size(); ++i) {
-        const std::string &n = cli.patterns[i].name;
-        ids.push_back(n.empty() ? "p" + std::to_string(i) : n);
+    size_t regex_i = 0, ident_i = 0;
+    for (const auto &cp : cli.patterns) {
+        if (!cp.ident_terms.empty()) {
+            ids.push_back(cp.name.empty() ? "ident" + std::to_string(ident_i++)
+                                          : cp.name);
+        } else {
+            ids.push_back(cp.name.empty() ? "p" + std::to_string(regex_i++)
+                                          : cp.name);
+        }
     }
     for (size_t i = 0; i < ids.size(); ++i) {
         for (size_t j = i + 1; j < ids.size(); ++j) {

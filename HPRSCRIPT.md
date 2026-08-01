@@ -83,9 +83,11 @@ Positional file/dir args after `-s`/`-script` (or after a positional script file
 | `-p <pattern>` | Case-sensitive search pattern (repeatable for multi-pattern, all match in one pass) |
 | `-pi <pattern>` | Case-insensitive search pattern (HS `CASELESS`; folds Unicode by default; repeatable, mixable with `-p`) |
 | `-F <string>` / `-Fi <string>` | Fixed-string pattern (case-sensitive / -insensitive) — matched literally, no regex interpretation. Repeatable, mixable with `-p`/`-pi`. |
-| `-name <id>` | Name the preceding `-p`/`-pi`/`-F`/`-Fi`: the id (`[A-Za-z_]\w*`) replaces the auto `p<i>` in `pat`, `$PAT_ID`, `-llm` tags, relations, and `-file-where`. |
+| `-name <id>` | Name the preceding `-p`/`-pi`/`-F`/`-Fi`/`-ident`: the id (`[A-Za-z_]\w*`) replaces the auto `p<i>`/`ident<i>` in `pat`, `$PAT_ID`, `-llm` tags, relations, and `-file-where`. |
 | `-patterns-from <f>` | Load additional patterns from a JSONL rule file — one `{"id","regexp"\|"literal","case_insensitive","word_boundary","utf8","ref"}` object per line, `#` comments allowed. Repeatable. See [Fixed strings & pattern files](#fixed-strings--pattern-files--f--fi--patterns-from). |
-| `-file-where <expr>` | Per-file predicate over pattern ids (`'err AND NOT recovery'`). See [Per-file conditions](#per-file-conditions--file-where). |
+| `-ident '<terms>'` | Match identifiers whose subtokens include ALL given space-separated terms, regardless of casing/separator (`parseConfig` ~ `parse_config`). Repeatable = OR. See [Identifier matching](#identifier-matching--ident). |
+| `-file-where <expr>` | Per-file predicate: pattern ids, plus `count(pat) > n` / `churn(days) > n` / `lang == name` conditions (`'err AND NOT recovery'`, `'churn(30) > 2'`). See [Per-file conditions](#per-file-conditions--file-where). |
+| `-order-by <f>` | Sort `-f`/`-c` output by `score`/`count`/`path` instead of walk order. See [Sorting file-grouped output](#sorting-file-grouped-output--order-by). |
 | `-records line` | With `-absent`: record-level absence — one JSON record per non-empty line lacking each pattern. See [Record-level absence](#record-level-absence--records-line). |
 | `-glob <glob>` | Scan glob (e.g. `"**/*.go"`; repeatable). Brace alternation is supported (`"src/**/*.{ts,tsx}"`), and absolute bases work too (`"/var/log/**/*.log"`). |
 | `-exclude <pat>` | Exclude rule (repeatable). Three forms: glob (`"*.log"`), bare directory name (`"vendor"` skips any `vendor/` dir), path prefix with `/` (`"src/generated/"`). |
@@ -136,6 +138,7 @@ Positional file/dir args after `-s`/`-script` (or after a positional script file
 | `-format <tmpl>` | Custom one-line template |
 | `-absent` | Files where the pattern is **not** found (like `grep -L`) |
 | `-llm` | Token-efficient plain text grouped by file (LLM-friendly). See [LLM output mode](#llm-output-mode). |
+| `-elide` | Scope-aware chunks with unmatched interior lines folded away. See [Elided scope output](#elided-scope-output--elide). |
 
 `-format` template tokens (substituted per match):
 
@@ -381,6 +384,39 @@ repeatable, appends to any `-p`/`-F` patterns, and cannot be combined with
 This replaces the fragile "build one giant alternation in shell" pattern for
 IOC lists: no regex-escaping bugs, no argv-length limits, and every hit is
 attributed to the entry (`pat`) that produced it.
+
+---
+
+## Identifier matching (`-ident`)
+
+Regex search misses the #1 source of missed hits in code: naming-convention drift. Searching for `parseConfig` doesn't find `parse_config` or `ConfigParser` — same concept, different casing. `-ident 'term1 term2 …'` matches identifiers by their **subtokens** instead of literal text: it splits every identifier in the scanned files on `_`, camelCase boundaries, acronym runs (`HTTPServer` → `HTTP`, `Server`), and letter/digit transitions (`utf8` → `utf`, `8`), then checks whether all of the given terms appear (case-insensitively) as one of those subtokens.
+
+```bash
+hprscript -ident 'parse config' -glob '**/*.go'
+# → matches parseConfig, parse_config, ConfigParser, PARSE_CONFIG, ...
+```
+
+Terms inside one `-ident` invocation **AND** together (the identifier must contain all of them); repeat `-ident` for separate groups that **OR** together:
+
+```bash
+# Either "parse config" or a bare "validate" hit.
+hprscript -ident 'parse config' -ident validate -glob '**/*.go'
+```
+
+Each `-ident` group becomes a synthetic pattern — auto-numbered `ident0`, `ident1`, … (independently of `-p`'s `p0`/`p1`/… numbering, so adding an `-ident` group never renumbers existing `-p` patterns) — and is a first-class pattern everywhere one is accepted: `-name`, `-near`/`-far`, `-file-where`, `-in-scope`, every output mode. A matched identifier's **whole span** is the match (`$MATCH` is `parseConfig`, not just `parse`).
+
+```bash
+# "config" mentions that are NOT near a "validate" call.
+hprscript -ident config -name cfg -p 'validate\(' -name v -far cfg:v:10 -llm src/*.go
+```
+
+**Constraints.**
+
+- ASCII identifiers only (`[A-Za-z_][A-Za-z0-9_]*`) — Unicode identifiers (e.g. non-Latin Go identifiers) aren't scanned.
+- Hand-scanned, not compiled into the Vectorscan database — the term set is dynamic per invocation and doesn't fit the compiled-pattern-database model. Cost scales with identifier count × `-ident` groups, fine for normal source files.
+- A term matches a subtoken **starting boundary**, not requiring the match to end at one — `utf8` matches `UTF8Decoder` (spans the internal digit split), but `arse` does not match `parseConfig` (no boundary mid-word).
+- No hyphen support: kebab-case names (`kebab-case-name`) scan as separate single-word identifiers split at each hyphen, not one joined identifier — a query spanning multiple kebab segments won't match. Config-file/CSS-style kebab-case is a possible future extension.
+- `-extract` cannot follow `-ident` (no capture groups on identifier matches). Search-mode only — not available in `edit` mode or script mode (script-mode DSL support may come later).
 
 ---
 
@@ -1833,6 +1869,57 @@ that fail it emit nothing (in any output mode) and don't count toward
 not with `-absent` — express absence inside the predicate instead
 (`-file-where 'NOT x' -f` is exactly `grep -L`). This replaces the
 script-mode "has A but not B" variable boilerplate for the common cases.
+Works in `edit` mode too — targeting reuses this exact predicate.
+
+### Metadata conditions: `count()`, `churn()`, `lang`
+
+Beyond bare pattern-presence, three condition forms extend the same
+`AND`/`OR`/`NOT` grammar with comparisons (`>`, `<`, `>=`, `<=`, `==`, `!=`):
+
+| Condition | Meaning |
+|---|---|
+| `count(pat) >= 3` | The pattern matched at least 3 times in this file (not just "at least once") |
+| `churn(30) > 2` | More than 2 commits touched this file in the last 30 days (`git log --since=30.days.ago`) |
+| `lang == go` | The file's auto-detected language (same guess `-scope auto` uses) equals `go` |
+
+```bash
+# Files where errors cluster (≥3 hits) in code that's actively being worked on.
+hprscript -p ERROR -name err -file-where 'count(err) >= 3 AND churn(30) > 2' -llm --glob '**/*.go'
+
+# Only Go files, regardless of what else -glob happened to sweep in.
+hprscript -p TODO -file-where 'lang == go' -f -glob '**/*'
+```
+
+`churn(N)` runs **one** `git log` call per distinct `N` referenced in the
+predicate (not one per file, not one per match) and requires the scan
+target to be a git repository — a git failure (not a repo, `git` missing)
+is a hard error (exit 2). `count(...)`/`churn(...)` need a git repo/pattern
+respectively; `lang` only supports `==`/`!=` (ordering a language name is
+meaningless). A file with no commits in the churn window is treated as
+`churn(N) == 0`, not an error.
+
+---
+
+## Sorting file-grouped output (`-order-by`)
+
+`-f`/`-c` stream in walk order — usually filesystem order, not anything meaningful. `-order-by <field>` buffers the file list and sorts it first:
+
+| Field | Order |
+|---|---|
+| `score` | Descending, same rarity/coverage/proximity formula as [`-hotspots`](#hotspot-ranking--hotspots-n) |
+| `count` | Descending, total matches in the file |
+| `path` | Ascending, lexicographic |
+
+```bash
+# Which files have the pattern most concentrated, not just present?
+hprscript -p 'TODO' -c -order-by score -glob '**/*.go'
+```
+
+Requires `-f` or `-c` (other output modes stream per-match, not per-file, so
+"sort the file list" doesn't apply the same way); mutually exclusive with
+`-sample`/`-hotspots`/`-budget`, which already define their own file
+ordering. `-c`'s existing behavior of listing every scanned file — even a
+`:0` — is preserved; only the order changes.
 
 ---
 
@@ -1882,9 +1969,60 @@ near-duplicates.
 - Memory cap: at most `max(100×N, 10000)` matches buffered across all
   files. Files exceeding the cap silently truncate.
 - Mutually exclusive with output modes that don't emit per-match payloads
-  (`-f`, `-c`, `-absent`) — combining them errors out.
+  (`-f`, `-c`, `-absent`) or that render a whole file at once (`-elide`) —
+  combining them errors out.
+- Mutually exclusive with [`-hotspots`](#hotspot-ranking--hotspots-n) — both
+  buffer the scan to pick a subset, with different selection strategies.
 - CLI-only in v1. Script-mode sampling is planned; for now, run a CLI
   sample and pipe results into a follow-up script if needed.
+
+---
+
+## Hotspot ranking (`-hotspots N`)
+
+"Where is the code for X" is usually answered by which *file* matches the most, rarest, most-co-located patterns — not by any single match. `-hotspots N` buffers the whole scan and answers exactly that, reusing script mode's [rank](#match-ranking-rank) formula (coverage × weighted hits ÷ size + a proximity bonus for co-located matches) instead of a second implementation. Quick-search patterns get an implicit weight of `1.0` — `-hotspots` doesn't yet expose `rank_surprise`/`rank_rich_clusters`; use script mode's `rank` when you need those.
+
+Each result is also annotated with its **best window**: the file's single densest match cluster (most distinct pattern ids, ties broken by point count) as a 1-based line range — a "look here first" pointer.
+
+```bash
+hprscript -p 'ScopeIndex' -p 'find_innermost' -hotspots 5 src/*.cpp src/*.hpp
+# → {"type":"hotspot","file":"src/scope.hpp","score":0.94,"line_start":45,"line_end":57,"patterns":["p0","p1"]}
+# → {"type":"hotspot","file":"src/scope.cpp","score":0.88,"line_start":173,"line_end":173,"patterns":["p0","p1"]}
+# → ...
+```
+
+Composes with the other output modes: default output is one JSONL hotspot record per file (`file`, `score`, `line_start`/`line_end` — the best window — `patterns`); `-llm` prints a flat `file:Ls-Le score=.. patterns=a,b` line per file; `-elide` renders each hotspot file's full match set through [elided scope output](#elided-scope-output--elide) instead of a bare pointer — the closest thing to a single RAG-style retrieval call this tool has.
+
+**Constraints.**
+
+- Mutually exclusive with `-sample` (both buffer the scan to pick a subset, with different selection strategies).
+- Output is JSONL (default), `-llm`, or `-elide` only — `-f`/`-c`/`-o`/`-format`/`-absent` don't apply.
+- `-limit`/`-max-output-bytes` don't bound hotspot output — `N` itself is the cap. `-summary`'s `emitted` count reflects hotspot rows, not raw matches (`matches` still reflects everything seen).
+- Full file content is only buffered when `-elide` is active (JSONL/`-llm` rows need nothing but the accumulated scores); under `-elide` the same `max(100×N, 10000)`-match memory cap as `-sample` applies, and files past the cap are silently dropped from `-elide` rendering (their JSONL/`-llm` row logic doesn't apply here since eliding is the active mode).
+
+---
+
+## Budget-packed context (`-budget N`)
+
+The feature that makes one hprscript call function like a single RAG retrieval: rank every matching file (same formula as [`-hotspots`](#hotspot-ranking--hotspots-n)/script mode's `rank`), then render score-descending in [`-elide`](#elided-scope-output--elide)'s shape until `N` bytes are spent. A file that doesn't fit in full degrades to a one-line summary (`file:Ls-Le score=.. patterns=a,b`); once even that doesn't fit, it's dropped and named in a trailing footer — nothing disappears silently.
+
+```bash
+hprscript -p 'ScopeIndex' -p 'find_innermost' -budget 4000 src/*.cpp src/*.hpp
+# → src/scope.hpp
+# →   45-57 func ...
+# → ...
+# → src/scope.cpp:173-173 score=0.88 patterns=p0,p1 (compact — full render didn't fit the budget)
+# → --- budget: 4 file(s) in full, 1 compact, 2 dropped: foo.cpp, bar.cpp ---
+```
+
+Bytes, not tokens — consistent with the `-max-*-bytes` family; there's no tokenizer dependency, so treat `N` as a rough proxy (roughly 3-4 bytes per token for typical source text).
+
+**Constraints.**
+
+- Defines its own output shape: mutually exclusive with every other output-mode flag (`-j`/`-f`/`-c`/`-o`/`-format`/`-absent`/`-llm`/`-elide`) and with `-sample`/`-hotspots`. Implies `-scope auto` when no `-scope` config is given, same as `-elide`.
+- `-limit`/`-max-output-bytes` don't apply — `-budget`'s own byte accounting is the cap.
+- Ranks and buffers **every** file with ≥1 match (not a fixed top-N like `-hotspots`) since it doesn't know ahead of time how many will fit; bounded by a fixed 20000-match memory cap, past which files are silently added to the "dropped" footer rather than considered at all.
+- The footer names up to 10 dropped files, then collapses the rest to `(+N more)`.
 
 ---
 
@@ -2009,7 +2147,92 @@ hprscript -p 'TODO' -llm -limit 1 -glob '**/*.go'
 - **Quick human eyeballing.** The grouped layout reads like `grep -n` output rather than JSON Lines — easier to skim.
 - **You don't need byte offsets / capture groups.** Pattern IDs still show up (as `[<pat>]` tags when multiple patterns are active), but if a downstream tool needs `from`/`to` offsets or the `extracted` map, stick with `-j`.
 
-`-llm` is mutually exclusive with the other output modes (`-j`, `-f`, `-c`, `-o`, `-format`, `-absent`).
+`-llm` is mutually exclusive with the other output modes (`-j`, `-f`, `-c`, `-o`, `-format`, `-absent`, `-elide`).
+
+---
+
+## Elided scope output (`-elide`)
+
+`-llm` shows matched lines with a fixed `-A`/`-B` window; anything wider means either narrow context (you miss the surrounding logic) or the whole block (you pay for lines with nothing relevant in them). `-elide` picks a middle ground: it renders each matched function's signature and matched lines in full, then folds everything else in the scope into a single `… (+N lines)` marker — the shape a human skimming the function would produce by eye.
+
+Implies `-scope auto` when no `-scope`/`-scope-pattern` config is given (same convention as `-in-scope`). Matches outside any detected scope fall back to a plain `  <line>: <text>` line, same as `-llm`'s line branch.
+
+Per scope, the shape is:
+
+```
+  <line_start>-<line_end> <kind> <name>
+<signature line>
+<matched lines with -A/-B context, contiguous runs merged>
+  … (+N lines)
+<closing line>
+```
+
+Small gaps (2 lines or fewer) are shown in full rather than elided — `… (+1 lines)` saves nothing and reads worse than the line itself.
+
+### Example
+
+```bash
+hprscript -p 'cli\.limit' -elide -scope cpp src/runner.cpp
+# →
+# src/runner.cpp
+#   59-510 func run_search
+# int run_search(const Cli &cli) {
+#   … (+59 lines)
+#     oo.global_limit = cli.limit;
+#   … (+390 lines)
+# }
+```
+
+### Constraints
+
+- Renders a whole file's kept matches in one call rather than streaming per match, so it's mutually exclusive with `-sample` (see [Sample mode](#sample-mode--sample-n)).
+- `-m` caps how many of a file's matches participate in the render; there's no mid-file stopping point the way per-match modes have one.
+- No per-match pattern-id tagging inside a rendered window (unlike `-llm`'s `[<pat>]` tags) — use `-llm` or the default JSON mode when you need to attribute a specific line to a specific pattern.
+
+---
+
+## Cross-invocation dedup (`-seen`)
+
+Agents iterate: search, refine, search again — and re-pay tokens for the same unchanged function every round. `-seen <path>` fixes that for [`-elide`](#elided-scope-output--elide) and [`-budget`](#budget-packed-context--budget-n): before rendering a matched scope in full, its raw source bytes are hashed and checked against `path`; an unchanged chunk collapses to one line instead of its full body, and the file is rewritten at the end of every run with what was actually shown.
+
+```bash
+hprscript -p 'ScopeIndex' -elide -seen .hpr-seen src/scope.hpp
+# first run — full chunks, .hpr-seen written
+# → src/scope.hpp
+# →   45-57 func ...
+# → ...
+
+hprscript -p 'ScopeIndex' -elide -seen .hpr-seen src/scope.hpp
+# nothing changed since — every chunk collapses
+# → src/scope.hpp
+# →   45-57 func ... (unchanged, already shown)
+
+# edit scope.hpp, then re-run — only the touched function expands
+```
+
+State format is plain text, one line per remembered chunk:
+`<file>\t<line_start>\t<line_end>\t<hash-hex>`. It's the file's line range
+*and* content that must match for a collapse — a function that grew or
+shrank (even with unchanged logic) gets its new range, misses the lookup,
+and renders in full again automatically.
+
+**Constraints.**
+
+- Requires `-elide` or `-budget` — there's no "chunk" concept to collapse
+  in any other output mode.
+- Only enclosing-scope chunks collapse; matches outside any detected scope
+  (the orphan/context-block fallback) always render in full — they're
+  typically a line or two already, not worth the bookkeeping.
+- `-budget` measures a file's full render to decide whether it fits the
+  byte budget before committing to it; a measurement that's ultimately
+  degraded to a compact summary or dropped is **not** recorded as shown, so
+  a later run with more budget still renders it in full rather than
+  wrongly treating it as already seen.
+- The hash (FNV-1a, non-cryptographic) is a change-detection checksum, not
+  a security boundary — don't rely on it for anything adversarial.
+- A missing or corrupt state file is treated as empty (first run), not an
+  error; a write failure at the end warns on stderr but doesn't change the
+  run's exit code — the actual search output already printed successfully.
 
 ---
 
@@ -2218,8 +2441,9 @@ without parsing stderr.
   record carries `symlink_target`.
 - **Binary files** (NUL in the first 512 bytes) are skipped like search
   mode; `-diagnostics` surfaces them.
-- **Not available in edit mode**: `-o`/`-f`/`-c`/`-llm`/`-absent`/`-format`,
-  `-A`/`-B`/`-C`, `-sample`, `-records`, `-s`/`-script`, and stdin as a scan
+- **Not available in edit mode**: `-o`/`-f`/`-c`/`-llm`/`-elide`/`-absent`/
+  `-format`, `-A`/`-B`/`-C`, `-sample`, `-hotspots`, `-budget`, `-ident`,
+  `-order-by`, `-seen`, `-records`, `-s`/`-script`, and stdin as a scan
   target — every input must be an explicit file, glob, list, or git
   selection.
 
