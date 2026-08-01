@@ -185,6 +185,9 @@ hprscript -p 'https?://[a-zA-Z0-9.\-]*[\x{0400}-\x{04FF}][a-zA-Z0-9.\-]*' suspec
 ### Editing files
 33. [Guarded code edits (`hprscript edit`)](#33-guarded-code-edits-hprscript-edit)
 
+### AI-agent workflows
+34. [Context retrieval & ranking for LLM agents](#34-context-retrieval--ranking-for-llm-agents)
+
 ---
 
 # Logs & Observability
@@ -3384,6 +3387,110 @@ hprscript edit -in-scope '^main$' -span scope-body -insert end \
 **Recover / verify:** the JSONL records are the receipt; `git diff` is the
 undo. A rerun of the same command is safe — already-applied sites report
 `"status":"noop"` and rewrite nothing.
+
+---
+
+## 34. Context retrieval & ranking for LLM agents
+
+hprscript's edge over embedding-based RAG: relevance, ranking, and
+context-budget-fit computed deterministically and freshly from the live
+tree — no index to go stale, no setup, fully explainable. These recipes are
+the ones an agent reaches for when the question isn't "does X exist" but
+"where should I look, and what's the smallest slice of code that answers
+the question."
+
+### 34.1 "Where's the code for X?" in one call — hotspot ranking
+
+**Problem:** N `grep` hits across a dozen files, no sense of which one is actually *the* place to look. `-hotspots` ranks every matching file by a rarity/coverage/proximity score (files matching more of the queried terms, more densely, in fewer overall files, rank higher) and reports each file's single densest match window.
+
+**Input:** Source tree.
+
+```bash
+hprscript -p 'RetryPolicy' -p 'backoff' -hotspots 5 -llm -glob '**/*.go'
+# → src/retry/policy.go:12-64 score=1.4 patterns=p0,p1
+# → src/client/http.go:88-88 score=0.3 patterns=p0
+```
+
+### 34.2 Pack the best context into a token budget
+
+**Problem:** You need "everything relevant to X" but have a hard context budget. `-budget N` ranks every matching file (same formula as `-hotspots`) and renders them score-descending in scope-aware chunks until `N` bytes are spent — degrading a file that doesn't fit to a one-line summary, then to a named "dropped" entry, rather than truncating mid-file or silently omitting anything.
+
+**Input:** Source tree.
+
+```bash
+hprscript -p 'AuthMiddleware' -p 'validateToken' -budget 6000 -glob '**/*.go'
+# → src/auth/middleware.go
+# →   12-40 func AuthMiddleware
+# → ...
+# → src/auth/legacy.go:9-9 score=0.2 patterns=p1 (compact — full render didn't fit the budget)
+# → --- budget: 2 file(s) in full, 1 compact, 0 dropped ---
+```
+
+### 34.3 Compact excerpts instead of whole functions
+
+**Problem:** A block-extracted function body can be hundreds of lines when only two of them matter. `-elide` prints the signature and matched lines with a little context, folding everything else into `… (+N lines)` — the shape a human skimming the function would produce by eye, and far cheaper than `-block-open`/`-block-close`'s full body for a large function.
+
+**Input:** Source tree.
+
+```bash
+hprscript -p 'RetryPolicy' -elide -scope auto -glob '**/*.go'
+# → src/retry/policy.go
+# →   12-64 func NewRetryPolicy
+# → func NewRetryPolicy(opts ...Option) *RetryPolicy {
+# →   … (+48 lines)
+# →     return p
+# → }
+```
+
+### 34.4 Find identifiers regardless of naming convention
+
+**Problem:** The symbol you're hunting could be `parseConfig`, `parse_config`, or `ConfigParser` depending on who wrote it and when — a regex has to enumerate every casing variant by hand. `-ident 'term1 term2'` splits every identifier on camelCase/snake_case/acronym/digit boundaries and matches when all given terms appear as subtokens, in any order, any casing.
+
+**Input:** Source tree.
+
+```bash
+hprscript -ident 'parse config' -glob '**/*.go'
+# → matches parseConfig, parse_config, ConfigParser, PARSE_CONFIG, ...
+```
+
+Each `-ident` group is a first-class pattern (`ident0`, `ident1`, …) — usable in `-name`, `-near`/`-far`, and `-file-where` exactly like a `-p` pattern.
+
+### 34.5 Don't re-pay tokens for unchanged context across agent turns
+
+**Problem:** An agent iterating — search, edit, search again — re-reads the same unchanged function every round. `-seen <path>` hashes each rendered chunk's raw source and, on a later run against the same state file, collapses anything unchanged to a one-line pointer instead of the full body.
+
+**Input:** Source tree, across repeated invocations in the same session.
+
+```bash
+hprscript -p 'AuthMiddleware' -elide -seen .hpr-seen -glob '**/*.go'
+# first call: full chunks, .hpr-seen written
+# every later call this session, for functions you haven't touched:
+# →   12-40 func AuthMiddleware (unchanged, already shown)
+```
+
+Works with `-budget` too. A chunk `-budget` measures to decide whether it fits, then discards in favor of a compact summary or a drop, is never recorded as "shown" — a later run with more budget still renders it in full.
+
+### 34.6 Filter by how actively a file is being worked on
+
+**Problem:** "Files with lots of TODOs" is noisy across a whole repo; "files with lots of TODOs that are also under active development" is the actual review queue. `churn(days)` extends `-file-where` with a git-commit-count condition alongside the existing pattern-presence predicate; `count(pat)` raises the bar from "matched once" to "matched at least N times."
+
+**Input:** A git repository.
+
+```bash
+hprscript -p TODO -name t -file-where 'count(t) >= 3 AND churn(30) > 2' -llm -glob '**/*.go'
+```
+
+`churn(30)` runs one `git log --since=30.days.ago` call regardless of how many files match — never one subprocess per file. `lang == go` (only `==`/`!=`) is also available, for globs that sweep in more than one language.
+
+### 34.7 Ranked file listing instead of walk order
+
+**Problem:** `-f`/`-c` stream in filesystem order, which has no relationship to relevance. `-order-by score` sorts the file list by the same ranking formula `-hotspots` uses; `count` sorts by total matches; `path` sorts lexicographically.
+
+**Input:** Source tree.
+
+```bash
+hprscript -p TODO -c -order-by score -glob '**/*.go'
+```
 
 ---
 

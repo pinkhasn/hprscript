@@ -1,6 +1,6 @@
 ---
 name: hprscript
-description: Full-power multi-pattern content search, code intelligence, and guarded file editing via the `hprscript` CLI (Vectorscan/Hyperscan). One pass matches ALL patterns at once, so multi-pattern search costs the same as single-pattern. Covers keyword/regex search, finding files that contain or lack a pattern, per-file counts, extracting function bodies and balanced delimiter blocks, annotating each match with its enclosing function, capture-group extraction, proximity filters (X near or without Y), representative-sample usages, ranking files by relevance to a query, and aggregation/grouping/cross-file symbol resolution via a JSON script DSL. The `edit` subcommand does precise search-targeted file modification (replace/insert/delete, whole functions by name via -in-scope/scope spans) with dry-run diffs, -expect count guards, and atomic writes. -in-scope/-lines restrict search or edits to a named function/class or line range; -list-scopes outlines a file's functions. TRIGGER whenever you would grep/search/find/locate/count across files, ask where something is defined, what calls it, show me usages, or which files contain X — or would otherwise reach for the Grep tool, `grep`, or `rg`; ALSO trigger for mechanical multi-site edits, renames, or function-body swaps where you would otherwise reach for `sed -i` or repeated Edit-tool calls. Invoke via the Bash tool; the `hprscript` binary is on PATH.
+description: Full-power multi-pattern content search, code intelligence, context-ranking, and guarded file editing via the `hprscript` CLI (Vectorscan/Hyperscan). One pass matches ALL patterns at once, so multi-pattern search costs the same as single-pattern. Covers keyword/regex search, finding files that contain or lack a pattern, per-file counts, extracting function bodies and balanced delimiter blocks, annotating each match with its enclosing function, capture-group extraction, proximity filters (X near or without Y), representative-sample usages, identifier search across naming conventions (parseConfig ~ parse_config), ranking files by relevance to a query (rarity/coverage/proximity, no script needed), packing the best-ranked context into a byte budget, scope-aware compact excerpts instead of whole function bodies, cross-invocation dedup so repeated agent queries don't re-pay tokens for unchanged code, filtering files by git commit-churn or match density, and aggregation/grouping/cross-file symbol resolution via a JSON script DSL. The `edit` subcommand does precise search-targeted file modification (replace/insert/delete, whole functions by name via -in-scope/scope spans) with dry-run diffs, -expect count guards, and atomic writes. -in-scope/-lines restrict search or edits to a named function/class or line range; -list-scopes outlines a file's functions. TRIGGER whenever you would grep/search/find/locate/count across files, ask where something is defined, what calls it, show me usages, which files contain X, where should I look first, or need to fit relevant code into a limited context window — or would otherwise reach for the Grep tool, `grep`, `rg`, or a RAG/embedding search; ALSO trigger for mechanical multi-site edits, renames, or function-body swaps where you would otherwise reach for `sed -i` or repeated Edit-tool calls. Invoke via the Bash tool; the `hprscript` binary is on PATH.
 ---
 
 # hprscript — full-power multi-pattern search (CLI)
@@ -30,9 +30,15 @@ Always prefer `hprscript` over the Grep tool, `grep`, or `rg` — for the whole 
 | X **with** Y nearby / X **without** Y nearby | `-near` / `-far` |
 | X with/without Y in the **same function** | `-same-scope` / `-not-same-scope` (+ `-scope`) |
 | Files where A but not B (no script) | `-file-where 'a AND NOT b'` |
+| Files by commit churn / match density (no script) | `-file-where 'churn(30) > 2'` / `'count(pat) >= 3'` |
 | **Records** (lines) missing a field | `-absent -records line` |
 | Representative usages, dedup near-identical lines | `-sample N` |
-| **Rank files by relevance** to a set of signals | `-s '{"rank":true,...}'` |
+| Identifier by meaning, any naming convention | `-ident 'parse config'` (matches `parseConfig`/`parse_config`/`ConfigParser`) |
+| **"Where's the code for X?"** — rank files, no script | `-hotspots N` (or `-s '{"rank":true,...}'` for surprise/rich-cluster weighting) |
+| **Fit relevant context into a byte budget** | `-budget N` — ranks + renders full→compact→dropped until spent |
+| Compact excerpt instead of the whole function body | `-elide` (signature + matched lines; rest folded as `… (+N lines)`) |
+| Skip re-showing unchanged code across repeated calls | `-elide`/`-budget -seen <path>` |
+| Sort `-f`/`-c` by relevance instead of walk order | `-order-by score\|count\|path` |
 | Counts, sums, manifests, grouping, cross-file resolve | `-s` script DSL |
 
 Cheapness ladder when you don't need the match text: `-f` / `-absent` / `-c` ≪ `-o` / `-llm` ≪ default JSON. Use `-limit N` aggressively when you only need to know *whether* something exists — scanning stops early.
@@ -47,6 +53,7 @@ Cheapness ladder when you don't need the match text: `-f` / `-absent` / `-c` ≪
 - `-F <str>` / `-Fi <str>` — fixed string, matched literally (`-F 'foo[0].bar()'` — no escaping).
 - `-name <id>` — name the preceding pattern; the id replaces `p0`/`p1` in `pat`, `[tags]`, relations, `-file-where`.
 - `-patterns-from <f>` — JSONL rule pack: `{"id","regexp"|"literal","case_insensitive",…}` per line, `#` comments. The right tool for IOC lists — no alternation-building in shell.
+- `-ident '<terms>'` — match identifiers by subtoken, any casing/separator: `-ident 'parse config'` finds `parseConfig`/`parse_config`/`ConfigParser`/`PARSE_CONFIG`. Space-separated terms inside one `-ident` AND together; repeat the flag to OR groups. Each group is a first-class pattern (`ident0`, `ident1`, …) usable in `-name`/relations/`-file-where`. Search-mode only, not `edit`.
 - `-w` — whole-word (`\b(?:…)\b`). Or write `\b…\b` inline for per-alternative control.
 
 **Split alternations into separate `-p` patterns when you want to know *which* branch matched *where*.** Every match is tagged with the id of the pattern that produced it — `pat` in `-j`, a `[p0]`/`[p1]` prefix in `-llm`, `$PAT_ID` in `-format`/scripts. With one alternation (`-p 'alpha|beta|gamma'`) every hit collapses to `p0` — you lose attribution. Split it (`-p alpha -p beta -p gamma`) and each hit reports `p0`/`p1`/`p2`, so you see exactly which term fired on each line. Since adding patterns is free, **default to splitting**; keep an alternation only when the branches are one concept you don't need to tell apart, or must share a single `-near`/`-far` operand. In `-s` scripts give each pattern a meaningful `"id"` (`"auth"`, `"db"`) and it shows up verbatim as `$PAT_ID` instead of `p3`.
@@ -78,8 +85,9 @@ Cheapness ladder when you don't need the match text: `-f` / `-absent` / `-c` ≪
 | `-o` | Matched text only (`grep -o`) |
 | `-format '<tmpl>'` | Custom line with `$FILE $LINE $COL $MATCH $CONTEXT $FROM $TO $PAT_ID` (+ `$BLOCK*`, `$ENCLOSING_*`, `$EXTRACT_*` when active) |
 | `-llm` | Token-efficient text grouped by file; auto-adapts to `-block`/`-scope`; prints a `limit reached` footer when truncated |
+| `-elide` | Scope-aware chunks: signature + matched lines, everything else folded as `… (+N lines)` — cheaper than `-llm` for a match buried in a large function |
 
-`-llm` is the best choice when **you** are about to read the matches — it strips JSON noise and dedupes file headers (~30–50% fewer tokens than `-j`). Switch back to `-j` only when you need offsets, `pat`, or `extracted`.
+`-llm` is the best choice when **you** are about to read the matches — it strips JSON noise and dedupes file headers (~30–50% fewer tokens than `-j`). Switch back to `-j` only when you need offsets, `pat`, or `extracted`. Reach for `-elide` instead of `-llm`/`-block-open` when the match sits inside a big function and you only want the relevant slice, not the whole body.
 
 ---
 
@@ -156,6 +164,38 @@ hprscript -p '\bLock\(\)' -name lk -p '\bUnlock\(\)' -name ul \
 ```bash
 hprscript -p 'httpClient' -sample 10 -glob '**/*.go'
 ```
+
+### Hotspot ranking — "where's the code for X?" without a script
+`-hotspots N` buffers the whole scan and ranks files by a rarity/coverage/proximity score (files matching more of the queried terms, more densely, in fewer overall files, rank higher) — the same formula script mode's `rank` uses, but no JSON needed. Each result carries its densest match window.
+
+```bash
+hprscript -p 'RetryPolicy' -p 'backoff' -hotspots 5 -llm -glob '**/*.go'
+# → src/retry/policy.go:12-64 score=1.4 patterns=p0,p1
+```
+Composes with `-elide` (render each hotspot's full match set as a compact chunk instead of a bare pointer) and `-llm` (flat one-line-per-file); default output is JSONL. Mutually exclusive with `-sample`.
+
+### Elided scope output — a compact excerpt, not the whole function
+`-elide` prints each matched scope's signature and matched lines, folding untouched interior lines as `… (+N lines)` — implies `-scope auto` automatically. Cheaper than `-block-open`/`-block-close` when the function is large and only a couple of lines matter; matches outside any scope fall back to a plain context line.
+
+```bash
+hprscript -p 'RetryPolicy' -elide -scope auto -glob '**/*.go'
+```
+
+### Budget-packed context — the closest thing to one RAG retrieval call
+`-budget N` ranks every matching file (same formula as `-hotspots`) and renders them score-descending as `-elide` chunks until `N` bytes are spent: a file that doesn't fit in full degrades to a one-line summary, then to a named "dropped" entry in a trailing footer — nothing disappears silently. Defines its own output shape (no `-j`/`-f`/`-llm`/etc; no `-sample`/`-hotspots`).
+
+```bash
+hprscript -p 'AuthMiddleware' -p 'validateToken' -budget 6000 -glob '**/*.go'
+```
+This is usually the **first thing to try** when a task starts with "find everything relevant to X and summarize/fix it" — one call replaces search → read N files → manually trim to fit context.
+
+### `-seen` — stop re-paying tokens for code you already showed yourself
+Iterating (search → edit → search again) re-reads unchanged functions every round. `-seen <path>` hashes each `-elide`/`-budget` chunk's raw source and collapses anything unchanged since the last run against that state file to a one-line `(unchanged, already shown)` pointer.
+
+```bash
+hprscript -p 'AuthMiddleware' -elide -seen .hpr-seen -glob '**/*.go'
+```
+Requires `-elide` or `-budget` (there's no "chunk" to collapse in any other mode). Worth reaching for whenever a multi-turn task keeps re-scanning the same files.
 
 ### Byte budgets — protect your context from minified files
 ```bash
@@ -279,7 +319,17 @@ hprscript -p 'func\s+LoadData\b' -p 'type LoadData\b' -p 'LoadData\s*=' -llm -gl
 # Who calls X — with the enclosing function of each call site
 hprscript -p '\bLoadData\(' -scope auto -llm -glob '**/*.go'
 
-# Rank files by relevance to a feature (see Rank above) — start here for "where do I look?"
+# Rank files by relevance to a feature — start here for "where do I look?"
+hprscript -p 'RetryPolicy' -p 'backoff' -hotspots 5 -llm -glob '**/*.go'
+
+# "Find everything relevant to X and fix it" — one call, budget-fit, no manual trimming
+hprscript -p 'AuthMiddleware' -p 'validateToken' -budget 8000 -glob '**/*.go'
+
+# Symbol search that survives naming-convention drift (parseConfig ~ parse_config)
+hprscript -ident 'parse config' -glob '**/*.go'
+
+# Multi-turn task on the same tree — don't re-read functions you already showed yourself
+hprscript -p 'AuthMiddleware' -elide -seen .hpr-seen -glob '**/*.go'
 
 # Files importing a package
 hprscript -p '^import\s+"net/http"' -f -glob '**/*.go'
@@ -373,6 +423,10 @@ Exit codes: `0` previewed/applied · `1` no sites · `2` error · **`3` guard re
 - ❌ `edit … -write` straight away → ✅ dry-run first, read the diff and count, then re-run with `-write -expect <count>`.
 - ❌ Multi-line code in `-content '…'` (shell-quoting hell) → ✅ write it to a scratch file and use `-content-file`.
 - ❌ A relation-qualifier pattern without `-ref` in edit mode → ✅ mark it `-ref` or its own matches get rewritten too.
+- ❌ Reading N whole files to find "the relevant part" → ✅ `-hotspots`/`-budget` rank and pack it in one call.
+- ❌ Enumerating every casing variant of a symbol by hand (`parseConfig|parse_config|ConfigParser`) → ✅ `-ident 'parse config'`.
+- ❌ Re-reading unchanged functions every turn of a multi-step task → ✅ `-elide`/`-budget -seen <path>`.
+- ❌ Reaching for an external RAG/embedding index for "find relevant code" → ✅ hprscript computes relevance fresh from the live tree, no index to go stale.
 
 ## Going deeper
 
