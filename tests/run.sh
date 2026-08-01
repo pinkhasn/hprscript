@@ -2157,7 +2157,7 @@ expect_eq "-ident: underscore-separated all-caps" "MAX_RETRY_COUNT" "$OUT"
 OUT=$("$BIN" -ident 'parse config' -ident 'unrelated' -f "$ID/id.go")
 expect_contains "-ident: repeated groups OR together" "id.go" "$OUT"
 COUNT=$("$BIN" -ident 'parse config' -ident 'unrelated' -o "$ID/id.go" | wc -l)
-[[ "$COUNT" == "5" ]] && report ok "-ident: OR group adds its own matches" || report fail "-ident: OR group adds its own matches (got $COUNT)"
+[[ "$COUNT" -eq 5 ]] && report ok "-ident: OR group adds its own matches" || report fail "-ident: OR group adds its own matches (got $COUNT)"
 
 # --- synthetic pattern id: auto ident0/ident1 and explicit -name
 OUT=$("$BIN" -ident 'parse config' -format '$PAT_ID' "$ID/id.go")
@@ -2331,7 +2331,7 @@ expect_contains "-seen first run: full render" "func Alpha() {" "$OUT"
 expect_contains "-seen first run: full render (2nd fn)" "func Beta() {" "$OUT"
 [[ -f "$SN/state.txt" ]] && report ok "-seen: state file created" || report fail "-seen: state file created"
 STATE_LINES=$(wc -l < "$SN/state.txt")
-[[ "$STATE_LINES" == "2" ]] && report ok "-seen: one state line per scope" || report fail "-seen: one state line per scope (got $STATE_LINES)"
+[[ "$STATE_LINES" -eq 2 ]] && report ok "-seen: one state line per scope" || report fail "-seen: one state line per scope (got $STATE_LINES)"
 
 # --- second run, nothing changed: both collapse
 OUT=$("$BIN" -p target -elide -scope go -seen "$SN/state.txt" "$SN/f.go")
