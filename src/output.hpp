@@ -16,8 +16,12 @@
 #include <string>
 #include <string_view>
 #include <unordered_map>
+#include <vector>
 
 namespace hpr {
+
+class SeenStore;    // src/seen.hpp — -seen cross-invocation dedup
+struct SeenMark;
 
 enum class OutputMode {
     JsonLines,    // one JSON object per line (default)
@@ -27,6 +31,7 @@ enum class OutputMode {
     Custom,       // -format template with $FILE etc.
     Absent,       // grep -L: files where pattern is NOT present
     Llm,          // -llm: token-efficient text for LLM consumption
+    Elide,        // -elide: scope-aware chunk rendering, whole file at once
 };
 
 // True iff the given output mode reads line/col/context from a LineIndex.
@@ -36,6 +41,7 @@ inline bool needs_line_index(OutputMode m) {
         case OutputMode::JsonLines:
         case OutputMode::Custom:
         case OutputMode::Llm:
+        case OutputMode::Elide:
             return true;
         case OutputMode::FilesOnly:
         case OutputMode::Counts:
@@ -85,6 +91,26 @@ public:
     void on_match(const std::string &file, const Pattern &pattern,
                   const Match &m, std::string_view buf, const LineIndex &idx,
                   const ScopeIndex *scope = nullptr);
+
+    // -elide mode: render one file's entire kept-match set in a single call,
+    // grouped by innermost enclosing scope. Each scope prints its signature
+    // line, then matched lines with -A/-B context, folding untouched
+    // interior lines as "… (+N lines)"; matches outside any scope fall back
+    // to a plain context-block line (like -llm's line branch). `kept` must
+    // be sorted by `from` ascending (the collector's normal emission order).
+    //
+    // `seen` (optional, -seen): before rendering a scope block in full, its
+    // raw byte range is hashed and checked against `seen` — an unchanged
+    // match collapses to a one-line "(unchanged, already shown)" pointer
+    // instead of the full render. Orphan (no-scope) matches are never
+    // collapsed. `marks_out` (optional), when given, receives one SeenMark
+    // per scope block examined (collapsed or not) — the caller decides
+    // whether to actually commit those into the persistent SeenStore (see
+    // src/seen.hpp's SeenMark doc comment for why that's a separate step).
+    void on_file_elide(const std::string &file, const std::vector<Match> &kept,
+                       std::string_view buf, const LineIndex &idx,
+                       const ScopeIndex *scope, const SeenStore *seen = nullptr,
+                       std::vector<SeenMark> *marks_out = nullptr);
 
     // Record-level absence (-records line with -absent): emit one JSON line
     // for a record (line) of `file` that lacks `pattern`. Only meaningful in
@@ -145,7 +171,7 @@ private:
     uint64_t bytes_emitted_ = 0; // total bytes written to out_
     bool over_budget_ = false;   // sticky once max_output_bytes is exceeded
     bool limit_hit_ = false;     // set by mark_limit_hit() (LLM footer)
-    std::string llm_last_file_;  // last file printed as LLM header (dedupe)
+    std::string llm_last_file_;  // last file printed as a header (-llm/-elide dedupe)
     std::unordered_map<std::string, uint64_t> per_file_counts_;
 
     // Per-line scratch buffer reused across matches to avoid reallocation.

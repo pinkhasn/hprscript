@@ -599,6 +599,14 @@ int run_edit(const Cli &cli) {
     const bool any_scope_rel = any_scope_relation(rels);
     FileWhere fw;
     if (!fw.init(cli.file_where, patterns)) return 2;
+    std::map<int, std::unordered_map<std::string, uint32_t>> churn_map;
+    if (!fw.churn_windows().empty()) {
+        std::string cerr;
+        if (!build_churn_map(fw.churn_windows(), churn_map, cerr)) {
+            std::fprintf(stderr, "hprscript: git: %s\n", cerr.c_str());
+            return 2;
+        }
+    }
 
     Matcher matcher;
     if (!anchorless) {
@@ -742,7 +750,9 @@ int run_edit(const Cli &cli) {
             collector.collect(matcher, content, idx, scope_ptr, al, kept);
             tf.apply(kept, idx, scope_ptr);
             if (kept.empty()) return true;
-            if (fw.active() && !fw.pass(kept, patterns.size())) return true;
+            if (fw.active() &&
+                !fw.pass(kept, patterns.size(), it.path, churn_map))
+                return true;
             stats.matches_seen += kept.size();
 
             // -ref patterns qualify (relations above, -file-where just now)

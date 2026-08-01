@@ -3,11 +3,14 @@
 #include "extract.hpp"
 #include "file_io.hpp"
 #include "git.hpp"
+#include "ident.hpp"
 #include "line_index.hpp"
 #include "matcher.hpp"
 #include "output.hpp"
 #include "pipeline.hpp"
+#include "rank.hpp"
 #include "scope.hpp"
+#include "seen.hpp"
 #include "walker.hpp"
 
 #include <algorithm>
@@ -16,6 +19,7 @@
 #include <chrono>
 #include <climits>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <map>
@@ -52,13 +56,103 @@ std::string normalise_shape(std::string_view line) {
     return s;
 }
 
+// Shared per-file buffering for modes that need to look at a file's matches
+// again after the whole scan completes (-sample, -hotspots): owns the
+// content (the original mmap'd buffer doesn't outlive the walk callback)
+// and rebuilds LineIndex/ScopeIndex against the owned copy so pointers stay
+// valid. `kept` is left empty by callers that don't need per-match replay.
+struct BufferedFile {
+    std::string path;
+    std::string content;
+    hpr::LineIndex idx;
+    hpr::ScopeIndex scope;
+    bool scope_built = false;
+    std::vector<hpr::Match> kept;
+};
+
+BufferedFile buffer_file(const std::string &display_name,
+                         std::string_view content,
+                         const std::string &eff_scope_lang,
+                         const hpr::ScopeConfig &user_scope_custom,
+                         bool rebuild_scope) {
+    BufferedFile bf;
+    bf.path = display_name;
+    bf.content.assign(content.data(), content.size());
+    bf.idx.build(bf.content);
+    if (rebuild_scope) {
+        hpr::ScopeConfig sc = hpr::resolve_scope_for_file(
+            eff_scope_lang, user_scope_custom, display_name);
+        if (!sc.anchor_regex.empty()) {
+            std::string serr;
+            if (bf.scope.build(bf.content, sc, bf.idx, &serr))
+                bf.scope_built = true;
+        }
+    }
+    return bf;
+}
+
+// Fold one file's kept matches into a RankInput accumulator — shared by
+// -hotspots and -budget, which both feed the same scoring formula
+// (src/rank.hpp) from quick-search's per-file match lists.
+void accumulate_rank_input(hpr::RankInput &in, const std::string &display_name,
+                           const std::vector<hpr::Match> &kept,
+                           const std::vector<hpr::Pattern> &patterns,
+                           const hpr::LineIndex &idx) {
+    auto &fr = in.per_file[display_name];
+    if (fr.matched_pat_ids.empty() && fr.match_points.empty())
+        in.file_order.push_back(display_name);
+    fr.line_count = idx.line_count();
+    static constexpr size_t kMaxMatchPoints = 4096;
+    for (const auto &m : kept) {
+        const hpr::Pattern &pat = patterns[m.pattern_index];
+        if (fr.matched_pat_ids.insert(pat.id).second)
+            fr.raw_score += pat.weight;
+        if (fr.match_points.size() < kMaxMatchPoints) {
+            auto pit = fr.pat_local_ids.find(pat.id);
+            uint16_t local;
+            if (pit == fr.pat_local_ids.end()) {
+                local = static_cast<uint16_t>(
+                    std::min<size_t>(fr.pat_local_ids.size(), 0xFFFFu));
+                fr.pat_local_ids[pat.id] = local;
+            } else {
+                local = pit->second;
+            }
+            fr.match_points.emplace_back(idx.line_of(m.from), local);
+        }
+    }
+}
+
+// Render a buffered file's matches via -elide's logic into an owned string
+// instead of stdout, so -budget can measure the size before committing to
+// it. Reuses Formatter/on_file_elide verbatim through a memory-backed
+// FILE* (open_memstream is POSIX; this codebase already assumes POSIX
+// throughout — mmap, fork/execvp, poll).
+std::string render_elide_to_string(const BufferedFile &bf,
+                                   const hpr::OutputOptions &render_oo,
+                                   const hpr::SeenStore *seen,
+                                   std::vector<hpr::SeenMark> *marks_out) {
+    char *buf = nullptr;
+    size_t len = 0;
+    FILE *mem = open_memstream(&buf, &len);
+    if (!mem) return {};
+    {
+        hpr::Formatter fmt(render_oo, mem);
+        fmt.on_file_elide(bf.path, bf.kept, bf.content, bf.idx,
+                          bf.scope_built ? &bf.scope : nullptr, seen, marks_out);
+    }
+    std::fclose(mem);
+    std::string result(buf, len);
+    std::free(buf);
+    return result;
+}
+
 } // namespace
 
 namespace hpr {
 
 int run_search(const Cli &cli) {
     if (cli.patterns.empty()) {
-        std::fprintf(stderr, "hprscript: -p <pattern> required\n");
+        std::fprintf(stderr, "hprscript: -p <pattern> or -ident <terms> required\n");
         return 2;
     }
     const auto t_start = std::chrono::steady_clock::now();
@@ -66,27 +160,50 @@ int run_search(const Cli &cli) {
 
     std::vector<Pattern> patterns = build_patterns(cli);
 
+    // -ident groups occupy patterns' tail (build_patterns guarantees this);
+    // they're matched by scan_identifiers(), never by Vectorscan, so only
+    // the regex-backed prefix is compiled. Vectorscan's reported pattern
+    // ids are 0..num_regex-1 either way, which is exactly where those
+    // patterns sit in the unified `patterns` vector too.
+    std::vector<IdentGroup> ident_groups;
+    for (const auto &cp : cli.patterns) {
+        if (!cp.ident_terms.empty()) ident_groups.push_back(IdentGroup{cp.ident_terms});
+    }
+    const size_t num_regex = patterns.size() - ident_groups.size();
+
     std::vector<ResolvedRelation> rels;
     if (!resolve_relations(cli.relations, patterns, rels)) return 2;
     const bool any_scope_rel = any_scope_relation(rels);
 
     FileWhere fw;
     if (!fw.init(cli.file_where, patterns)) return 2;
+    std::map<int, std::unordered_map<std::string, uint32_t>> churn_map;
+    if (!fw.churn_windows().empty()) {
+        std::string cerr;
+        if (!build_churn_map(fw.churn_windows(), churn_map, cerr)) {
+            std::fprintf(stderr, "hprscript: git: %s\n", cerr.c_str());
+            return 2;
+        }
+    }
 
     TargetFilter tf;
     if (!tf.init(cli)) return 2;
 
     Matcher matcher;
     CompileError ce;
-    if (!matcher.compile(patterns, &ce)) {
-        std::fprintf(stderr, "hprscript: pattern compile failed: %s\n",
-                     ce.message.c_str());
-        if (ce.pattern_index >= 0 &&
-            static_cast<size_t>(ce.pattern_index) < patterns.size()) {
-            std::fprintf(stderr, "  in pattern: %s\n",
-                         patterns[ce.pattern_index].regexp.c_str());
+    if (num_regex > 0) {
+        std::vector<Pattern> regex_patterns(patterns.begin(),
+                                            patterns.begin() + num_regex);
+        if (!matcher.compile(regex_patterns, &ce)) {
+            std::fprintf(stderr, "hprscript: pattern compile failed: %s\n",
+                         ce.message.c_str());
+            if (ce.pattern_index >= 0 &&
+                static_cast<size_t>(ce.pattern_index) < patterns.size()) {
+                std::fprintf(stderr, "  in pattern: %s\n",
+                             patterns[ce.pattern_index].regexp.c_str());
+            }
+            return 2;
         }
-        return 2;
     }
 
     ExtractTable extract_table;
@@ -158,8 +275,9 @@ int run_search(const Cli &cli) {
     // effect: records gain the `enclosing` annotation, which is useful
     // context anyway.
     std::string eff_scope_lang = cli.scope_lang;
-    if (tf.scope_needed() && eff_scope_lang.empty() &&
-        cli.scope_pattern.empty())
+    if ((tf.scope_needed() || oo.mode == OutputMode::Elide ||
+         cli.budget_bytes > 0) &&
+        eff_scope_lang.empty() && cli.scope_pattern.empty())
         eff_scope_lang = "auto";
     bool scope_enabled = !eff_scope_lang.empty() ||
                          (!cli.scope_pattern.empty() && !cli.scope_open.empty() &&
@@ -216,30 +334,144 @@ int run_search(const Cli &cli) {
         // Sample is incompatible with output modes that don't emit per-match
         // data — let the user know rather than silently doing nothing.
         if (oo.mode == OutputMode::FilesOnly || oo.mode == OutputMode::Counts ||
-            oo.mode == OutputMode::Absent) {
+            oo.mode == OutputMode::Absent || oo.mode == OutputMode::Elide) {
             std::fprintf(stderr,
-                         "hprscript: -sample requires a per-match output mode (default JSONL, -o, -format)\n");
+                         "hprscript: -sample requires a per-match output mode "
+                         "(default JSONL, -o, -format, -llm) — -elide renders "
+                         "whole-file batches and doesn't compose with -sample\n");
             return 2;
         }
     }
-    struct SampleFile {
-        std::string path;
-        std::string content;
-        LineIndex idx;
-        ScopeIndex scope;
-        bool scope_built = false;
-    };
     struct SampleRec {
         size_t file_idx;
         Match m;
     };
-    std::vector<SampleFile> sample_files;
+    std::vector<BufferedFile> sample_files;
     std::vector<SampleRec> sample_recs;
     const size_t SAMPLE_REC_CAP = std::max<size_t>(
         100u * static_cast<size_t>(cli.sample_n > 0 ? cli.sample_n : 1),
         10000u);
 
-    MatchCollector collector(patterns, std::move(rels), cli.git_added_lines);
+    // Hotspot-mode buffering. When hotspots_n > 0 we accumulate the same
+    // rarity/coverage/proximity signal script mode's `rank` uses (see
+    // src/rank.hpp), one FileRank per file with ≥1 match, then score and
+    // emit the top N after the whole scan. Full file content is only
+    // buffered under -elide, which needs to re-render the file; JSONL/-llm
+    // hotspot rows need nothing but the accumulated RankInput.
+    const bool hotspotting = cli.hotspots_n > 0;
+    if (hotspotting) {
+        if (sampling) {
+            std::fprintf(stderr,
+                         "hprscript: -hotspots cannot combine with -sample "
+                         "(both buffer the scan to pick a subset)\n");
+            return 2;
+        }
+        if (oo.mode != OutputMode::JsonLines && oo.mode != OutputMode::Llm &&
+            oo.mode != OutputMode::Elide) {
+            std::fprintf(stderr,
+                         "hprscript: -hotspots output is JSONL (default), "
+                         "-llm, or -elide\n");
+            return 2;
+        }
+    }
+    RankInput hs_input;
+    if (hotspotting) {
+        for (const auto &p : patterns) {
+            hs_input.pattern_weights[p.id] = p.weight;
+            hs_input.queried_ids.insert(p.id);
+        }
+        hs_input.total_queried = static_cast<uint32_t>(patterns.size());
+    }
+    std::vector<BufferedFile> hs_files;
+    std::unordered_map<std::string, size_t> hs_file_idx;
+    const size_t HOTSPOT_REC_CAP = std::max<size_t>(
+        100u * static_cast<size_t>(cli.hotspots_n > 0 ? cli.hotspots_n : 1),
+        10000u);
+    size_t hs_buffered_matches = 0;
+
+    // Budget-packing mode. Unlike -hotspots (a fixed top-N), -budget doesn't
+    // know ahead of time how many files will fit, so every file with ≥1
+    // match is ranked and buffered in full (bounded by BUDGET_REC_CAP, same
+    // "silently truncates" convention as -sample/-hotspots). It defines its
+    // own output shape, so no other output-mode flag may be set.
+    const bool budgeting = cli.budget_bytes > 0;
+    if (budgeting) {
+        if (sampling || hotspotting) {
+            std::fprintf(stderr,
+                         "hprscript: -budget cannot combine with "
+                         "-sample/-hotspots\n");
+            return 2;
+        }
+        if (cli.out_mode_set) {
+            std::fprintf(stderr,
+                         "hprscript: -budget defines its own output shape — "
+                         "drop -j/-f/-c/-o/-format/-absent/-llm/-elide\n");
+            return 2;
+        }
+    }
+    RankInput bg_input;
+    if (budgeting) {
+        for (const auto &p : patterns) {
+            bg_input.pattern_weights[p.id] = p.weight;
+            bg_input.queried_ids.insert(p.id);
+        }
+        bg_input.total_queried = static_cast<uint32_t>(patterns.size());
+    }
+    std::vector<BufferedFile> bg_files;
+    std::unordered_map<std::string, size_t> bg_file_idx;
+    static constexpr size_t BUDGET_REC_CAP = 20000;
+    size_t bg_buffered_matches = 0;
+    OutputOptions bg_render_oo;
+    if (budgeting) {
+        bg_render_oo.mode = OutputMode::Elide;
+        bg_render_oo.context_before = cli.context_before;
+        bg_render_oo.context_after = cli.context_after;
+        bg_render_oo.max_match_bytes = cli.max_match_bytes;
+        bg_render_oo.max_context_bytes = cli.max_context_bytes;
+        bg_render_oo.max_block_bytes = cli.max_block_bytes;
+    }
+
+    // -order-by: sorts -f/-c output instead of streaming it in walk order.
+    // `score` needs the same whole-scan RankInput accumulation as
+    // -hotspots/-budget; `count`/`path` just need the per-file row buffered.
+    // No separate check against -sample/-hotspots/-budget is needed here:
+    // each of those already requires an output mode that isn't -f/-c, so
+    // they can never reach this point already combined with -order-by.
+    const bool ordering = cli.order_by != Cli::OrderBy::None;
+    if (ordering && oo.mode != OutputMode::FilesOnly &&
+        oo.mode != OutputMode::Counts) {
+        std::fprintf(stderr, "hprscript: -order-by requires -f or -c output\n");
+        return 2;
+    }
+    struct OrderRow {
+        std::string file;
+        uint64_t count;
+    };
+    std::vector<OrderRow> order_rows;
+    RankInput ord_input;
+    if (ordering && cli.order_by == Cli::OrderBy::Score) {
+        for (const auto &p : patterns) {
+            ord_input.pattern_weights[p.id] = p.weight;
+            ord_input.queried_ids.insert(p.id);
+        }
+        ord_input.total_queried = static_cast<uint32_t>(patterns.size());
+    }
+
+    // -seen: cross-invocation dedup, only meaningful where there's a
+    // "chunk" to collapse (-elide's own mode, or -budget's internal use of
+    // it). Loaded once up front; rewritten once at the end with whatever
+    // this run actually displayed in full (see SeenMark's doc comment for
+    // why -budget only commits marks for its full-render tier).
+    const bool seen_active = !cli.seen_path.empty();
+    if (seen_active && oo.mode != OutputMode::Elide && !budgeting) {
+        std::fprintf(stderr, "hprscript: -seen requires -elide or -budget\n");
+        return 2;
+    }
+    SeenStore seen_store;
+    if (seen_active) seen_store.load(cli.seen_path);
+
+    MatchCollector collector(patterns, std::move(rels), cli.git_added_lines,
+                             ident_groups);
     const bool have_rels = !cli.relations.empty();
 
     auto scan_buf = [&](const std::string &display_name,
@@ -267,7 +499,8 @@ int run_search(const Cli &cli) {
 
         // -file-where: emit this file's matches only when the predicate over
         // its matched-pattern set holds.
-        if (fw.active() && !fw.pass(kept, patterns.size())) {
+        if (fw.active() &&
+            !fw.pass(kept, patterns.size(), display_name, churn_map)) {
             fmt.on_file_end(display_name, false);
             return true;
         }
@@ -308,25 +541,11 @@ int run_search(const Cli &cli) {
         if (sampling) {
             if (kept.empty()) return true;
             if (sample_recs.size() >= SAMPLE_REC_CAP) return true;
-            // Take ownership of file content + indices the sampler will need.
-            SampleFile sf;
-            sf.path = display_name;
-            sf.content.assign(content.data(), content.size());
-            sf.idx.build(sf.content);
-            if (scope_ptr) {
-                // Re-build against the owned content so pointers stay valid.
-                ScopeConfig sc = resolve_scope_for_file(eff_scope_lang,
-                                                        user_scope_custom,
-                                                        display_name);
-                if (!sc.anchor_regex.empty()) {
-                    std::string serr;
-                    if (sf.scope.build(sf.content, sc, sf.idx, &serr)) {
-                        sf.scope_built = true;
-                    }
-                }
-            }
             size_t fidx = sample_files.size();
-            sample_files.push_back(std::move(sf));
+            sample_files.push_back(buffer_file(display_name, content,
+                                               eff_scope_lang,
+                                               user_scope_custom,
+                                               scope_ptr != nullptr));
             for (const auto &m : kept) {
                 if (sample_recs.size() >= SAMPLE_REC_CAP) break;
                 sample_recs.push_back({fidx, m});
@@ -334,17 +553,78 @@ int run_search(const Cli &cli) {
             return true;
         }
 
-        uint64_t per_file = 0;
-        for (const auto &m : kept) {
-            had_match = true;
-            ++per_file;
-            const Pattern &pat = patterns[m.pattern_index];
-            fmt.on_match(display_name, pat, m, content, idx, scope_ptr);
-            if (fmt.over_budget()) break;
+        if (hotspotting) {
+            if (kept.empty()) return true;
+            accumulate_rank_input(hs_input, display_name, kept, patterns, idx);
+            if (oo.mode == OutputMode::Elide &&
+                hs_buffered_matches < HOTSPOT_REC_CAP) {
+                BufferedFile bf = buffer_file(display_name, content,
+                                              eff_scope_lang, user_scope_custom,
+                                              scope_ptr != nullptr);
+                bf.kept = kept;
+                hs_buffered_matches += kept.size();
+                hs_file_idx[display_name] = hs_files.size();
+                hs_files.push_back(std::move(bf));
+            }
+            return true;
+        }
+
+        if (budgeting) {
+            if (kept.empty()) return true;
+            accumulate_rank_input(bg_input, display_name, kept, patterns, idx);
+            if (bg_buffered_matches < BUDGET_REC_CAP) {
+                BufferedFile bf = buffer_file(display_name, content,
+                                              eff_scope_lang, user_scope_custom,
+                                              scope_ptr != nullptr);
+                bf.kept = kept;
+                bg_buffered_matches += kept.size();
+                bg_file_idx[display_name] = bg_files.size();
+                bg_files.push_back(std::move(bf));
+            }
+            return true;
+        }
+
+        if (ordering) {
+            // Match -f's existing semantics (files with zero matches are
+            // omitted) and -c's (every scanned file gets a row, even :0).
+            if (oo.mode == OutputMode::FilesOnly && kept.empty()) return true;
+            order_rows.push_back({display_name, static_cast<uint64_t>(kept.size())});
+            if (cli.order_by == Cli::OrderBy::Score && !kept.empty())
+                accumulate_rank_input(ord_input, display_name, kept, patterns, idx);
+            return true;
+        }
+
+        if (oo.mode == OutputMode::Elide) {
+            // Whole-file batch render — -m caps how many of this file's
+            // matches participate, but there's no natural mid-file stopping
+            // point the way per-match modes have one.
+            std::vector<Match> capped = kept;
             if (cli.per_file_limit > 0 &&
-                per_file >= static_cast<uint64_t>(cli.per_file_limit)) break;
-            if (cli.limit > 0 &&
-                fmt.emitted() >= static_cast<uint64_t>(cli.limit)) break;
+                capped.size() > static_cast<size_t>(cli.per_file_limit))
+                capped.resize(static_cast<size_t>(cli.per_file_limit));
+            if (!capped.empty()) {
+                had_match = true;
+                std::vector<SeenMark> marks;
+                fmt.on_file_elide(display_name, capped, content, idx, scope_ptr,
+                                  seen_active ? &seen_store : nullptr,
+                                  seen_active ? &marks : nullptr);
+                // -elide's render is the final output — nothing measured
+                // and discarded like -budget — so every mark commits.
+                if (seen_active) for (const auto &m : marks) seen_store.mark(m);
+            }
+        } else {
+            uint64_t per_file = 0;
+            for (const auto &m : kept) {
+                had_match = true;
+                ++per_file;
+                const Pattern &pat = patterns[m.pattern_index];
+                fmt.on_match(display_name, pat, m, content, idx, scope_ptr);
+                if (fmt.over_budget()) break;
+                if (cli.per_file_limit > 0 &&
+                    per_file >= static_cast<uint64_t>(cli.per_file_limit)) break;
+                if (cli.limit > 0 &&
+                    fmt.emitted() >= static_cast<uint64_t>(cli.limit)) break;
+            }
         }
         fmt.on_file_end(display_name, had_match);
 
@@ -401,7 +681,7 @@ int run_search(const Cli &cli) {
 
         for (size_t ri = 0; ri < sample_recs.size(); ++ri) {
             const auto &r = sample_recs[ri];
-            const SampleFile &sf = sample_files[r.file_idx];
+            const BufferedFile &sf = sample_files[r.file_idx];
             uint32_t line = sf.idx.line_of(r.m.from);
             std::string_view ltext = sf.idx.line_text(line);
             std::string shape = normalise_shape(ltext.data() ? ltext : std::string_view{});
@@ -457,7 +737,7 @@ int run_search(const Cli &cli) {
 
         for (size_t ri : selected) {
             const auto &r = sample_recs[ri];
-            const SampleFile &sf = sample_files[r.file_idx];
+            const BufferedFile &sf = sample_files[r.file_idx];
             const Pattern &pat = patterns[r.m.pattern_index];
             fmt.on_match(sf.path, pat, r.m, sf.content, sf.idx,
                          sf.scope_built ? &sf.scope : nullptr);
@@ -469,13 +749,216 @@ int run_search(const Cli &cli) {
         }
     }
 
+    uint64_t hs_emitted_rows = 0;
+    if (hotspotting) {
+        std::vector<RankRow> rows = rank_files(hs_input);
+        if (rows.size() > static_cast<size_t>(cli.hotspots_n))
+            rows.resize(static_cast<size_t>(cli.hotspots_n));
+        for (const auto &r : rows) {
+            if (oo.mode == OutputMode::Elide) {
+                auto it = hs_file_idx.find(r.file);
+                if (it == hs_file_idx.end())
+                    continue; // buffering cap hit before this file — skip
+                const BufferedFile &bf = hs_files[it->second];
+                if (bf.kept.empty()) continue;
+                std::vector<SeenMark> marks;
+                fmt.on_file_elide(bf.path, bf.kept, bf.content, bf.idx,
+                                  bf.scope_built ? &bf.scope : nullptr,
+                                  seen_active ? &seen_store : nullptr,
+                                  seen_active ? &marks : nullptr);
+                if (seen_active) for (const auto &m : marks) seen_store.mark(m);
+                ++hs_emitted_rows;
+            } else if (oo.mode == OutputMode::Llm) {
+                std::string line = r.file;
+                line += ':';
+                line += std::to_string(r.window_lo);
+                line += '-';
+                line += std::to_string(r.window_hi);
+                line += " score=";
+                char buf[32];
+                std::snprintf(buf, sizeof(buf), "%g", r.score);
+                line += buf;
+                line += " patterns=";
+                for (size_t i = 0; i < r.matched_patterns.size(); ++i) {
+                    if (i) line += ',';
+                    line += r.matched_patterns[i];
+                }
+                line += '\n';
+                std::fwrite(line.data(), 1, line.size(), stdout);
+                ++hs_emitted_rows;
+            } else {
+                std::string s = "{\"type\":\"hotspot\",\"file\":\"";
+                json_escape_to(s, r.file);
+                s += "\",\"score\":";
+                char buf[32];
+                std::snprintf(buf, sizeof(buf), "%g", r.score);
+                s += buf;
+                s += ",\"line_start\":";
+                s += std::to_string(r.window_lo);
+                s += ",\"line_end\":";
+                s += std::to_string(r.window_hi);
+                s += ",\"patterns\":[";
+                for (size_t i = 0; i < r.matched_patterns.size(); ++i) {
+                    if (i) s += ',';
+                    s += '"';
+                    json_escape_to(s, r.matched_patterns[i]);
+                    s += '"';
+                }
+                s += "]}\n";
+                std::fwrite(s.data(), 1, s.size(), stdout);
+                ++hs_emitted_rows;
+            }
+        }
+    }
+
+    uint64_t bg_emitted_rows = 0;
+    if (budgeting) {
+        std::vector<RankRow> rows = rank_files(bg_input);
+        int64_t remaining = static_cast<int64_t>(cli.budget_bytes);
+        std::vector<std::string> dropped;
+        size_t full_count = 0, compact_count = 0;
+
+        auto compact_line = [](const RankRow &r) {
+            std::string line = r.file;
+            line += ':';
+            line += std::to_string(r.window_lo);
+            line += '-';
+            line += std::to_string(r.window_hi);
+            line += " score=";
+            char buf[32];
+            std::snprintf(buf, sizeof(buf), "%g", r.score);
+            line += buf;
+            line += " patterns=";
+            for (size_t i = 0; i < r.matched_patterns.size(); ++i) {
+                if (i) line += ',';
+                line += r.matched_patterns[i];
+            }
+            line += " (compact — full render didn't fit the budget)\n";
+            return line;
+        };
+
+        for (const auto &r : rows) {
+            if (remaining <= 0) { dropped.push_back(r.file); continue; }
+            auto it = bg_file_idx.find(r.file);
+            if (it == bg_file_idx.end()) { // buffering cap hit — never captured
+                dropped.push_back(r.file);
+                continue;
+            }
+            const BufferedFile &bf = bg_files[it->second];
+            if (bf.kept.empty()) { dropped.push_back(r.file); continue; }
+
+            // Measured against `seen` for collapse sizing either way, but
+            // marks are only committed to the real store if this render is
+            // the one that actually ends up on screen — a render measured
+            // here and then degraded to compact/dropped must not be
+            // recorded as "shown" (see SeenMark's doc comment).
+            std::vector<SeenMark> marks;
+            std::string full_text = render_elide_to_string(
+                bf, bg_render_oo, seen_active ? &seen_store : nullptr,
+                seen_active ? &marks : nullptr);
+            if (static_cast<int64_t>(full_text.size()) <= remaining) {
+                std::fwrite(full_text.data(), 1, full_text.size(), stdout);
+                remaining -= static_cast<int64_t>(full_text.size());
+                ++full_count;
+                ++bg_emitted_rows;
+                if (seen_active) for (const auto &m : marks) seen_store.mark(m);
+                continue;
+            }
+            std::string compact = compact_line(r);
+            if (static_cast<int64_t>(compact.size()) <= remaining) {
+                std::fwrite(compact.data(), 1, compact.size(), stdout);
+                remaining -= static_cast<int64_t>(compact.size());
+                ++compact_count;
+                ++bg_emitted_rows;
+                continue;
+            }
+            dropped.push_back(r.file);
+        }
+
+        if (compact_count > 0 || !dropped.empty()) {
+            std::string footer = "--- budget: ";
+            footer += std::to_string(full_count);
+            footer += " file(s) in full, ";
+            footer += std::to_string(compact_count);
+            footer += " compact, ";
+            footer += std::to_string(dropped.size());
+            footer += " dropped";
+            if (!dropped.empty()) {
+                footer += ": ";
+                static constexpr size_t kMaxNamed = 10;
+                for (size_t i = 0; i < dropped.size() && i < kMaxNamed; ++i) {
+                    if (i) footer += ", ";
+                    footer += dropped[i];
+                }
+                if (dropped.size() > kMaxNamed) {
+                    footer += " (+";
+                    footer += std::to_string(dropped.size() - kMaxNamed);
+                    footer += " more)";
+                }
+            }
+            footer += " ---\n";
+            std::fwrite(footer.data(), 1, footer.size(), stdout);
+        }
+    }
+
+    uint64_t ord_emitted = 0;
+    if (ordering) {
+        std::unordered_map<std::string, double> score_by_file;
+        if (cli.order_by == Cli::OrderBy::Score) {
+            for (const auto &r : rank_files(ord_input)) score_by_file[r.file] = r.score;
+        }
+        std::stable_sort(order_rows.begin(), order_rows.end(),
+                         [&](const OrderRow &a, const OrderRow &b) {
+            switch (cli.order_by) {
+                case Cli::OrderBy::Path:
+                    return a.file < b.file;
+                case Cli::OrderBy::Count:
+                    return a.count > b.count; // descending
+                case Cli::OrderBy::Score: {
+                    double sa = score_by_file.count(a.file) ? score_by_file[a.file] : 0.0;
+                    double sb = score_by_file.count(b.file) ? score_by_file[b.file] : 0.0;
+                    return sa > sb; // descending; stable_sort keeps walk order on ties
+                }
+                default:
+                    return false;
+            }
+        });
+        for (const auto &r : order_rows) {
+            std::string line = r.file;
+            if (oo.mode == OutputMode::Counts) {
+                line += ':';
+                line += std::to_string(r.count);
+            }
+            line += '\n';
+            std::fwrite(line.data(), 1, line.size(), stdout);
+            // Mirrors Formatter::emitted()'s existing -f/-c semantics: it
+            // counts matches, not rows/files — -c prints a ":0" row for a
+            // clean file, but that shouldn't flip -summary/exit code to
+            // "found something".
+            ord_emitted += r.count;
+        }
+    }
+
+    if (seen_active) {
+        std::string serr;
+        if (!seen_store.save(cli.seen_path, &serr)) {
+            // The real output already printed successfully — a state-file
+            // write failure shouldn't flip the exit code, just warn.
+            std::fprintf(stderr, "hprscript: -seen: %s\n", serr.c_str());
+        }
+    }
+
     fmt.on_complete();
 
     if (cli.summary) {
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                            std::chrono::steady_clock::now() - t_start)
                            .count();
-        emit_summary_record(stats, fmt.emitted(),
+        uint64_t emitted_for_summary = fmt.emitted();
+        if (hotspotting) emitted_for_summary = hs_emitted_rows;
+        if (budgeting) emitted_for_summary = bg_emitted_rows;
+        if (ordering) emitted_for_summary = ord_emitted;
+        emit_summary_record(stats, emitted_for_summary,
                             static_cast<uint64_t>(elapsed));
     }
     if (cli.require_complete &&
@@ -490,6 +973,9 @@ int run_search(const Cli &cli) {
 
     // Exit code semantics follow grep: 0 if any match emitted (or absent
     // files printed), 1 if no output, 2 already returned earlier on errors.
+    if (hotspotting) return hs_emitted_rows > 0 ? 0 : 1;
+    if (budgeting) return bg_emitted_rows > 0 ? 0 : 1;
+    if (ordering) return ord_emitted > 0 ? 0 : 1;
     return fmt.emitted() > 0 ? 0 : 1;
 }
 

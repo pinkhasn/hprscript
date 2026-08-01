@@ -32,6 +32,14 @@ struct CliPattern {
     // Edit mode only (-ref): reference-only pattern — usable in relations
     // and -file-where, but its matches never become edit sites.
     bool ref = false;
+
+    // -ident terms (already lowercased at parse time). Non-empty marks this
+    // entry as an identifier-subtoken group instead of a regex pattern —
+    // `regexp` is unused for it. Terms inside one group AND together;
+    // separate -ident occurrences OR together (each is its own CliPattern
+    // entry, auto-numbered ident0/ident1/... independently of regex
+    // patterns' p0/p1/... numbering). See src/ident.hpp.
+    std::vector<std::string> ident_terms;
 };
 
 // Options for the `edit` subcommand — the only mode allowed to modify
@@ -112,6 +120,19 @@ struct Cli {
     // (AND/OR/NOT, &&/||/!, parens). A file's matches are emitted only when
     // the predicate holds over the set of patterns that matched in it.
     std::string file_where;
+
+    // -order-by <score|count|path>: sort -f/-c output instead of streaming
+    // in walk order. `score` reuses the -hotspots ranking formula; `count`
+    // is total matches in the file; `path` is lexicographic. Mutually
+    // exclusive with -sample/-hotspots/-budget, which already define their
+    // own ordering.
+    enum class OrderBy { None, Score, Count, Path };
+    OrderBy order_by = OrderBy::None;
+
+    // -seen <path>: cross-invocation dedup state file for -elide/-budget.
+    // Scope chunks unchanged since the last run against this file collapse
+    // to a one-line pointer instead of full source. Empty = off (default).
+    std::string seen_path;
     bool word_boundary = false;
     bool no_utf8 = false;        // -no-utf8: byte-mode matching
     bool ucp = false;            // -ucp: enable Unicode \w/\d/\s (opt-in)
@@ -208,6 +229,20 @@ struct Cli {
     // surrounding-line "shape" (identifiers replaced with `_`, whitespace
     // collapsed). 0 means streaming (default).
     int sample_n = 0;
+
+    // Ranking mode (`-hotspots N`): buffer matches across the whole scan,
+    // then emit the top N files by the same rarity/coverage/proximity
+    // score script mode's `rank` uses (see src/rank.hpp), each annotated
+    // with its densest match window. 0 means off (default).
+    int hotspots_n = 0;
+
+    // Budget-packing mode (`-budget N`): buffer the whole scan, rank every
+    // matching file, then render score-descending in -elide's shape until
+    // N bytes are spent — degrading to a one-line summary and finally to
+    // "dropped" once a file's full render no longer fits. Defines its own
+    // output shape, so it's mutually exclusive with -j/-f/-c/-o/-format/
+    // -absent/-llm/-elide/-sample/-hotspots. 0 = off (default).
+    uint64_t budget_bytes = 0;
 
     // Script mode.
     std::string script_inline;   // -s '<json>'
