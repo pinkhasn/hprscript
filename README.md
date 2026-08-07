@@ -223,22 +223,31 @@ make test
 
 ---
 
-## Use it as an agent skill
+## Use it as agent skills
 
-`hprscript` ships a portable **agent skill** at [`skills/hprscript/SKILL.md`](skills/hprscript/SKILL.md) — a single Markdown file (YAML frontmatter + instructions) that teaches an LLM coding agent *when* and *how* to reach for `hprscript` instead of `grep`/`rg`. It drives the CLI binary directly, carries an inline cheat sheet, and points at [`HPRSCRIPT.md`](HPRSCRIPT.md) / [`COOKBOOK.md`](COOKBOOK.md) for depth.
+`hprscript` ships two portable agent skills:
 
-It follows the standard `SKILL.md` convention — filename in caps, with `name` and `description` frontmatter — that a growing number of agents discover automatically. The only requirement on your side: the `hprscript` binary must be on the agent's `PATH` (see [Install](#install)).
+- [`skills/hprscript-search/SKILL.md`](skills/hprscript-search/SKILL.md) teaches read-only quick search, investigation, query, ranking, and context packing.
+- [`skills/hprscript-edit/SKILL.md`](skills/hprscript-edit/SKILL.md) teaches persistent edit plans, guarded application, and the boundary with localized semantic patching.
+
+Each is a single Markdown file with YAML frontmatter and focused instructions. Install either skill independently or install both for the complete workflow. They drive the CLI binary directly, carry inline cheat sheets, and point at [`HPRSCRIPT.md`](HPRSCRIPT.md) / [`COOKBOOK.md`](COOKBOOK.md) for depth.
+
+Both follow the standard `SKILL.md` convention — filename in caps, with `name` and `description` frontmatter — that a growing number of agents discover automatically. The only requirement on your side: the `hprscript` binary must be on the agent's `PATH` (see [Install](#install)).
 
 ### Claude Code
 
-Copy the skill into your skills directory — globally (every project) or per-project:
+Copy the skills into your skills directory — globally (every project) or per-project:
 
 ```bash
 # Global — applies everywhere
-mkdir -p ~/.claude/skills/hprscript && cp skills/hprscript/SKILL.md ~/.claude/skills/hprscript/
+mkdir -p ~/.claude/skills/hprscript-search ~/.claude/skills/hprscript-edit
+cp skills/hprscript-search/SKILL.md ~/.claude/skills/hprscript-search/
+cp skills/hprscript-edit/SKILL.md ~/.claude/skills/hprscript-edit/
 
 # Or per-project — commit it with your repo
-mkdir -p .claude/skills/hprscript && cp skills/hprscript/SKILL.md .claude/skills/hprscript/
+mkdir -p .claude/skills/hprscript-search .claude/skills/hprscript-edit
+cp skills/hprscript-search/SKILL.md .claude/skills/hprscript-search/
+cp skills/hprscript-edit/SKILL.md .claude/skills/hprscript-edit/
 ```
 
 Start a new `claude` session and it reaches for `hprscript` whenever you ask it to search code. See the [Claude Code skills docs](https://docs.claude.com/en/docs/claude-code/skills).
@@ -249,10 +258,14 @@ Start a new `claude` session and it reaches for `hprscript` whenever you ask it 
 
 ```bash
 # Global
-mkdir -p ~/.config/opencode/skills/hprscript && cp skills/hprscript/SKILL.md ~/.config/opencode/skills/hprscript/
+mkdir -p ~/.config/opencode/skills/hprscript-search ~/.config/opencode/skills/hprscript-edit
+cp skills/hprscript-search/SKILL.md ~/.config/opencode/skills/hprscript-search/
+cp skills/hprscript-edit/SKILL.md ~/.config/opencode/skills/hprscript-edit/
 
 # Or per-project
-mkdir -p .opencode/skills/hprscript && cp skills/hprscript/SKILL.md .opencode/skills/hprscript/
+mkdir -p .opencode/skills/hprscript-search .opencode/skills/hprscript-edit
+cp skills/hprscript-search/SKILL.md .opencode/skills/hprscript-search/
+cp skills/hprscript-edit/SKILL.md .opencode/skills/hprscript-edit/
 ```
 
 No config required. See the [opencode skills docs](https://opencode.ai/docs/skills/).
@@ -261,11 +274,11 @@ No config required. See the [opencode skills docs](https://opencode.ai/docs/skil
 
 `SKILL.md` is just Markdown, so any agent can use it one of two ways:
 
-- **Native skill discovery** — agents that scan skill directories typically also read `.agents/skills/` and `~/.agents/skills/` (alongside the Claude/opencode paths above). Drop the `hprscript/` folder wherever your agent looks.
+- **Native skill discovery** — agents that scan skill directories typically also read `.agents/skills/` and `~/.agents/skills/` (alongside the Claude/opencode paths above). Drop either or both `hprscript-search/` and `hprscript-edit/` folders wherever your agent looks.
 - **Instructions / rules file** — for agents driven by an instructions file (`AGENTS.md`, Cursor rules, OpenAI Codex, …), point that file at the skill or paste its contents. opencode's `opencode.json`, for example, can reference it directly (local path or remote URL):
 
   ```json
-  { "$schema": "https://opencode.ai/config.json", "instructions": ["skills/hprscript/SKILL.md"] }
+  { "$schema": "https://opencode.ai/config.json", "instructions": ["skills/hprscript-search/SKILL.md", "skills/hprscript-edit/SKILL.md"] }
   ```
 
 ---
