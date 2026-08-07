@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "repositories": [
+    {
+      "id": "hprscript",
+      "path": ".",
+      "revision": "worktree",
+      "notes": "Use a clean pinned revision for comparative reports."
+    }
+  ]
+}

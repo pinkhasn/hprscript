@@ -18,6 +18,7 @@ namespace hpr {
 struct CliPattern {
     std::string regexp;
     bool case_insensitive = false; // set by -pi instead of -p
+    bool fixed = false;            // declared through -F/-Fi/literal
     // Pattern id override (set by `-name` on the most recently declared
     // `-p`/`-pi`, or by `id` in a -patterns-from file). Empty → auto `p<i>`.
     // Shown as `pat`/$PAT_ID and usable as the A/B side of relations.
@@ -73,6 +74,10 @@ struct EditOptions {
 
     bool write = false; // -write: apply; default is dry-run preview
     bool diff = false;  // -diff: with -write, also print the unified diff
+    std::string plan_out;          // -plan-out: persistent immutable preview
+    std::string plan_format = "json";
+    bool follow_symlinks = false;  // must also be repeated during apply
+    bool no_plan_warning = false;  // compatibility escape hatch for -write
 
     // Guards — all checked before anything is written; violations exit 3.
     int64_t expect = -1;          // exact edit-site count, -1 = off
@@ -80,7 +85,42 @@ struct EditOptions {
     std::string assert_contains;  // every span must match this regex
 };
 
+struct ApplyOptions {
+    bool active = false; // argv[1] was "apply"
+    std::string plan_path;
+    bool diff = false;
+    bool json = true;
+    bool follow_symlinks = false;
+    bool allow_root_move = false;
+    std::string receipt = "json";
+    // Internal compatibility path only: direct edit -write applies the plan
+    // created in the same process and keeps explicit absolute input paths.
+    // No CLI flag sets this.
+    bool trusted_in_memory = false;
+};
+
+struct InvestigateOptions {
+    bool active = false;
+    std::string profile = "auto";
+    int top_files = 8;
+    int top_scopes = 12;
+    int related = 20;
+    int examples = 12;
+    enum class Followup { Auto, Always, Never } followup = Followup::Auto;
+    int max_related_patterns = 64;
+    uint64_t evidence_budget = 65536;
+    uint64_t max_memory_bytes = 128ull * 1024 * 1024;
+};
+
+struct QueryOptions {
+    bool active = false;
+    std::string inline_json;
+    std::string path;
+};
+
 struct Cli {
+    // Original argv, retained for immutable edit-plan provenance.
+    std::vector<std::string> command;
     // Quick-search options (-p mode).
     std::vector<CliPattern> patterns;
     std::vector<std::string> globs;
@@ -260,8 +300,17 @@ struct Cli {
     // path was missing — silent partial results become hard failures.
     bool require_complete = false;
 
+    // Deterministic execution-plan reporting. -explain-plan emits the plan
+    // as the first JSONL record; -plan-only implies it and returns before any
+    // input traversal.
+    bool explain_plan = false;
+    bool plan_only = false;
+
     // Edit subcommand (`hprscript edit …`). See EditOptions.
     EditOptions edit;
+    ApplyOptions apply;
+    InvestigateOptions investigate;
+    QueryOptions query;
 
     // Misc.
     bool show_version = false;

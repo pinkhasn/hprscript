@@ -1,0 +1,17 @@
+INVESTIGATION profile=symbol seeds=target scans=1 complete=yes
+
+SUMMARY
+1 seed matches in 1 files; 1 probable definitions/declarations; 0 test files; 0 config files.
+
+TOP FILES
+1. <ROOT>/src/x.go score=0.628923 roles=source best=1-1
+
+TOP SCOPES
+<ROOT>/src/x.go:1 func target matches=1
+
+PROBABLE DEFINITIONS / DECLARATIONS
+<ROOT>/src/x.go:1 [probable_definition, confidence=medium] func target() {
+
+LIMITS
+No sections truncated.
+candidate_patterns_omitted=0 top_files_omitted=0 top_scopes_omitted=0 related_omitted=1 examples_omitted=0

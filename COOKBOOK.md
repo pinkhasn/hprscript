@@ -3293,21 +3293,27 @@ hprscript -s '{
 
 ## 33. Guarded code edits (`hprscript edit`)
 
-The `edit` subcommand is the only write-capable mode — everything else in
-this cookbook stays read-only. Dry-run is the default; `-write` applies;
-guard violations exit 3 with nothing written. Full reference:
+The `edit`/`apply` commands are the write-capable surface — everything else in
+this cookbook stays read-only. Persistent plans are the preferred bulk-edit
+contract; preflight guard violations exit 3 with nothing written. Full reference:
 [Edit mode](HPRSCRIPT.md#edit-mode-hprscript-edit).
 
-**The two-step contract (use this shape for every edit):**
+**The review/apply contract for mechanical bulk edits:**
 
 ```bash
-# 1. Dry-run: shows the exact diff and the site count.
-hprscript edit -F 'retry(3)' -content 'retry(5)' src/worker.go
-# 2. Apply with the count from step 1 — drift in between becomes a refusal.
-hprscript edit -F 'retry(3)' -content 'retry(5)' -expect 1 -write src/worker.go
+# 1. Discover once: show the diff and persist exact sites plus file hashes.
+hprscript edit -F 'retry(3)' -content 'retry(5)' -expect 1 \
+    -plan-out retry.plan.json src/worker.go
+# 2. Review and apply the exact stored edits without rescanning.
+hprscript apply retry.plan.json
 ```
 
-**Swap a whole function implementation** (never reproduce the old body):
+`-expect` protects the planning scan only; equal counts from a later rescan do
+not prove that it selected the same paths and byte ranges.
+
+**Localized function rewrite:** use hprscript to locate/confirm the function,
+then use the agent-native patch tool because correctness is semantic rather
+than one repeated mechanical transformation.
 
 ```bash
 cat > /tmp/new_impl.go <<'EOF'
@@ -3320,15 +3326,16 @@ func LoadData(path string) error {
 }
 EOF
 printf '%s' "$(cat /tmp/new_impl.go)" > /tmp/new_impl.go  # span ends at }, so trim the trailing newline
-hprscript edit -p 'func\s+LoadData\b' -block-open '{' -block-close '}' \
-    -span block-full -content-file /tmp/new_impl.go -expect 1 -write src/data.go
+hprscript -p 'func\s+LoadData\b' -scope auto -llm src/data.go
+# Apply /tmp/new_impl.go with the agent-native patch tool.
 ```
 
 **Rename an identifier — but only on lines this branch added:**
 
 ```bash
 hprscript edit -p '\bOldName\b' -content 'NewName' \
-    -git-changed -git-added-lines -expect 14 -write
+    -git-changed -git-added-lines -expect 14 -plan-out rename.plan.json
+hprscript apply rename.plan.json
 ```
 
 **sed-style substitution with capture groups** (`-extract` + `$EXTRACT_*`):
@@ -3384,9 +3391,11 @@ hprscript edit -in-scope '^main$' -span scope-body -insert end \
     -content '\tflush()\n' -expect 1 -write cmd/run.go
 ```
 
-**Recover / verify:** the JSONL records are the receipt; `git diff` is the
-undo. A rerun of the same command is safe — already-applied sites report
-`"status":"noop"` and rewrite nothing.
+**Recover / verify:** `apply` emits a JSON receipt by default (`-receipt human`
+is available); `git diff` is the ordinary undo/review surface. Applying a
+completed plan again fails stale whole-file verification with exit 3. Exit 4
+means commit began but did not finish; the receipt identifies applied and
+untouched files.
 
 ---
 
@@ -3497,4 +3506,4 @@ hprscript -p TODO -c -order-by score -glob '**/*.go'
 ## See also
 
 - **[HPRSCRIPT.md](HPRSCRIPT.md)** — full reference for every flag, the script-mode JSON DSL, regex syntax, exit codes, and the agent-focused cookbook.
-- **[README.md](README.md)** — overview, install, MCP server, Claude Code skill.
+- **[README.md](README.md)** — overview, installation, and agent-skill setup.

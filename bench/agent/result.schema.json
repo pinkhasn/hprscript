@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hprscript.dev/schema/agent-benchmark-result-v1.json",
+  "title": "hprscript agent benchmark result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "task_id", "condition", "agent", "started_at", "wall_ms",
+    "llm_turns", "tool_calls", "search_calls", "search_wall_ms",
+    "command_failures", "stdout_bytes", "files_read_whole",
+    "answer_score", "task_complete", "notes"
+  ],
+  "properties": {
+    "task_id": {"type": "string", "minLength": 1},
+    "condition": {
+      "enum": [
+        "grep_only", "hprscript_available", "hprscript_preferred",
+        "hprscript_required", "hprscript_investigate", "hprscript_query"
+      ]
+    },
+    "agent": {"type": "string", "minLength": 1},
+    "started_at": {"type": "string", "format": "date-time"},
+    "wall_ms": {"type": "integer", "minimum": 0},
+    "llm_turns": {"type": "integer", "minimum": 0},
+    "tool_calls": {"type": "integer", "minimum": 0},
+    "search_calls": {"type": "integer", "minimum": 0},
+    "search_wall_ms": {"type": "integer", "minimum": 0},
+    "command_failures": {"type": "integer", "minimum": 0},
+    "stdout_bytes": {"type": "integer", "minimum": 0},
+    "files_read_whole": {"type": "integer", "minimum": 0},
+    "answer_score": {"type": "number", "minimum": 0, "maximum": 1},
+    "task_complete": {"type": "boolean"},
+    "first_query_sufficient": {"type": "boolean"},
+    "notes": {"type": "string"}
+  }
+}

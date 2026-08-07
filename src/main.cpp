@@ -10,6 +10,9 @@
 
 #include "cli.hpp"
 #include "edit.hpp"
+#include "edit_plan.hpp"
+#include "investigate.hpp"
+#include "query.hpp"
 #include "runner.hpp"
 #include "script.hpp"
 
@@ -45,6 +48,19 @@ int main(int argc, char **argv) {
     if (cli.show_version) {
         std::printf("hprscript %s (vectorscan %s)\n", HPRSCRIPT_VERSION, hs_version());
         return 0;
+    }
+
+    // Apply persistent edit plans without compiling or rescanning patterns.
+    if (cli.apply.active) {
+        return hpr::run_apply(cli);
+    }
+
+    if (cli.query.active) {
+        return hpr::run_query(cli);
+    }
+
+    if (cli.investigate.active) {
+        return hpr::run_investigate(cli);
     }
 
     // Edit subcommand (`hprscript edit …`) — the only mode that can write.

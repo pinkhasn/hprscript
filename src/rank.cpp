@@ -152,7 +152,8 @@ std::vector<RankRow> rank_files(const RankInput &in) {
     }
     std::sort(rows.begin(), rows.end(), [](const RankRow &a, const RankRow &b) {
         if (a.score != b.score) return a.score > b.score;
-        return a.density > b.density;
+        if (a.density != b.density) return a.density > b.density;
+        return a.file < b.file;
     });
     return rows;
 }

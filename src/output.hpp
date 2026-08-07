@@ -194,10 +194,18 @@ void json_escape_to(std::string &out, std::string_view s);
 // -diagnostics / -require-complete.
 struct ScanStats {
     uint64_t files_scanned = 0;  // files whose content was actually scanned
+    uint64_t bytes_scanned = 0;  // exact input bytes presented to matchers
     uint64_t files_binary = 0;   // skipped: NUL byte in the first 512 bytes
     uint64_t files_failed = 0;   // open/mmap failures
     uint64_t missing_paths = 0;  // -files-from entries that didn't exist
     uint64_t matches_seen = 0;   // matches surviving dedup + relations
+    uint64_t scan_stages = 0;    // repository/stdin traversal stages executed
+    uint64_t matcher_compilations = 0;
+    uint64_t patterns_compiled = 0;
+    uint64_t rows_materialized = 0;
+    uint64_t rows_output = 0;
+    uint64_t rows_truncated = 0;
+    uint64_t buffered_bytes_peak = 0;
     std::string stop_reason;     // "", "limit", "output_budget"
 
     bool complete() const {

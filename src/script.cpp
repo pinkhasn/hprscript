@@ -29,6 +29,7 @@
 #include "line_index.hpp"
 #include "matcher.hpp"
 #include "output.hpp"
+#include "planner.hpp"
 #include "rank.hpp"
 #include "scope.hpp"
 #include "value.hpp"
@@ -2054,6 +2055,7 @@ void run_phase(const CompiledPhase &phase, ScriptState &state,
         }
 
         state.scan_stats.matches_seen += raw.size();
+        state.scan_stats.rows_materialized += raw.size();
 
         std::set<uint32_t> matched_pat_idx;
 
@@ -2162,6 +2164,7 @@ void run_phase(const CompiledPhase &phase, ScriptState &state,
     // Decide inputs.
     if (reading_stdin_content) {
         ++state.scan_stats.files_scanned;
+        state.scan_stats.bytes_scanned += stdin_content.size();
         scan_buf(stdin_label, stdin_content);
         return;
     }
@@ -2194,6 +2197,7 @@ void run_phase(const CompiledPhase &phase, ScriptState &state,
             return true;
         }
         ++state.scan_stats.files_scanned;
+        state.scan_stats.bytes_scanned += mf.view().size();
         return scan_buf(it.path, mf.view());
     });
 }
@@ -2593,6 +2597,9 @@ int run_script(const Cli &cli) {
     }
 
     // Track per-pattern weights (for rank). After compile.
+    state.scan_stats.matcher_compilations = phases.size();
+    for (const auto &ph : phases)
+        state.scan_stats.patterns_compiled += ph.patterns.size();
     if (state.rank_enabled) {
         for (const auto &ph : phases) {
             for (const auto &p : ph.patterns) {
@@ -2697,6 +2704,40 @@ int run_script(const Cli &cli) {
         }
     }
     bool reading_stdin = !any_scan_set && !isatty(fileno(stdin));
+    if (cli.explain_plan) {
+        ExecutionPlan plan;
+        plan.mode = "script";
+        for (size_t i = 0; i < phases.size(); ++i) {
+            const auto &ph = phases[i];
+            PlanStage stage;
+            stage.id = "scan" + std::to_string(i);
+            stage.sets = {ph.id};
+            stage.patterns = ph.patterns.size();
+            if (!override_scan.empty() || !override_literals.empty()) {
+                stage.inputs = override_scan;
+                stage.inputs.insert(stage.inputs.end(), override_literals.begin(),
+                                    override_literals.end());
+            } else {
+                stage.inputs = ph.scan_globs;
+            }
+            if (stage.inputs.empty()) stage.inputs.push_back("<stdin>");
+            stage.scope = state.scope_lang;
+            plan.scan_stages.push_back(std::move(stage));
+        }
+        if (phases.size() > 1)
+            plan.postprocess.push_back({"shared-state-phases", {}});
+        if (!state.group_by.empty())
+            plan.postprocess.push_back({"group", {}});
+        if (state.rank_enabled)
+            plan.postprocess.push_back({"rank-files", {}});
+        if (state.limit > 0) plan.limits["rows"] = state.limit;
+        if (state.limit_per_file > 0)
+            plan.limits["rows_per_file"] = state.limit_per_file;
+        if (state.max_output_bytes > 0)
+            plan.limits["output_bytes"] = state.max_output_bytes;
+        emit_execution_plan(plan);
+        if (cli.plan_only) return 0;
+    }
     std::string stdin_content;
     if (reading_stdin) {
         if (!slurp_stdin(stdin_content)) {
@@ -2708,6 +2749,7 @@ int run_script(const Cli &cli) {
     // Run phases sequentially.
     for (size_t pi = 0; pi < phases.size(); ++pi) {
         if (state.stop_all) break;
+        ++state.scan_stats.scan_stages;
         const CompiledPhase &ph = phases[pi];
         bool last_phase = (pi + 1 == phases.size());
         run_phase(ph, state, nullptr,
@@ -2751,6 +2793,7 @@ int run_script(const Cli &cli) {
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
                            std::chrono::steady_clock::now() - t_start)
                            .count();
+        state.scan_stats.rows_output = static_cast<uint64_t>(state.emitted);
         emit_summary_record(state.scan_stats,
                             static_cast<uint64_t>(state.emitted),
                             static_cast<uint64_t>(elapsed));

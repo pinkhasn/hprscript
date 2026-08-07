@@ -1,6 +1,7 @@
 #include "runner.hpp"
 
 #include "extract.hpp"
+#include "evidence.hpp"
 #include "file_io.hpp"
 #include "git.hpp"
 #include "ident.hpp"
@@ -8,6 +9,7 @@
 #include "matcher.hpp"
 #include "output.hpp"
 #include "pipeline.hpp"
+#include "planner.hpp"
 #include "rank.hpp"
 #include "scope.hpp"
 #include "seen.hpp"
@@ -91,37 +93,6 @@ BufferedFile buffer_file(const std::string &display_name,
     return bf;
 }
 
-// Fold one file's kept matches into a RankInput accumulator — shared by
-// -hotspots and -budget, which both feed the same scoring formula
-// (src/rank.hpp) from quick-search's per-file match lists.
-void accumulate_rank_input(hpr::RankInput &in, const std::string &display_name,
-                           const std::vector<hpr::Match> &kept,
-                           const std::vector<hpr::Pattern> &patterns,
-                           const hpr::LineIndex &idx) {
-    auto &fr = in.per_file[display_name];
-    if (fr.matched_pat_ids.empty() && fr.match_points.empty())
-        in.file_order.push_back(display_name);
-    fr.line_count = idx.line_count();
-    static constexpr size_t kMaxMatchPoints = 4096;
-    for (const auto &m : kept) {
-        const hpr::Pattern &pat = patterns[m.pattern_index];
-        if (fr.matched_pat_ids.insert(pat.id).second)
-            fr.raw_score += pat.weight;
-        if (fr.match_points.size() < kMaxMatchPoints) {
-            auto pit = fr.pat_local_ids.find(pat.id);
-            uint16_t local;
-            if (pit == fr.pat_local_ids.end()) {
-                local = static_cast<uint16_t>(
-                    std::min<size_t>(fr.pat_local_ids.size(), 0xFFFFu));
-                fr.pat_local_ids[pat.id] = local;
-            } else {
-                local = pit->second;
-            }
-            fr.match_points.emplace_back(idx.line_of(m.from), local);
-        }
-    }
-}
-
 // Render a buffered file's matches via -elide's logic into an owned string
 // instead of stdout, so -budget can measure the size before committing to
 // it. Reuses Formatter/on_file_elide verbatim through a memory-backed
@@ -157,6 +128,7 @@ int run_search(const Cli &cli) {
     }
     const auto t_start = std::chrono::steady_clock::now();
     ScanStats stats;
+    stats.scan_stages = 1;
 
     std::vector<Pattern> patterns = build_patterns(cli);
 
@@ -170,6 +142,50 @@ int run_search(const Cli &cli) {
         if (!cp.ident_terms.empty()) ident_groups.push_back(IdentGroup{cp.ident_terms});
     }
     const size_t num_regex = patterns.size() - ident_groups.size();
+
+    if (cli.explain_plan) {
+        ExecutionPlan plan;
+        plan.mode = "search";
+        PlanStage stage;
+        stage.id = "scan0";
+        stage.sets = {"quick"};
+        stage.patterns = patterns.size();
+        stage.inputs.insert(stage.inputs.end(), cli.globs.begin(), cli.globs.end());
+        stage.inputs.insert(stage.inputs.end(), cli.positional.begin(),
+                            cli.positional.end());
+        for (const auto &fl : cli.file_lists)
+            stage.inputs.push_back(std::string(fl.nul ? "files0:" : "files:") + fl.path);
+        if (cli.git_changed) stage.inputs.push_back("git:changed");
+        if (cli.git_staged) stage.inputs.push_back("git:staged");
+        if (cli.git_untracked) stage.inputs.push_back("git:untracked");
+        for (const auto &range : cli.git_ranges)
+            stage.inputs.push_back("git:range:" + range);
+        if (stage.inputs.empty()) stage.inputs.push_back("<stdin>");
+        stage.scope = cli.scope_lang;
+        if (stage.scope.empty() &&
+            (!cli.scope_pattern.empty() || !cli.in_scopes.empty()))
+            stage.scope = "auto";
+        plan.scan_stages.push_back(std::move(stage));
+        if (!cli.relations.empty())
+            plan.postprocess.push_back({"relations", {}});
+        if (!cli.file_where.empty())
+            plan.postprocess.push_back({"file-filter", {}});
+        if (cli.sample_n > 0)
+            plan.postprocess.push_back({"representative-sample", {}});
+        if (cli.hotspots_n > 0 || cli.budget_bytes > 0)
+            plan.postprocess.push_back({"rank-files", {}});
+        if (cli.budget_bytes > 0)
+            plan.postprocess.push_back({"pack-evidence", {}});
+        if (cli.order_by != Cli::OrderBy::None)
+            plan.postprocess.push_back({"order", {}});
+        if (cli.limit > 0) plan.limits["matches"] = cli.limit;
+        if (cli.per_file_limit > 0)
+            plan.limits["matches_per_file"] = cli.per_file_limit;
+        if (cli.max_output_bytes > 0)
+            plan.limits["output_bytes"] = cli.max_output_bytes;
+        emit_execution_plan(plan);
+        if (cli.plan_only) return 0;
+    }
 
     std::vector<ResolvedRelation> rels;
     if (!resolve_relations(cli.relations, patterns, rels)) return 2;
@@ -204,7 +220,13 @@ int run_search(const Cli &cli) {
             }
             return 2;
         }
+        stats.matcher_compilations = 1;
+        stats.patterns_compiled = num_regex;
     }
+    // Identifier groups share the traversal but do not pass through
+    // Vectorscan's compiler. They still count as compiled search patterns
+    // for execution accounting.
+    stats.patterns_compiled += ident_groups.size();
 
     ExtractTable extract_table;
     {
@@ -496,6 +518,7 @@ int run_search(const Cli &cli) {
         tf.apply(kept, idx, scope_ptr);
 
         stats.matches_seen += kept.size();
+        stats.rows_materialized += kept.size();
 
         // -file-where: emit this file's matches only when the predicate over
         // its matched-pattern set holds.
@@ -540,15 +563,24 @@ int run_search(const Cli &cli) {
         bool had_match = false;
         if (sampling) {
             if (kept.empty()) return true;
-            if (sample_recs.size() >= SAMPLE_REC_CAP) return true;
+            if (sample_recs.size() >= SAMPLE_REC_CAP) {
+                stats.rows_truncated += kept.size();
+                if (stats.stop_reason.empty()) stats.stop_reason = "row_cap";
+                return true;
+            }
             size_t fidx = sample_files.size();
             sample_files.push_back(buffer_file(display_name, content,
                                                eff_scope_lang,
                                                user_scope_custom,
                                                scope_ptr != nullptr));
-            for (const auto &m : kept) {
-                if (sample_recs.size() >= SAMPLE_REC_CAP) break;
-                sample_recs.push_back({fidx, m});
+            stats.buffered_bytes_peak += content.size();
+            for (size_t mi = 0; mi < kept.size(); ++mi) {
+                if (sample_recs.size() >= SAMPLE_REC_CAP) {
+                    stats.rows_truncated += kept.size() - mi;
+                    if (stats.stop_reason.empty()) stats.stop_reason = "row_cap";
+                    break;
+                }
+                sample_recs.push_back({fidx, kept[mi]});
             }
             return true;
         }
@@ -563,8 +595,12 @@ int run_search(const Cli &cli) {
                                               scope_ptr != nullptr);
                 bf.kept = kept;
                 hs_buffered_matches += kept.size();
+                stats.buffered_bytes_peak += content.size();
                 hs_file_idx[display_name] = hs_files.size();
                 hs_files.push_back(std::move(bf));
+            } else if (oo.mode == OutputMode::Elide) {
+                stats.rows_truncated += kept.size();
+                if (stats.stop_reason.empty()) stats.stop_reason = "row_cap";
             }
             return true;
         }
@@ -578,8 +614,12 @@ int run_search(const Cli &cli) {
                                               scope_ptr != nullptr);
                 bf.kept = kept;
                 bg_buffered_matches += kept.size();
+                stats.buffered_bytes_peak += content.size();
                 bg_file_idx[display_name] = bg_files.size();
                 bg_files.push_back(std::move(bf));
+            } else {
+                stats.rows_truncated += kept.size();
+                if (stats.stop_reason.empty()) stats.stop_reason = "row_cap";
             }
             return true;
         }
@@ -648,6 +688,7 @@ int run_search(const Cli &cli) {
             return 2;
         }
         ++stats.files_scanned;
+        stats.bytes_scanned += content.size();
         scan_buf("<stdin>", content);
     } else {
         walker.walk([&](const WalkItem &it) {
@@ -668,6 +709,7 @@ int run_search(const Cli &cli) {
                 return true;
             }
             ++stats.files_scanned;
+            stats.bytes_scanned += mf.view().size();
             return scan_buf(it.path, mf.view());
         });
     }
@@ -958,6 +1000,7 @@ int run_search(const Cli &cli) {
         if (hotspotting) emitted_for_summary = hs_emitted_rows;
         if (budgeting) emitted_for_summary = bg_emitted_rows;
         if (ordering) emitted_for_summary = ord_emitted;
+        stats.rows_output = emitted_for_summary;
         emit_summary_record(stats, emitted_for_summary,
                             static_cast<uint64_t>(elapsed));
     }
@@ -980,7 +1023,27 @@ int run_search(const Cli &cli) {
 }
 
 int run_list_scopes(const Cli &cli) {
+    const auto t_start = std::chrono::steady_clock::now();
     ScanStats stats;
+    stats.scan_stages = 1;
+    if (cli.explain_plan) {
+        ExecutionPlan plan;
+        plan.mode = "list-scopes";
+        PlanStage stage;
+        stage.id = "scan0";
+        stage.sets = {"scopes"};
+        stage.inputs.insert(stage.inputs.end(), cli.globs.begin(), cli.globs.end());
+        stage.inputs.insert(stage.inputs.end(), cli.positional.begin(),
+                            cli.positional.end());
+        if (stage.inputs.empty()) stage.inputs.push_back("<stdin>");
+        stage.scope = cli.scope_lang.empty() ? "auto" : cli.scope_lang;
+        plan.scan_stages.push_back(std::move(stage));
+        if (!cli.in_scopes.empty())
+            plan.postprocess.push_back({"scope-filter", {}});
+        if (cli.limit > 0) plan.limits["rows"] = cli.limit;
+        emit_execution_plan(plan);
+        if (cli.plan_only) return 0;
+    }
     TargetFilter tf;
     if (!tf.init(cli)) return 2;
 
@@ -1039,6 +1102,7 @@ int run_list_scopes(const Cli &cli) {
                 out += "}\n";
                 std::fputs(out.c_str(), stdout);
             }
+            ++stats.rows_materialized;
             ++emitted;
             if (cli.limit > 0 &&
                 emitted >= static_cast<uint64_t>(cli.limit)) {
@@ -1060,6 +1124,7 @@ int run_list_scopes(const Cli &cli) {
             return 2;
         }
         ++stats.files_scanned;
+        stats.bytes_scanned += content.size();
         scan_buf("<stdin>", content);
     } else {
         walker.walk([&](const WalkItem &it) {
@@ -1080,10 +1145,18 @@ int run_list_scopes(const Cli &cli) {
                 return true;
             }
             ++stats.files_scanned;
+            stats.bytes_scanned += mf.view().size();
             return scan_buf(it.path, mf.view());
         });
     }
-    (void)hit_limit;
+    if (hit_limit) stats.stop_reason = "limit";
+    stats.rows_output = emitted;
+    if (cli.summary) {
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                           std::chrono::steady_clock::now() - t_start)
+                           .count();
+        emit_summary_record(stats, emitted, static_cast<uint64_t>(elapsed));
+    }
     if (cli.require_complete &&
         (stats.files_failed > 0 || stats.missing_paths > 0)) {
         std::fprintf(stderr,

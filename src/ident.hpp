@@ -28,6 +28,17 @@ struct IdentGroup {
     std::vector<std::string> terms;
 };
 
+struct IdentifierToken {
+    uint64_t from = 0;
+    uint64_t to = 0;
+};
+
+// Shared ASCII identifier tokenizer. Investigation reuses this exact lexical
+// definition when deriving related candidates, while -ident layers subtoken
+// matching on top of the returned spans.
+void scan_identifier_tokens(std::string_view buf,
+                            std::vector<IdentifierToken> &out);
+
 // Byte offsets into `ident` where a subtoken begins: after each `_`
 // (consumed, never itself part of a token), at lower→upper transitions
 // (camelCase), at alpha↔digit transitions, and — for acronym runs like

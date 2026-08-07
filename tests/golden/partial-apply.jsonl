@@ -1,0 +1,3 @@
+{"type":"apply-file","file":"a.txt","status":"applied"}
+{"type":"apply-file","file":"b.txt","status":"not-applied","temporary":"<TEMP>"}
+{"type":"apply-summary","status":"partial","files_applied":1,"files_not_applied":1,"temporary_files":["<TEMP>"],"recovery":"inspect staged temporary files, then retry or replace targets manually"}

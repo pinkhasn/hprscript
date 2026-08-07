@@ -81,6 +81,11 @@ void validate_edit_cli(Cli &cli) {
     };
     const EditOptions &e = cli.edit;
 
+    if (!e.plan_out.empty() && e.write)
+        return fail("-plan-out creates a preview plan and cannot combine with -write");
+    if (e.plan_format != "json")
+        return fail("-plan-format: version 1 supports only 'json'");
+
     if (cli.out_mode_set && cli.out_mode != OutputMode::JsonLines)
         return fail("edit mode: output is a dry-run diff or -j edit records; "
                     "-f/-c/-o/-llm/-elide/-absent/-format do not apply");
@@ -174,7 +179,11 @@ void print_help(FILE *out) {
 "  hprscript -s '<json>' [files...]\n"
 "  hprscript -script <path> [files...]\n"
 "  hprscript [script.json]            # positional script or stdin\n"
-"  hprscript edit -p <pat> <edit flags> [files...]   # the ONLY write mode\n"
+"  hprscript investigate -p <seed> [options] [inputs]\n"
+"  hprscript query -q '<json>' [input overrides]\n"
+"  hprscript query -query <path> [input overrides]\n"
+"  hprscript edit -p <pat> <edit flags> [files...]\n"
+"  hprscript apply <plan.json> [apply flags]\n"
 "\n"
 "Search flags (with -p):\n"
 "  -p <pattern>     Search pattern (PCRE; repeatable for multi-pattern)\n"
@@ -298,6 +307,22 @@ void print_help(FILE *out) {
 "  -s <json>        Inline script\n"
 "  -script <path>   Script file\n"
 "\n"
+"Investigation mode:\n"
+"  -profile <p>         auto|concept|symbol|config|error (default auto)\n"
+"  -top-files <n>       Ranked files to return (default 8)\n"
+"  -top-scopes <n>      Ranked enclosing scopes (default 12)\n"
+"  -related <n>         Related identifiers to return (default 20)\n"
+"  -examples <n>        Representative evidence rows (default 12)\n"
+"  -followup-scan <m>   auto|always|never (default auto)\n"
+"  -max-related-patterns <n>  Follow-up matcher cap (default 64)\n"
+"  -evidence-budget <n> Multi-section output budget (default 65536)\n"
+"  -max-memory-bytes <n> Retained seed-content cap (default 134217728)\n"
+"\n"
+"Query mode:\n"
+"  -q <json>        Inline versioned declarative query\n"
+"  -query <path>    Query document path\n"
+"  -llm             Compact table rendering (default JSONL rows)\n"
+"\n"
 "Scan accounting (work in -p and script mode):\n"
 "  -summary            Emit a trailing {\"type\":\"summary\",...} record with\n"
 "                      files scanned/skipped/failed, matches, completeness\n"
@@ -305,6 +330,8 @@ void print_help(FILE *out) {
 "                      read errors, binary skips, missing list paths\n"
 "  -require-complete   Exit 2 when any file couldn't be read or a listed\n"
 "                      path was missing (partial results become failures)\n"
+"  -explain-plan       Emit a deterministic execution-plan record first\n"
+"  -plan-only          Print the plan without scanning inputs\n"
 "\n"
 "Edit mode (hprscript edit …; search/script modes never modify files):\n"
 "  Dry-run by default: prints a unified diff of would-be changes plus a\n"
@@ -324,6 +351,10 @@ void print_help(FILE *out) {
 "  -delete              Remove the span (-span line also removes the newline)\n"
 "  -write               Apply changes (atomic per file: temp + rename)\n"
 "  -diff                With -write: also print the unified diff\n"
+"  -plan-out <path>     Write immutable JSON plan; never modify targets\n"
+"  -plan-format json    Persistent plan format (version 1: json)\n"
+"  -follow-symlinks     Explicitly permit and record symlink targets\n"
+"  -no-plan-warning     Suppress the compatibility warning for direct -write\n"
 "  -ref                 Mark the preceding pattern reference-only: it can\n"
 "                       qualify edits via -near/-far/-file-where but its own\n"
 "                       matches are never edited\n"
@@ -332,6 +363,14 @@ void print_help(FILE *out) {
 "  -assert-contains <re> Guard: refuse unless every target span matches\n"
 "  -j                   Emit JSONL edit records instead of the dry-run diff\n"
 "\n"
+"Apply mode (hprscript apply <plan.json>):\n"
+"  -diff                Print the stored transformation diff before apply\n"
+"  -j                   Emit JSONL receipts\n"
+"  -follow-symlinks     Required again for plans containing symlinks\n"
+"  -allow-root-mismatch Map relative plan paths under the current root\n"
+"  -allow-root-move     Compatibility alias for -allow-root-mismatch\n"
+"  -receipt <format>    json (default) or human\n"
+"\n"
 "Misc:\n"
 "  --version        Show version\n"
 "  -h, --help       This help\n");
@@ -339,6 +378,7 @@ void print_help(FILE *out) {
 
 Cli parse_cli(int argc, char **argv) {
     Cli cli;
+    for (int ai = 0; ai < argc; ++ai) cli.command.emplace_back(argv[ai]);
     int first = 1;
     // Subcommand detection: `hprscript edit …`. Must be argv[1] so
     // command-prefix permission rules can distinguish write-capable
@@ -347,11 +387,127 @@ Cli parse_cli(int argc, char **argv) {
     if (argc > 1 && eq(argv[1], "edit")) {
         cli.edit.active = true;
         first = 2;
+    } else if (argc > 1 && eq(argv[1], "apply")) {
+        cli.apply.active = true;
+        first = 2;
+    } else if (argc > 1 && eq(argv[1], "investigate")) {
+        cli.investigate.active = true;
+        first = 2;
+    } else if (argc > 1 && eq(argv[1], "query")) {
+        cli.query.active = true;
+        first = 2;
     }
     for (int i = first; i < argc; ++i) {
         const char *a = argv[i];
         if (eq(a, "--version")) { cli.show_version = true; continue; }
         if (eq(a, "-h") || eq(a, "--help")) { cli.show_help = true; continue; }
+
+        if (cli.apply.active) {
+            if (eq(a, "-diff")) { cli.apply.diff = true; continue; }
+            if (eq(a, "-j")) { cli.apply.json = true; continue; }
+            if (eq(a, "-receipt")) {
+                const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
+                if (!eq(v, "json") && !eq(v, "human")) {
+                    cli.error = true;
+                    cli.error_message = "apply: -receipt must be json or human";
+                    return cli;
+                }
+                cli.apply.receipt = v;
+                cli.apply.json = eq(v, "json");
+                continue;
+            }
+            if (eq(a, "-follow-symlinks")) {
+                cli.apply.follow_symlinks = true;
+                continue;
+            }
+            if (eq(a, "-allow-root-move") || eq(a, "-allow-root-mismatch")) {
+                cli.apply.allow_root_move = true;
+                continue;
+            }
+            if (a[0] == '-' && a[1] != '\0') {
+                cli.error = true;
+                cli.error_message = std::string("apply: unknown flag: ") + a;
+                return cli;
+            }
+            if (!cli.apply.plan_path.empty()) {
+                cli.error = true;
+                cli.error_message = "apply takes exactly one plan path";
+                return cli;
+            }
+            cli.apply.plan_path = a;
+            continue;
+        }
+
+        if (cli.query.active && (eq(a, "-q") || eq(a, "-query"))) {
+            const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
+            if (eq(a, "-q")) cli.query.inline_json = v;
+            else cli.query.path = v;
+            continue;
+        }
+
+        if (cli.investigate.active) {
+            if (eq(a, "-profile")) {
+                const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
+                if (!eq(v, "auto") && !eq(v, "concept") && !eq(v, "symbol") &&
+                    !eq(v, "config") && !eq(v, "error")) {
+                    cli.error = true;
+                    cli.error_message = "investigate: -profile must be auto, concept, symbol, config, or error";
+                    return cli;
+                }
+                cli.investigate.profile = v;
+                continue;
+            }
+            auto take_count = [&](int &dst) -> bool {
+                const char *v = take(i, argc, argv, a, cli); if (!v) return false;
+                int64_t n = 0;
+                if (!parse_nonneg(v, n) || n > 1000000) {
+                    cli.error = true;
+                    cli.error_message = std::string("investigate: invalid count for ") + a;
+                    return false;
+                }
+                dst = static_cast<int>(n);
+                return true;
+            };
+            if (eq(a, "-top-files")) { if (!take_count(cli.investigate.top_files)) return cli; continue; }
+            if (eq(a, "-top-scopes")) { if (!take_count(cli.investigate.top_scopes)) return cli; continue; }
+            if (eq(a, "-related")) { if (!take_count(cli.investigate.related)) return cli; continue; }
+            if (eq(a, "-examples")) { if (!take_count(cli.investigate.examples)) return cli; continue; }
+            if (eq(a, "-max-related-patterns")) { if (!take_count(cli.investigate.max_related_patterns)) return cli; continue; }
+            if (eq(a, "-evidence-budget")) {
+                int64_t n = 0;
+                const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
+                if (!parse_nonneg(v, n)) {
+                    cli.error = true;
+                    cli.error_message = "investigate: invalid -evidence-budget";
+                    return cli;
+                }
+                cli.investigate.evidence_budget = static_cast<uint64_t>(n);
+                continue;
+            }
+            if (eq(a, "-max-memory-bytes")) {
+                int64_t n = 0;
+                const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
+                if (!parse_nonneg(v, n)) {
+                    cli.error = true;
+                    cli.error_message = "investigate: invalid -max-memory-bytes";
+                    return cli;
+                }
+                cli.investigate.max_memory_bytes = static_cast<uint64_t>(n);
+                continue;
+            }
+            if (eq(a, "-followup-scan")) {
+                const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
+                if (eq(v, "auto")) cli.investigate.followup = InvestigateOptions::Followup::Auto;
+                else if (eq(v, "always")) cli.investigate.followup = InvestigateOptions::Followup::Always;
+                else if (eq(v, "never")) cli.investigate.followup = InvestigateOptions::Followup::Never;
+                else {
+                    cli.error = true;
+                    cli.error_message = "investigate: -followup-scan must be auto, always, or never";
+                    return cli;
+                }
+                continue;
+            }
+        }
 
         if (eq(a, "-p")) {
             const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
@@ -367,13 +523,13 @@ Cli parse_cli(int argc, char **argv) {
         }
         if (eq(a, "-F")) {
             const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
-            CliPattern p; p.regexp = escape_literal(v);
+            CliPattern p; p.regexp = escape_literal(v); p.fixed = true;
             cli.patterns.push_back(std::move(p));
             continue;
         }
         if (eq(a, "-Fi")) {
             const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
-            CliPattern p; p.regexp = escape_literal(v); p.case_insensitive = true;
+            CliPattern p; p.regexp = escape_literal(v); p.case_insensitive = true; p.fixed = true;
             cli.patterns.push_back(std::move(p));
             continue;
         }
@@ -769,6 +925,15 @@ Cli parse_cli(int argc, char **argv) {
             cli.require_complete = true;
             continue;
         }
+        if (eq(a, "-explain-plan") || eq(a, "--explain-plan")) {
+            cli.explain_plan = true;
+            continue;
+        }
+        if (eq(a, "-plan-only") || eq(a, "--plan-only")) {
+            cli.plan_only = true;
+            cli.explain_plan = true;
+            continue;
+        }
         if (eq(a, "-records")) {
             const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
             if (eq(v, "line") || eq(v, "lines")) {
@@ -866,6 +1031,24 @@ Cli parse_cli(int argc, char **argv) {
             }
             if (eq(a, "-write"))  { cli.edit.write = true; continue; }
             if (eq(a, "-diff"))   { cli.edit.diff = true; continue; }
+            if (eq(a, "-plan-out")) {
+                const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
+                cli.edit.plan_out = v;
+                continue;
+            }
+            if (eq(a, "-plan-format")) {
+                const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
+                cli.edit.plan_format = v;
+                continue;
+            }
+            if (eq(a, "-follow-symlinks")) {
+                cli.edit.follow_symlinks = true;
+                continue;
+            }
+            if (eq(a, "-no-plan-warning")) {
+                cli.edit.no_plan_warning = true;
+                continue;
+            }
             if (eq(a, "-expect")) {
                 const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
                 if (!parse_nonneg(v, cli.edit.expect)) {
@@ -971,6 +1154,48 @@ Cli parse_cli(int argc, char **argv) {
     }
     if (cli.edit.active && !cli.error && !cli.show_help && !cli.show_version)
         validate_edit_cli(cli);
+    if (cli.apply.active && !cli.error && !cli.show_help && !cli.show_version &&
+        cli.apply.plan_path.empty()) {
+        cli.error = true;
+        cli.error_message = "apply requires exactly one plan path";
+    }
+    if (cli.investigate.active && !cli.error && !cli.show_help && !cli.show_version) {
+        if (cli.patterns.empty() && cli.patterns_from.empty()) {
+            cli.error = true;
+            cli.error_message = "investigate requires at least one -p/-F/-ident seed";
+        } else if (!cli.script_inline.empty() || !cli.script_path.empty()) {
+            cli.error = true;
+            cli.error_message = "investigate cannot combine with -s/-script";
+        } else if (cli.out_mode_set && cli.out_mode != OutputMode::JsonLines &&
+                   cli.out_mode != OutputMode::Llm) {
+            cli.error = true;
+            cli.error_message = "investigate output is JSONL (default) or -llm";
+        } else if (cli.records != Cli::RecordMode::None || cli.sample_n > 0 ||
+                   cli.hotspots_n > 0 || cli.budget_bytes > 0 ||
+                   cli.order_by != Cli::OrderBy::None) {
+            cli.error = true;
+            cli.error_message = "investigate cannot combine with -records/-sample/-hotspots/-budget/-order-by";
+        }
+    }
+    if (cli.query.active && !cli.error && !cli.show_help && !cli.show_version) {
+        if (cli.query.inline_json.empty() == cli.query.path.empty()) {
+            cli.error = true;
+            cli.error_message = "query requires exactly one of -q <json> or -query <path>";
+        } else if (!cli.patterns.empty() || !cli.patterns_from.empty() ||
+                   !cli.script_inline.empty() || !cli.script_path.empty()) {
+            cli.error = true;
+            cli.error_message = "query match sets come from the query document; do not add -p/-s";
+        } else if (cli.out_mode_set && cli.out_mode != OutputMode::JsonLines &&
+                   cli.out_mode != OutputMode::Llm) {
+            cli.error = true;
+            cli.error_message = "query output is JSONL (default) or -llm";
+        } else if (cli.records != Cli::RecordMode::None || cli.sample_n > 0 ||
+                   cli.hotspots_n > 0 || cli.budget_bytes > 0 ||
+                   cli.order_by != Cli::OrderBy::None) {
+            cli.error = true;
+            cli.error_message = "query cannot combine with quick-search output selectors";
+        }
+    }
     return cli;
 }
 
@@ -1018,6 +1243,7 @@ bool load_patterns_from(Cli &cli) {
             } else {
                 if (!lit->is_string()) return fail("'literal' must be a string");
                 p.regexp = escape_literal(lit->as_string().c_str());
+                p.fixed = true;
             }
             if (const json::Value *v = pr.value.find("id")) {
                 if (!v->is_string() ||

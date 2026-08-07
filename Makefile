@@ -80,6 +80,11 @@ clean:
 # (the test runner refuses to start without it).
 test: $(BIN)
 	@HPRSCRIPT_BIN=$(abspath $(BIN)) bash tests/run.sh
+	@HPRSCRIPT_BIN=$(abspath $(BIN)) bash tests/accounting.sh
+	@HPRSCRIPT_BIN=$(abspath $(BIN)) bash tests/edit_plan.sh
+	@HPRSCRIPT_BIN=$(abspath $(BIN)) bash tests/investigate.sh
+	@HPRSCRIPT_BIN=$(abspath $(BIN)) bash tests/query.sh
+	@HPRSCRIPT_BIN=$(abspath $(BIN)) bash tests/golden_outputs.sh
 
 install: $(BIN)
 	install -d $(HOME)/.local/bin

@@ -1,0 +1,2 @@
+{"type":"apply-file","file":"a.txt","status":"applied"}
+{"type":"apply-summary","status":"complete","files_applied":1,"files_not_applied":0,"temporary_files":[]}

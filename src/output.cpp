@@ -95,6 +95,8 @@ void emit_summary_record(const ScanStats &st, uint64_t emitted,
                          uint64_t elapsed_ms) {
     std::string s = "{\"type\":\"summary\",\"files_scanned\":";
     s += std::to_string(st.files_scanned);
+    s += ",\"bytes_scanned\":";
+    s += std::to_string(st.bytes_scanned);
     s += ",\"files_skipped_binary\":";
     s += std::to_string(st.files_binary);
     s += ",\"files_failed\":";
@@ -103,6 +105,22 @@ void emit_summary_record(const ScanStats &st, uint64_t emitted,
     s += std::to_string(st.missing_paths);
     s += ",\"matches\":";
     s += std::to_string(st.matches_seen);
+    s += ",\"matches_seen\":";
+    s += std::to_string(st.matches_seen);
+    s += ",\"scan_stages\":";
+    s += std::to_string(st.scan_stages);
+    s += ",\"matcher_compilations\":";
+    s += std::to_string(st.matcher_compilations);
+    s += ",\"patterns_compiled\":";
+    s += std::to_string(st.patterns_compiled);
+    s += ",\"rows_materialized\":";
+    s += std::to_string(st.rows_materialized);
+    s += ",\"rows_output\":";
+    s += std::to_string(st.rows_output ? st.rows_output : emitted);
+    s += ",\"rows_truncated\":";
+    s += std::to_string(st.rows_truncated);
+    s += ",\"buffered_bytes_peak\":";
+    s += std::to_string(st.buffered_bytes_peak);
     s += ",\"emitted\":";
     s += std::to_string(emitted);
     s += ",\"complete\":";

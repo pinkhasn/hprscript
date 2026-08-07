@@ -1,0 +1,12 @@
+{
+  "schema": "hprscript-edit-plan",
+  "version": 1,
+  "tool_version": "<VERSION>",
+  "created_at": "<TIMESTAMP>",
+  "working_root": "<ROOT>/edit",
+  "command": ["<BIN>", "edit", "-F", "old", "-content", "new", "-plan-out", "p.json", "a.txt"],
+  "selection": {"site_count": 1, "file_count": 1},
+  "files": [
+    {"path": "a.txt", "planned_absolute_path": "<ROOT>/edit/a.txt", "symlink": false, "symlink_target": null, "original_size": 4, "original_sha256": "01d09d19c2139a46aebfb577780d123d7396e97201bc7ead210a2ebff8239dee", "mode": 420, "edits": [{"site_id":1,"pattern_id":"p0","from":0,"to":3,"line_start":1,"line_end":1,"old_sha256":"cba06b5736faf67e54b07b561eae94395e774c517a7d910a54369e1263ccfbd4","old_base64":"b2xk","replacement_base64":"bmV3","operation":"replace","scope_name":""}]}
+  ]
+}

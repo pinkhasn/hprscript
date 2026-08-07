@@ -82,6 +82,25 @@ bool group_matches(std::string_view ident, const std::vector<size_t> &starts,
 void scan_identifiers(std::string_view buf, const std::vector<IdentGroup> &groups,
                       uint32_t pattern_index_base, std::vector<Match> &out) {
     if (groups.empty()) return;
+    std::vector<IdentifierToken> identifiers;
+    scan_identifier_tokens(buf, identifiers);
+    for (const auto &token : identifiers) {
+        std::string_view ident = buf.substr(token.from, token.to - token.from);
+        std::vector<size_t> starts = identifier_subtoken_starts(ident);
+        for (size_t g = 0; g < groups.size(); ++g) {
+            if (group_matches(ident, starts, groups[g].terms)) {
+                Match m;
+                m.pattern_index = pattern_index_base + static_cast<uint32_t>(g);
+                m.from = token.from;
+                m.to = token.to;
+                out.push_back(m);
+            }
+        }
+    }
+}
+
+void scan_identifier_tokens(std::string_view buf,
+                            std::vector<IdentifierToken> &out) {
     const size_t n = buf.size();
     auto is_ident_start = [](unsigned char c) {
         return std::isalpha(c) || c == '_';
@@ -89,23 +108,12 @@ void scan_identifiers(std::string_view buf, const std::vector<IdentGroup> &group
     auto is_ident_cont = [](unsigned char c) {
         return std::isalnum(c) || c == '_';
     };
-
     size_t i = 0;
     while (i < n) {
         if (!is_ident_start(static_cast<unsigned char>(buf[i]))) { ++i; continue; }
         size_t start = i++;
         while (i < n && is_ident_cont(static_cast<unsigned char>(buf[i]))) ++i;
-        std::string_view ident = buf.substr(start, i - start);
-        std::vector<size_t> starts = identifier_subtoken_starts(ident);
-        for (size_t g = 0; g < groups.size(); ++g) {
-            if (group_matches(ident, starts, groups[g].terms)) {
-                Match m;
-                m.pattern_index = pattern_index_base + static_cast<uint32_t>(g);
-                m.from = start;
-                m.to = i;
-                out.push_back(m);
-            }
-        }
+        out.push_back({start, i});
     }
 }
 

@@ -1,6 +1,6 @@
 # hprscript
 
-`hprscript` is a command-line multi-pattern content-search tool. It scans **any input** — files, directory trees, or arbitrary data piped on **stdin** — in a single pass, matching **all patterns simultaneously** using [Vectorscan](https://github.com/VectorCamp/vectorscan), the portable open-source fork of Intel's Hyperscan regex engine. One invocation replaces N sequential `grep`/`rg` calls. Patterns use **PCRE** syntax (the subset Hyperscan/Vectorscan accepts).
+`hprscript` is a command-line multi-pattern content-search tool. Within each scan stage it matches **all patterns simultaneously** using [Vectorscan](https://github.com/VectorCamp/vectorscan), the portable open-source fork of Intel's Hyperscan regex engine. Multi-phase scripts perform sequential scan stages while preserving declared state. Patterns use **PCRE** syntax (the subset Hyperscan/Vectorscan accepts).
 
 Because hprscript reads content from stdin when no files/globs are given, it slots naturally into bash pipelines — `curl … | hprscript`, `cat … | hprscript`, `kubectl logs … | hprscript`, etc.
 
@@ -65,7 +65,8 @@ hprscript -s '<json>' [files...]
 hprscript -script <path> [files...]
 hprscript script.json [files...]            # positional arg as script file
 cat script.json | hprscript                  # script piped on stdin
-hprscript edit -p <pat> <edit flags> [files...]   # the ONLY mode that writes
+hprscript edit -p <pat> <edit flags> [files...]   # discover/preview/plan edits
+hprscript apply <plan.json> [apply flags]          # verify and apply exact stored edits
 ```
 
 When neither `-p` nor `-s`/`-script` is given, the first positional argument is treated as a script file. If there are no positional arguments, `hprscript` reads the script from **stdin** (when piped).
@@ -73,6 +74,23 @@ When neither `-p` nor `-s`/`-script` is given, the first positional argument is 
 When the script supplies no `scan` and no positional file/directory arguments are given, `hprscript` reads file content from **stdin**.
 
 Positional file/dir args after `-s`/`-script` (or after a positional script file) **override** the script's `scan` field — useful for re-using a script against a different target tree.
+
+### Execution plans and accounting
+
+Add `-explain-plan` to search, script, list-scope, or edit discovery commands to
+emit the deterministic logical plan before normal results. `-plan-only` emits
+the plan and exits without compiling matchers or scanning files. Plans describe
+the operation kind, normalized inputs, pattern count, output shape, buffering
+reasons, expected scan stages, limits, and edit safety gates.
+
+`-summary` exposes measured work rather than implying that every invocation is
+one scan. Important fields are `bytes_scanned`, `scan_stages`,
+`matcher_compilations`, `patterns_compiled`, `rows_materialized`, `rows_output`,
+`rows_truncated`, and `buffered_bytes_peak`. A simple batched search normally
+uses one stage and one matcher compilation; N script phases normally use N
+stages and N compilations. Ranking, grouping, sampling, hotspots, and budgeted
+rendering can materialize or buffer rows even though matching within a stage is
+simultaneous.
 
 ---
 
@@ -453,9 +471,152 @@ For more complex block work — searching inside the block, extracting deeply ne
 
 ---
 
+## Investigation mode (`hprscript investigate`)
+
+Investigation returns a bounded, typed evidence package around seed patterns.
+It is intended for the exploratory question where likely follow-ups are known
+(definitions, uses, scopes, tests, configuration, and related identifiers) but
+the actual related names are not known yet.
+
+```bash
+hprscript investigate -F validateToken -profile symbol -llm \
+  -evidence-budget 65536 -glob '**/*.go'
+```
+
+Seed declarations are `-p`, `-pi`, `-F`, `-Fi`, `-ident`, `-name`, and
+`-extract`. Normal input, scope, relation, line, Git, diagnostics, completeness,
+and summary selectors apply. Investigation output is JSONL by default or a
+stable sectioned report with `-llm`. It intentionally does not compose with
+`-absent`, `-records`, `-sample`, `-hotspots`, `-budget`, `-order-by`, or edit
+flags because it owns ranking, sampling, and evidence budgeting as one report.
+
+| Option | Meaning |
+|---|---|
+| `-profile auto\|concept\|symbol\|config\|error` | Evidence emphasis; default `auto` uses deterministic lexical heuristics. |
+| `-top-files N` | Ranked files, default 8. |
+| `-top-scopes N` | Ranked enclosing scopes, default 12. |
+| `-related N` | Related identifiers, default 20. |
+| `-examples N` | Representative evidence records, default 12. |
+| `-followup-scan auto\|always\|never` | Whether to run the one adaptive related-identifier scan. |
+| `-max-related-patterns N` | Candidate matcher cap, default 64. |
+| `-evidence-budget N` | Whole multi-section byte budget, default 65536. |
+| `-max-memory-bytes N` | Maximum retained seed-file content, default 128 MiB; `0` disables the cap. |
+
+Execution has one seed scan, local extraction from buffered seed files, and at
+most one follow-up scan containing all selected related identifiers. Related
+scores combine same-scope, nearby-window, same-file, seed-file coverage, and
+corpus rarity. Ties are deterministic. File roles use path heuristics and say
+so. Occurrence labels are `probable_*` lexical classifications with confidence
+and method fields; they do not claim compiler semantics.
+
+JSONL record order is `investigation-summary`, ranked
+`investigation-file`, `investigation-scope`, `investigation-related`,
+`investigation-evidence`, then `investigation-footer` (and an optional normal
+summary). Every omitted section count is reported. `-require-complete` fails
+when scanning or internal caps make the package incomplete.
+
+## Declarative query mode (`hprscript query`)
+
+Query relates standardized text-match rows without procedural variables or
+callbacks. It is always read-only.
+
+```bash
+hprscript query -q '<json>' [input overrides]
+hprscript query -query query.json [input overrides]
+```
+
+Documents require `{"version":1}`. Unknown version-1 fields fail. Explicit
+CLI paths, file lists, Git selections, or globs override set scan targets.
+Compatible static sets (same normalized scan, excludes, and scope) compile into
+one matcher and share one traversal.
+
+Each match row has typed `row_id`, `set_id`, `pattern_id`, `file`, `language`,
+`from`, `to`, `line`, `column`, `match`, `context`, `capture.<name>`, and
+optional `enclosing.name/kind/from/to/line_start/line_end` fields.
+
+### Version 1 schema
+
+```json
+{
+  "version": 1,
+  "sets": [
+    {"id":"definitions","scan":["**/*.go"],"scope":"auto","patterns":[
+      {"id":"def","regexp":"func\\s+(\\w+)\\s*\\(","extract":["name"]}
+    ]},
+    {"id":"uses","scan":["**/*.go"],"scope":"auto","patterns":[
+      {"id":"call","regexp":"\\b(\\w+)\\s*\\(","extract":["name"]}
+    ]}
+  ],
+  "query": {
+    "from":{"set":"uses","as":"use"},
+    "joins":[{"type":"anti","set":"definitions","as":"def","on":[
+      {"op":"eq","left":"use.capture.name","right":"def.capture.name"}
+    ]}],
+    "select":{"symbol":"use.capture.name","file":"use.file","line":"use.line"},
+    "order_by":[{"field":"file","direction":"asc"},{"field":"line","direction":"asc"}]
+  }
+}
+```
+
+Join types are `inner`, `left`, `semi`, and `anti`. Predicates include typed
+`eq/ne/lt/lte/gt/gte`; `same_file`, `same_scope`, `within_lines`, `before`,
+`after`, and `contains_span`; boolean `and/or/not`; null checks; and string
+`contains/starts_with/ends_with`. `contains` also tests membership when its
+left operand is a grouped list, and `in` tests membership in its right list.
+Equality joins use hash indexes. Location joins use per-file, offset-ordered
+indexes; `same_scope` partitions further by enclosing scope. Rows without
+scope annotation do not satisfy `same_scope`.
+
+`select` expressions support field references, JSON literals, `literal`,
+`coalesce`, `concat`, `lower`, `upper`, `basename`, and `dirname`. Grouped (or
+whole-query) aggregates are `count`, `count_distinct`, `min`, `max`, `sum`,
+`collect`, `collect_distinct`, and `first`; use structured `having` after
+projection. `order_by` is multi-field and gains deterministic final ties.
+`skip`/`limit` are semantic pagination. `max_rows` and `max_output_rows` are
+resource controls.
+
+Top-level limits default to bounded in-memory execution and may be overridden:
+
+```json
+{"limits":{"max_rows_per_set":250000,"max_total_rows":500000,
+ "max_join_rows":500000,"max_cartesian_rows":1000000,
+ "max_adaptive_stages":4,"max_memory_bytes":536870912}}
+```
+
+A join with no usable equality or location predicate is rejected before
+scanning when its conservative predicted product exceeds
+`max_cartesian_rows`. Add an indexable predicate, raise that explicit limit,
+or set `"allow_cartesian":true` on the reviewed join.
+
+The default `on_limit` behavior is failure with exit 2 and no apparently
+complete results. `"on_limit":"partial"` permits a partial result and emits a
+summary/footer with `complete:false`, `stop_reason`, and omitted rows. Default
+output is projected JSONL; `-llm` renders a tabular form with an omission
+footer. `-explain-plan` reports grouped scans, adaptive stages, chosen join
+strategy, post-processing, and limits; `-plan-only` validates/plans without
+scanning.
+
+### Adaptive derived-pattern set
+
+A later set can generate its matcher from an earlier set's field:
+
+```json
+{"id":"key_usages","scan":["src/**"],"derive_patterns":{
+  "from_set":"declared_keys","field":"capture.key","mode":"literal",
+  "word_boundary":false,"deduplicate":true,"max_patterns":10000
+}}
+```
+
+The source set must appear earlier. Empty/overlong values are counted and
+reported, duplicates compile once, literal values are escaped, and compile
+errors identify their source value. Result rows preserve `derived.value`,
+`derived.source_rows`, and `capture.derived_value`. Each adaptive set is an
+explicit dependent scan stage. Recursive fixed-point queries remain out of
+scope. Query limits allow four adaptive stages by default.
+
 ## Script mode (`-s` / `-script`)
 
-A script is a JSON object that describes a multi-pattern scan plus the actions to run per match (and at file/script lifecycle points). The whole script is compiled once and runs in a single pass over each file, emitting one JSON object per `emit` action.
+A script is a JSON object that describes one or more multi-pattern scan stages plus the actions to run per match (and at file/script lifecycle points). A top-level `patterns` array is one compiled scan stage. Each entry in `phases` is compiled and scanned sequentially, with declared variables preserving state between stages.
 
 ### Top-level fields
 
@@ -500,7 +661,7 @@ Traversal order is **deterministic**: each directory's entries are visited in so
 | `absent` | `bool` | If `true`, `on_match` fires once per file where this pattern is **NOT** found. See [Absent patterns](#absent-patterns). |
 | `on_match` | `action[]` | Actions executed on each match. If omitted, a default `emit` is used. |
 
-All patterns match **simultaneously** in a single pass — adding a pattern is virtually free.
+All patterns within this pattern array match **simultaneously** in its scan stage. Additional phases are separate scan stages.
 
 ### Built-in tokens
 
@@ -2238,11 +2399,10 @@ and renders in full again automatically.
 
 ## Edit mode (`hprscript edit`)
 
-The `edit` subcommand is the **only** part of hprscript that can modify
-files. Search (`-p`) and script (`-s`) modes remain strictly read-only, and
-edit-mode flags like `-write` stay unknown-flag errors outside the
-subcommand — so command-prefix permission rules (agent harnesses,
-allowlists) can gate write capability separately from search.
+The `edit` and `apply` subcommands are the only parts of hprscript that can
+modify files. Search (`-p`) and script (`-s`) modes remain strictly read-only,
+so command-prefix permission rules can gate discovery, plan creation, and plan
+application separately.
 
 Edit mode turns the search pipeline into an edit-targeting language: the
 pattern that finds the sites is the pattern that edits them, and every
@@ -2251,28 +2411,33 @@ search-mode targeting flag — `-glob`, `-exclude`, `-files-from`, `-git-*`,
 unchanged as an edit qualifier.
 
 ```bash
-# The canonical agent workflow — a two-step contract:
-hprscript edit -F 'retry(3)' -content 'retry(5)' src/worker.go   # 1. dry-run: diff + count
-hprscript edit -F 'retry(3)' -content 'retry(5)' -expect 1 -write src/worker.go   # 2. apply
-# If anything changed between the steps, the count mismatches, nothing is
-# written, and the exit code is 3.
+# The canonical agent workflow discovers edit sites only once:
+hprscript edit -F 'retry(3)' -content 'retry(5)' -expect 1 \
+    -plan-out retry.plan.json src/worker.go
+# Review retry.plan.json (or the discovery diff), then apply the stored edits.
+hprscript apply retry.plan.json
 ```
 
 ### The safety contract
 
-1. **Dry-run is the default.** Without `-write`, nothing is touched: you get
-   a unified diff of the would-be changes plus a summary record. The diff is
-   computed from the same splice plan that `-write` applies — what you
-   preview is exactly what you get.
-2. **Guards refuse before anything is written.** All guards are evaluated
-   across ALL files first; any violation prints `{"type":"guard",...}`
-   records and exits **3** with zero bytes written.
-3. **Writes are atomic and byte-exact.** Per file: temp file in the same
-   directory, permissions copied, `rename(2)` over the target. Splices never
-   re-encode or re-serialize lines — CRLF endings, missing trailing
-   newlines, and non-UTF-8 bytes pass through untouched.
-4. **Reruns are safe.** A site whose replacement equals the current content
-   is a `noop`: counted, reported, never rewritten, exit 0.
+1. **Discovery is read-only by default.** Without `-write`, edit discovery
+   produces a diff/summary or writes an immutable JSON plan with `-plan-out`.
+2. **The persistent plan is exact.** It stores the schema/version, normalized
+   root, command metadata, per-file size and SHA-256, and each edit's byte
+   range plus old/new bytes. `apply` never reruns the search.
+3. **Preflight is all-file.** Root containment, symlink policy, identity,
+   range, and old-byte checks run for every file before a temp file is staged.
+   A refusal exits **3** with zero target writes.
+4. **Commit is staged and byte-exact.** All changed files are written and
+   fsynced to same-directory temporary files before any rename. Individual
+   replacements are atomic, but multiple renames are not a filesystem
+   transaction. A failure after commit begins exits **4** with a receipt that
+   identifies renamed and untouched files. CRLF, modes, non-UTF-8 bytes, and
+   missing trailing newlines are preserved.
+`-expect N` guards the current discovery/planning invocation. A dry-run followed
+by a second `edit ... -write -expect N` is a fresh scan; equal counts alone do
+not prove that it selected the reviewed sites. Direct `-write` remains for
+compatibility and warns unless `-no-plan-warning` is supplied.
 
 ### Spans — what each match edits (`-span`)
 
@@ -2307,7 +2472,9 @@ language:
 # List candidates, then replace by name:
 hprscript -list-scopes src/data.go
 hprscript edit -in-scope '^LoadData$' -span scope \
-    -content-file /tmp/new_loaddata.go -expect 1 -write src/data.go
+    -content-file /tmp/new_loaddata.go -expect 1 \
+    -plan-out loaddata.plan.json src/data.go
+hprscript apply loaddata.plan.json
 
 # Append a statement at the end of main()'s body:
 hprscript edit -in-scope '^main$' -span scope-body -insert end \
@@ -2391,7 +2558,7 @@ a usage error — something has to produce edits.
 
 | Guard | Meaning |
 |---|---|
-| `-expect <n>` | Refuse unless exactly n edit sites exist (after dedup, including noops). The dry-run count feeds this: plan, read the count, apply with `-expect <count>` — drift between the two steps becomes a refusal. |
+| `-expect <n>` | Refuse unless exactly n edit sites exist in this discovery invocation (after dedup, including noops). It does not authenticate the sites selected by a later rescan. |
 | `-max-span-lines <n>` | Refuse spans over n lines (default **500**, `0` = off). The safety net for lexically skewed blocks — a brace inside a string literal makes the block run away, and the runaway shows up as an absurd span. |
 | `-assert-contains <re>` | Refuse unless every target span matches (ECMAScript regex, search semantics). The staleness tripwire: "replace this only if it still contains X". |
 | overlap (always on) | Two edits overlapping or nesting — including an insert landing inside a replaced span, or two different-content edits on identical ranges — refuse, naming both sites. |
@@ -2399,13 +2566,42 @@ a usage error — something has to produce edits.
 | scope-not-found (always on) | A scope-span match outside any recognized scope refuses instead of being silently skipped. |
 | changed-during-run (always on) | File size/mtime re-checked between planning and writing; drift refuses. |
 
+### Persistent plans and exact apply
+
+`-plan-out <path>` writes schema `hprscript-edit-plan` version 1 and does not
+modify targets. `-plan-format json` is the current portable format. The plan
+contains exact ranges and base64 old/new bytes; `apply` validates the schema,
+root, file hashes/sizes, ranges, old bytes, and symlink policy before staging.
+
+```bash
+hprscript edit -p '\bOldName\b' -content NewName -expect 14 \
+    -plan-out rename.plan.json -glob '**/*.{cc,hpp}'
+hprscript apply rename.plan.json                 # JSON receipt
+hprscript apply rename.plan.json -diff           # include reviewed diff
+hprscript apply rename.plan.json -receipt human  # human receipt
+```
+
+Plans are bound to their normalized root. `-allow-root-mismatch` permits an
+intentional relocation only when every resolved target still remains beneath
+the current root. Symlinks are refused by default during discovery and apply;
+`-follow-symlinks` records and later verifies the resolved target identity.
+Unknown schema versions and malformed base64 are usage errors (exit 2).
+
+The replacement file preserves the recorded permission bits. Because apply
+commits a newly staged inode, modification/change timestamps are new; owner,
+group, extended attributes, and ACLs are not preserved. Plan and review such
+metadata-sensitive files with an external tool.
+
 ### Output
 
 - **Dry-run (default):** unified diff (git-style `a/` `b/` headers, 3
   context lines, `\ No newline at end of file` markers) + a trailing
   `edit-summary` record. `-j` switches to JSONL edit records instead.
-- **`-write`:** JSONL edit records + summary — the machine-readable receipt.
+- **`-write`:** compatibility path; creates and applies the same exact in-memory
+  plan, emits JSONL records, and warns unless `-no-plan-warning` is supplied.
   `-diff` additionally prints the diff.
+- **`apply`:** JSON receipt by default, or `-receipt human`. Applying a stale or
+  already-applied plan fails whole-file verification with exit 3.
 
 ```json
 {"type":"edit","file":"src/a.go","pat":"p0","verb":"replace","span":"match",
@@ -2425,6 +2621,7 @@ a usage error — something has to produce edits.
 | 1 | no edit sites matched — nothing to do |
 | 2 | usage / pattern-compile / IO error |
 | **3** | **guard violation — refused, nothing written** |
+| **4** | **apply failed after commit began; inspect the partial-state receipt** |
 
 Exit 3 is the "my assumption was wrong" signal: agents can branch on it
 without parsing stderr.
@@ -2437,8 +2634,8 @@ without parsing stderr.
   allowed (inserts sort before the replacement at the same offset).
 - **`-m`/`-limit`** bound the matches considered, silently — prefer
   `-expect` when exactness matters.
-- **Symlinks** are resolved; the target file is rewritten and the edit
-  record carries `symlink_target`.
+- **Symlinks** are refused by default. `-follow-symlinks` must be explicit in
+  the plan and apply invocation; the resolved target identity is verified.
 - **Binary files** (NUL in the first 512 bytes) are skipped like search
   mode; `-diagnostics` surfaces them.
 - **Not available in edit mode**: `-o`/`-f`/`-c`/`-llm`/`-elide`/`-absent`/
@@ -2467,14 +2664,14 @@ The binary depends only on the platform C library — on Linux verify with `ldd 
 - **Output is JSON Lines.** Every `-p` match is emitted as a JSON object on its own line — unambiguous, easy to parse line-by-line, and includes byte offsets you can feed back into other tools. `-j` is accepted as a no-op alias for the default.
 - **Use `-limit` aggressively** when you only need to know whether a pattern exists; it stops scanning early and keeps your context small.
 - **Prefer `-f` or `-c`** when you only need the file list or counts — they're far cheaper to read than per-match output.
-- **Combine patterns** with multiple `-p` flags or a `patterns` array rather than running `hprscript` repeatedly. Hyperscan adds patterns to the same DFA in one pass.
+- **Batch patterns already known at the current reasoning step** with multiple `-p` flags or a `patterns` array. A later call based on newly discovered evidence is normal iterative investigation.
 - **Case-insensitivity is per pattern.** Use `-pi <pattern>` (CLI) or `"case_insensitive": true` (script) on the patterns that need folding — and leave the rest case-sensitive. Mixing in one invocation keeps you to a single scan.
 - **Use `\b` (or `-w`) for identifier matching** to avoid matching inside larger words.
 - **Anchor with `^` / `$`** for line-shaped matches (multiline mode is the default).
 - **Pattern compile errors** mean the regex uses a feature Hyperscan doesn't support. Check the error message; common culprits are lookarounds, backreferences, and (with `-ucp`) `\w+`-style patterns. Rewrite to use plain `\b`, character classes, alternation, or `[\p{L}]{1,N}` instead of `\p{L}+`.
 - **UTF-8 is on by default**, so literal Cyrillic/CJK/emoji patterns and Unicode case-folding "just work". `from`/`to`/`col` are always **byte** offsets even in UTF-8 mode.
 - **Don't reach for `-ucp` reflexively.** Default `\w` is ASCII; that's usually what you want for code. Use `-ucp` only when you need Unicode `\w`/`\d`/`\s` and accept that some patterns won't compile.
-- **Use scripts to keep work in one process.** `variables` + `on_complete` lets you compute aggregates (counts, distinct files, top-N) in a single scan instead of pipelining. `phases` collapses two-pass workflows (collect-then-resolve) into one invocation.
+- **Use scripts for explicit staged correlation.** `variables` + `on_complete` computes aggregates without shell pipelines. `phases` expresses collect-then-resolve as sequential scan stages in one invocation while preserving state.
 - **Reach for `group_by` / `rank` before sort+head.** They produce the right shape directly and avoid round-tripping through shell tools.
 - **`absent` patterns are great for "files missing X" sweeps** — license headers, error wrapping, security headers. They fire once per file at end-of-scan, no scripting needed beyond a single pattern.
 - **Use `block` (script) or `-block-open`/`-block-close` (CLI) for cross-line extraction.** It's the fastest way to grab a function body, struct definition, or JSON object given its anchor.
@@ -2484,4 +2681,4 @@ The binary depends only on the platform C library — on Linux verify with `ldd 
 - **Use `-sample N` for "show me representative usages"** when an agent doesn't need every match — diversifying by file and surrounding-line shape produces a better picture in fewer tokens than `-limit N`.
 - **Set byte budgets defensively.** A `-max-context-bytes 500 -max-output-bytes 200000` floor protects an agent from a single minified line wiping out its context. Truncation is reported explicitly via per-field `*_truncated` flags and a final `output_truncated` info record — never silent.
 - **Prefer `-llm` over `-j` when piping matches into an LLM.** It strips JSON noise, dedupes file headers, tags each line with its pattern id when several patterns are active, and adapts to `-block-open`/`-scope` automatically — same information, ~30–50% fewer tokens. Switch back to `-j` only when you need byte offsets or `extracted` capture groups.
-- **Search and script modes never modify files.** All writes live in the explicit `hprscript edit` subcommand (see [Edit mode](#edit-mode-hprscript-edit)): dry-run by default, guarded by `-expect`, refusing with exit 3 instead of writing when any assumption fails. Outside the subcommand, write-shaped flags like `-write` remain unknown-flag errors.
+- **Search and script modes never modify files.** Use `edit -plan-out` to persist exact mechanical edits, review the plan, and use `apply` to verify and commit it without rescanning. Prefer a native patch tool for localized semantic changes.

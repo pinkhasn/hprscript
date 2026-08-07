@@ -69,43 +69,83 @@ Default per-match record:
 - **Unicode by default.** UTF-8 mode is on; `-pi` folds across scripts (`CAFÉ` ↔ `café`, `ПРИВЕТ` ↔ `привет`). See [UTF-8 / Unicode](HPRSCRIPT.md#utf-8--unicode-support).
 - **grep-compatible output modes:** `-f` (file list), `-c` (per-file counts), `-o` (matched text only), `-format` (custom template), `-A`/`-B`/`-C` (context lines).
 - **Single static binary** — no runtime dependencies beyond `libc`/`libm`/`libpthread`.
-- **Guarded edit mode.** `hprscript edit` — the only mode that writes — turns the same targeting pipeline into precise, safe file modification: dry-run diffs by default, `-expect` count contracts, atomic byte-exact writes. See below.
+- **Guarded edit/apply workflow.** `hprscript edit -plan-out` discovers exact byte edits once; `hprscript apply` verifies file identity and commits that immutable plan. Plain search and script modes remain read-only. See below.
 
 ---
 
 ## Edit mode — search-precise file modification
 
-`hprscript edit` is a separate subcommand and the **only** mode that can
-modify files; plain search and script modes stay strictly read-only. The
+`hprscript edit` and `hprscript apply` are separate write-capable commands;
+plain search and script modes stay strictly read-only. The
 pattern (and every filter: `-glob`, `-git-added-lines`, `-near`/`-far`,
 `-file-where`, …) that finds the sites is exactly what edits them.
 
 ```bash
-# Two-step contract: dry-run shows a diff + count, then apply with -expect —
-# if anything changed in between, the count mismatches and nothing is written.
-hprscript edit -F 'retry(3)' -content 'retry(5)' src/worker.go
-hprscript edit -F 'retry(3)' -content 'retry(5)' -expect 1 -write src/worker.go
+# Discover once, persist exact byte ranges/content plus file hashes, review,
+# then apply those stored edits without rescanning.
+hprscript edit -F 'retry(3)' -content 'retry(5)' -expect 1 \
+    -plan-out retry.plan.json src/worker.go
+hprscript apply retry.plan.json
 
 # Replace a whole function BY NAME — no signature regex, no brace flags; the
 # scope packs know the language (anchorless: no -p at all):
 hprscript -list-scopes src/data.go        # outline: name, kind, line range per function
 hprscript edit -in-scope '^LoadData$' -span scope \
-    -content-file new_loaddata.go -expect 1 -write src/data.go
+    -content-file new_loaddata.go -expect 1 -plan-out loaddata.plan.json src/data.go
+hprscript apply loaddata.plan.json
 
 # Bump a constant only inside one function (-in-scope also filters search):
-hprscript edit -F 'retry(3)' -content 'retry(5)' -in-scope 'ProcessBatch' -expect 1 -write src/worker.go
+hprscript edit -F 'retry(3)' -content 'retry(5)' -in-scope 'ProcessBatch' \
+    -expect 1 -plan-out retry.plan.json src/worker.go
 
 # Rename, but only on lines this branch added:
 hprscript edit -p '\bOldName\b' -content 'NewName' \
-    -git-changed -git-added-lines -expect 14 -write
+    -git-changed -git-added-lines -expect 14 -plan-out rename.plan.json
 ```
 
-Safety model: dry-run by default; every guard (`-expect`,
-`-max-span-lines`, `-assert-contains`, overlap detection, drift check)
-is validated across all files **before a single byte is written** —
-violations exit 3 with files untouched. Writes are atomic (temp +
-rename) and byte-exact (CRLF and missing trailing newlines survive).
+Safety model: `-expect` guards the planning scan. The plan stores the
+normalized root, command metadata, file size/SHA-256, exact old bytes, and
+replacement bytes. `apply` validates every target before staging any write;
+preflight refusals exit 3 with files untouched. Changed files are all staged
+before the rename phase. A failure after renames begin exits 4 and returns a
+partial-commit receipt. Each individual replacement is atomic (temp + rename),
+but multi-file application is not a filesystem transaction. CRLF and missing
+trailing newlines survive byte-exactly, and permission bits are restored;
+ownership, timestamps, xattrs, and ACLs are not preserved across the staged
+inode replacement.
 Full reference: [Edit mode](HPRSCRIPT.md#edit-mode-hprscript-edit).
+
+---
+
+## Agent-oriented investigation
+
+Use investigation when the seed is known but the likely follow-up symbols,
+tests, configuration, or impact area are not:
+
+```bash
+hprscript investigate -F validateToken -profile symbol -llm \
+    -evidence-budget 65536 -glob '**/*.go'
+```
+
+It returns a deterministic, budgeted package of ranked files and scopes,
+probable lexical definitions/references, path-heuristic file roles, related
+identifiers, representative evidence, and explicit scan/truncation accounting.
+It runs one seed stage and at most one internally batched related-identifier
+follow-up stage. See [Investigation mode](HPRSCRIPT.md#investigation-mode-hprscript-investigate).
+
+## Declarative relational query
+
+Use query when the match sets and their value/location relationship are known:
+
+```bash
+hprscript query -query unresolved-functions.json -explain-plan -summary
+```
+
+Version 1 provides named match sets, typed capture/scope rows, inner/left/semi/
+anti joins, value and location predicates, structured filtering, projection,
+grouping/aggregation, ordering, strict resource limits, and adaptive
+derived-pattern stages. Compatible sets share one matcher/traversal; equality
+joins use hash indexes. See [Declarative query mode](HPRSCRIPT.md#declarative-query-mode-hprscript-query).
 
 ---
 
@@ -180,12 +220,6 @@ The same recipe works on Linux x86-64 (SSE/AVX2), Linux/macOS ARM64 (NEON/SVE), 
 ```bash
 make test
 ```
-
----
-
-## MCP server (for AI agents)
-
-The `mcp/` directory contains an [MCP](https://modelcontextprotocol.io/) server that exposes `hprscript` to AI coding agents (Claude Code, Cursor, etc.) as a set of tools (`search`, `list_files`, `count_per_file`, `extract_blocks`, `run_script`, `help`, `binary_info`). See [`mcp/hprscript_mcp/`](mcp/) for setup.
 
 ---
 

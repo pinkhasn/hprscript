@@ -20,6 +20,7 @@
 #include "edit.hpp"
 
 #include "block.hpp"
+#include "edit_plan.hpp"
 #include "extract.hpp"
 #include "file_io.hpp"
 #include "line_index.hpp"
@@ -49,16 +50,6 @@
 namespace hpr {
 namespace {
 
-// glibc (Linux) names `struct stat`'s POSIX nanosecond mtime field
-// `st_mtim`; BSD/Darwin (macOS) names the same struct timespec
-// `st_mtimespec`. Centralize the one platform difference here instead of
-// scattering #ifdefs at each read site.
-#if defined(__APPLE__)
-struct timespec stat_mtime(const struct stat &st) { return st.st_mtimespec; }
-#else
-struct timespec stat_mtime(const struct stat &st) { return st.st_mtim; }
-#endif
-
 // One planned splice: bytes [start,end) of the file are replaced by `text`.
 // Inserts are zero-width (start == end). `span_*` is the resolved span the
 // site was derived from — for replace/delete it equals [start,end); for
@@ -71,6 +62,7 @@ struct Site {
     std::string pat;
     uint32_t line_start = 1, line_end = 1; // 1-based lines of [start,end)
     bool noop = false;
+    std::string scope_name;
 };
 
 struct PlanFile {
@@ -79,9 +71,6 @@ struct PlanFile {
     std::string content;    // owned copy of the original bytes
     LineIndex idx;          // built over `content`
     std::vector<Site> sites;
-    // Plan-time stat of the write target, for the drift check and fchmod.
-    off_t st_size = 0;
-    struct timespec st_mtim = {};
     mode_t st_mode = 0644;
     bool symlink = false;
 };
@@ -502,70 +491,47 @@ void print_file_diff(const PlanFile &pf, FILE *out) {
 
 // ---- apply --------------------------------------------------------------
 
-std::string build_new_content(const PlanFile &pf) {
-    std::string out;
-    out.reserve(pf.content.size() + 256);
-    uint64_t cur = 0;
-    for (const Site &st : pf.sites) {
-        if (st.noop) continue;
-        out.append(pf.content, cur, st.start - cur);
-        out += st.text;
-        cur = st.end;
-    }
-    out.append(pf.content, cur, pf.content.size() - cur);
-    return out;
-}
-
-// Atomic write: temp file in the same directory, fchmod to the original
-// mode, fsync, rename over the target. Returns false with `err` set.
-bool write_file_atomic(const PlanFile &pf, const std::string &data,
-                       std::string &err) {
-    std::filesystem::path target(pf.write_path);
-    std::string tmpl = (target.parent_path().empty()
-                            ? std::filesystem::path(".")
-                            : target.parent_path())
-                           .string() +
-                       "/.hpr-edit." + target.filename().string() + ".XXXXXX";
-    std::vector<char> tmp(tmpl.begin(), tmpl.end());
-    tmp.push_back('\0');
-    int fd = ::mkstemp(tmp.data());
-    if (fd < 0) {
-        err = std::string("cannot create temp file near ") + pf.write_path +
-              ": " + std::strerror(errno);
-        return false;
-    }
-    std::string tmp_path(tmp.data());
-    bool ok = true;
-    size_t off = 0;
-    while (off < data.size()) {
-        ssize_t n = ::write(fd, data.data() + off, data.size() - off);
-        if (n < 0) {
-            if (errno == EINTR) continue;
-            err = std::string("write failed for ") + tmp_path + ": " +
-                  std::strerror(errno);
-            ok = false;
-            break;
+EditPlan persistent_plan(const std::vector<PlanFile> &files, const Cli &cli,
+                         uint64_t site_count) {
+    EditPlan plan;
+    std::error_code ec;
+    plan.working_root = std::filesystem::weakly_canonical(
+                            std::filesystem::current_path(), ec).string();
+    if (ec) plan.working_root = std::filesystem::current_path().string();
+    plan.command = cli.command;
+    plan.site_count = site_count;
+    plan.file_count = files.size();
+    uint64_t site_id = 1;
+    for (const PlanFile &pf : files) {
+        PlannedFile file;
+        auto absolute = std::filesystem::absolute(pf.path, ec).lexically_normal();
+        if (ec) absolute = std::filesystem::path(pf.path).lexically_normal();
+        file.planned_absolute_path = absolute.string();
+        auto relative = std::filesystem::relative(absolute, plan.working_root, ec);
+        file.path = ec ? absolute.string() : relative.lexically_normal().string();
+        file.symlink = pf.symlink;
+        if (pf.symlink) file.symlink_target = pf.write_path;
+        file.original_size = pf.content.size();
+        file.original_sha256 = sha256_hex(pf.content);
+        file.mode = static_cast<uint32_t>(pf.st_mode);
+        for (const Site &site : pf.sites) {
+            PlannedEdit edit;
+            edit.site_id = site_id++;
+            edit.pattern_id = site.pat;
+            edit.from = site.start;
+            edit.to = site.end;
+            edit.line_start = site.line_start;
+            edit.line_end = site.line_end;
+            edit.old_bytes = pf.content.substr(site.start, site.end - site.start);
+            edit.old_sha256 = sha256_hex(edit.old_bytes);
+            edit.replacement = site.text;
+            edit.operation = verb_name(cli.edit.verb);
+            edit.scope_name = site.scope_name;
+            file.edits.push_back(std::move(edit));
         }
-        off += (size_t)n;
+        plan.files.push_back(std::move(file));
     }
-    if (ok && ::fchmod(fd, pf.st_mode) != 0) {
-        err = std::string("fchmod failed for ") + tmp_path + ": " +
-              std::strerror(errno);
-        ok = false;
-    }
-    if (ok && ::fsync(fd) != 0) {
-        err = std::string("fsync failed for ") + tmp_path + ": " +
-              std::strerror(errno);
-        ok = false;
-    }
-    ::close(fd);
-    if (ok && std::rename(tmp_path.c_str(), pf.write_path.c_str()) != 0) {
-        err = std::string("rename failed for ") + pf.write_path + ": " +
-              std::strerror(errno);
-        ok = false;
-    }
-    if (!ok) ::unlink(tmp_path.c_str());
-    return ok;
+    return plan;
 }
 
 } // namespace
@@ -588,6 +554,7 @@ int run_edit(const Cli &cli) {
     }
     const auto t_start = std::chrono::steady_clock::now();
     ScanStats stats;
+    stats.scan_stages = 1;
 
     // ---- setup: identical targeting machinery to search mode ----
     std::vector<Pattern> patterns = build_patterns(cli);
@@ -631,6 +598,8 @@ int run_edit(const Cli &cli) {
             }
             return 2;
         }
+        stats.matcher_compilations = 1;
+        stats.patterns_compiled = patterns.size();
     }
     ExtractTable extract_table;
     {
@@ -716,7 +685,6 @@ int run_edit(const Cli &cli) {
     std::vector<PlanFile> files;
     std::vector<Violation> violations;
     uint64_t total_matches = 0;
-    bool io_error = false;
 
     walker.walk([&](const WalkItem &it) -> bool {
         MappedFile mf;
@@ -737,6 +705,7 @@ int run_edit(const Cli &cli) {
         }
         ++stats.files_scanned;
         std::string_view content = mf.view();
+        stats.bytes_scanned += content.size();
 
         LineIndex idx;
         idx.build(content);
@@ -808,14 +777,21 @@ int run_edit(const Cli &cli) {
         // Plan-time stat of the write target (drift check + mode).
         std::error_code ec;
         pf.symlink = std::filesystem::is_symlink(it.path, ec);
+        if (pf.symlink && !ed.follow_symlinks) {
+            Violation v;
+            v.guard = "symlink";
+            v.file = pf.path;
+            v.message = "refusing symlink target by default; repeat with "
+                        "-follow-symlinks to record the resolved target";
+            violations.push_back(std::move(v));
+            return !stop_walk;
+        }
         pf.write_path = pf.symlink
                             ? std::filesystem::canonical(it.path, ec).string()
                             : it.path;
         if (ec) pf.write_path = it.path;
         struct stat stbuf;
         if (::stat(pf.write_path.c_str(), &stbuf) == 0) {
-            pf.st_size = stbuf.st_size;
-            pf.st_mtim = stat_mtime(stbuf);
             pf.st_mode = stbuf.st_mode & 07777;
         }
 
@@ -940,6 +916,9 @@ int run_edit(const Cli &cli) {
             st.line_start = pf.idx.line_of(st.start);
             st.line_end =
                 pf.idx.line_of(st.end > st.start ? st.end - 1 : st.start);
+            const ScopeRange *recorded_scope =
+                scope_ptr ? scope_ptr->find_innermost(m_from) : nullptr;
+            if (recorded_scope) st.scope_name = recorded_scope->name;
             pf.sites.push_back(std::move(st));
         };
 
@@ -1072,6 +1051,10 @@ int run_edit(const Cli &cli) {
     // leaving the index's internal view dangling. Offsets and line numbers
     // computed during planning are plain values and stay correct.
     for (PlanFile &pf : files) pf.idx.build(pf.content);
+    std::sort(files.begin(), files.end(), [](const PlanFile &a,
+                                             const PlanFile &b) {
+        return a.path < b.path;
+    });
 
     // ---- dedup + overlap conflicts (per file, byte order) ----
     uint64_t site_count = 0, changed = 0, noops = 0, files_changed = 0;
@@ -1127,6 +1110,8 @@ int run_edit(const Cli &cli) {
         }
         if (any_change) ++files_changed;
     }
+    stats.rows_materialized = site_count;
+    stats.rows_output = site_count;
 
     // ---- -expect ----
     if (ed.expect >= 0 && (int64_t)site_count != ed.expect) {
@@ -1156,6 +1141,32 @@ int run_edit(const Cli &cli) {
         return 3;
     }
 
+    EditPlan exact_plan = persistent_plan(files, cli, site_count);
+    if (!ed.plan_out.empty()) {
+        for (const auto &file : exact_plan.files) {
+            std::filesystem::path relative(file.path);
+            bool escapes = relative.is_absolute() || relative.empty();
+            for (const auto &part : relative)
+                if (part == "..") { escapes = true; break; }
+            if (escapes) {
+                Violation v;
+                v.guard = "root-containment";
+                v.file = file.path;
+                v.message = "persistent plans require every target beneath the normalized working root";
+                emit_guard_record(v);
+                emit_scan_summary();
+                emit_edit_summary(site_count, changed, noops, files_changed,
+                                  true, false);
+                return 3;
+            }
+        }
+        std::string plan_error;
+        if (!write_edit_plan(exact_plan, ed.plan_out, plan_error)) {
+            std::fprintf(stderr, "hprscript: edit: %s\n", plan_error.c_str());
+            return 2;
+        }
+    }
+
     if (site_count == 0) {
         emit_scan_summary();
         emit_edit_summary(0, 0, 0, 0, !ed.write, false);
@@ -1180,53 +1191,30 @@ int run_edit(const Cli &cli) {
         return 0;
     }
 
-    // ---- apply: drift-check everything, then write everything ----
-    for (const PlanFile &pf : files) {
-        struct stat stbuf;
-        bool drifted = ::stat(pf.write_path.c_str(), &stbuf) != 0 ||
-                       stbuf.st_size != pf.st_size ||
-                       stat_mtime(stbuf).tv_sec != pf.st_mtim.tv_sec ||
-                       stat_mtime(stbuf).tv_nsec != pf.st_mtim.tv_nsec;
-        if (drifted) {
-            Violation v;
-            v.guard = "changed-during-run";
-            v.file = pf.path;
-            v.message = "file changed between planning and writing; "
-                        "re-run to plan against the current content";
-            violations.push_back(std::move(v));
-        }
+    // Compatibility -write builds the same immutable plan in memory and
+    // applies exact stored ranges. It deliberately does not claim identity
+    // with a previous independently rescanned preview.
+    if (!ed.no_plan_warning) {
+        std::fprintf(stderr,
+                     "hprscript: warning: direct -write uses an in-memory "
+                     "plan; prefer -plan-out followed by 'hprscript apply' "
+                     "for a reviewable cross-invocation contract\n");
     }
-    if (!violations.empty()) {
-        for (const Violation &v : violations) emit_guard_record(v);
-        emit_scan_summary();
-        emit_edit_summary(site_count, changed, noops, files_changed, false,
-                          false);
-        return 3;
-    }
+    ApplyOptions apply;
+    apply.follow_symlinks = ed.follow_symlinks;
+    apply.json = true;
+    apply.trusted_in_memory = true;
+    int apply_rc = apply_edit_plan(exact_plan, apply, false);
 
-    for (const PlanFile &pf : files) {
-        bool any_change = false;
-        for (const Site &st : pf.sites)
-            if (!st.noop) { any_change = true; break; }
-        if (!any_change) continue;
-        std::string data = build_new_content(pf);
-        std::string werr;
-        if (!write_file_atomic(pf, data, werr)) {
-            std::fprintf(stderr, "hprscript: edit: %s\n", werr.c_str());
-            io_error = true;
-            break;
-        }
-    }
-
-    if (ed.diff && !io_error) {
+    if (ed.diff && apply_rc == 0) {
         for (const PlanFile &pf : files) print_file_diff(pf, stdout);
     }
     for (const PlanFile &pf : files)
         for (const Site &st : pf.sites) emit_edit_record(pf, st, cli);
     emit_scan_summary();
     emit_edit_summary(site_count, changed, noops, files_changed, false,
-                      !io_error);
-    if (io_error) return 2;
+                      apply_rc == 0);
+    if (apply_rc != 0) return apply_rc;
     if (cli.require_complete &&
         (stats.files_failed > 0 || stats.missing_paths > 0))
         return 2;

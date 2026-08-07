@@ -1,0 +1,5 @@
+{"type":"investigation-summary","profile":"symbol","seeds":["target"],"files_with_seed":1,"seed_matches":1,"probable_definitions":1,"probable_references":0,"tests":0,"configs":0,"scan_stages":1,"complete":true}
+{"type":"investigation-file","file":"<ROOT>/src/x.go","score":0.628923,"roles":["source"],"role_method":"path-heuristic","best_line_start":1,"best_line_end":1}
+{"type":"investigation-scope","file":"<ROOT>/src/x.go","name":"target","kind":"func","line_start":1,"line_end":3,"matches":1}
+{"type":"investigation-evidence","file":"<ROOT>/src/x.go","line":1,"column":6,"pattern_id":"p0","classification":"probable_definition","confidence":"medium","method":"lexical-go-pack","context":"func target() {"}
+{"type":"investigation-footer","complete":true,"omitted_files":0,"omitted_scopes":0,"omitted_related":0,"omitted_evidence":0,"candidate_patterns_omitted":0,"top_files_limit_omitted":0,"top_scopes_limit_omitted":0,"related_limit_omitted":1,"examples_limit_omitted":0}

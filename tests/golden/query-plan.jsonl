@@ -1,0 +1,1 @@
+{"type":"execution-plan","mode":"query","scan_stages":[{"id":"scan0","sets":["symbols"],"patterns":1,"inputs":["<ROOT>/src/x.go"],"scope":"auto"}],"postprocess":[{"op":"project"},{"op":"order"}],"limits":{"max_adaptive_stages":4,"max_cartesian_rows":1000000,"max_join_rows":500000,"max_memory_bytes":536870912,"max_rows_per_set":250000,"max_total_rows":500000}}
