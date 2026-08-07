@@ -25,7 +25,6 @@ In scope:
 
 - Crashes, hangs, or memory-safety issues triggered by crafted input (patterns, files, or stdin).
 - Path-handling bugs that read or write outside the requested target.
-- Issues in the bundled MCP server (`mcp/`) that allow unintended access.
 
 Out of scope:
 

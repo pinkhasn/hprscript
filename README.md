@@ -225,7 +225,7 @@ make test
 
 ## Use it as an agent skill
 
-`hprscript` ships a portable **agent skill** at [`skills/hprscript/SKILL.md`](skills/hprscript/SKILL.md) — a single Markdown file (YAML frontmatter + instructions) that teaches an LLM coding agent *when* and *how* to reach for `hprscript` instead of `grep`/`rg`. It drives the CLI binary directly (no MCP required), carries an inline cheat sheet, and points at [`HPRSCRIPT.md`](HPRSCRIPT.md) / [`COOKBOOK.md`](COOKBOOK.md) for depth.
+`hprscript` ships a portable **agent skill** at [`skills/hprscript/SKILL.md`](skills/hprscript/SKILL.md) — a single Markdown file (YAML frontmatter + instructions) that teaches an LLM coding agent *when* and *how* to reach for `hprscript` instead of `grep`/`rg`. It drives the CLI binary directly, carries an inline cheat sheet, and points at [`HPRSCRIPT.md`](HPRSCRIPT.md) / [`COOKBOOK.md`](COOKBOOK.md) for depth.
 
 It follows the standard `SKILL.md` convention — filename in caps, with `name` and `description` frontmatter — that a growing number of agents discover automatically. The only requirement on your side: the `hprscript` binary must be on the agent's `PATH` (see [Install](#install)).
 
