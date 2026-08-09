@@ -49,8 +49,27 @@ has "$LLM" 'RELATED IDENTIFIERS' 'LLM report has stable related section'
 has "$LLM" 'REPRESENTATIVE EVIDENCE' 'LLM report has stable evidence section'
 has "$LLM" 'LIMITS' 'LLM report discloses limits'
 
+UNBOUNDED=$($BIN investigate -F validateToken -profile symbol -followup-scan never \
+  -top-files 8 -top-scopes 8 -related 8 -examples 8 -evidence-budget 0 "$TMP")
+SUMMARY_ROW=${UNBOUNDED%%$'\n'*}
+DEFINITION_ROW=
+while IFS= read -r row; do
+  if [[ $row == *'"classification":"probable_definition"'* ]]; then
+    DEFINITION_ROW=$row
+    break
+  fi
+done <<<"$UNBOUNDED"
+[[ -n $DEFINITION_ROW ]] || {
+  printf 'not ok - unbounded investigation should contain a probable definition\n'; exit 1;
+}
+# Derive the constrained budget from emitted bytes so platform-specific temporary
+# path lengths cannot crowd out the definition. The extra byte is reserved for
+# changing complete:true to complete:false after rows are omitted.
+EVIDENCE_BUDGET=$(printf '%s\n%s\n' "$SUMMARY_ROW" "$DEFINITION_ROW" | wc -c)
+EVIDENCE_BUDGET=$((EVIDENCE_BUDGET + 1))
 BUDGET=$($BIN investigate -F validateToken -profile symbol -followup-scan never \
-  -top-files 8 -top-scopes 8 -related 8 -examples 8 -evidence-budget 500 "$TMP")
+  -top-files 8 -top-scopes 8 -related 8 -examples 8 \
+  -evidence-budget "$EVIDENCE_BUDGET" "$TMP")
 has "$BUDGET" '"classification":"probable_definition"' \
   'evidence budget reserves probable definitions before rankings'
 has "$BUDGET" '"omitted_files":' 'budget footer discloses omitted file rows'
