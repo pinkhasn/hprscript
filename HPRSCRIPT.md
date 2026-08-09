@@ -510,9 +510,10 @@ so. Occurrence labels are `probable_*` lexical classifications with confidence
 and method fields; they do not claim compiler semantics.
 
 JSONL record order is `investigation-summary`, ranked
-`investigation-file`, `investigation-scope`, `investigation-related`,
-`investigation-evidence`, then `investigation-footer` (and an optional normal
-summary). Every omitted section count is reported. `-require-complete` fails
+`investigation-file`, `investigation-scope`, probable-definition
+`investigation-evidence`, `investigation-related`, the remaining
+(representative) `investigation-evidence`, then `investigation-footer` (and an
+optional normal summary). Every omitted section count is reported. `-require-complete` fails
 when scanning or internal caps make the package incomplete.
 
 ## Declarative query mode (`hprscript query`)
@@ -1302,15 +1303,15 @@ printf 'café\n' | hprscript -p '[\p{L}]+' -ucp -o
 
 When `-ucp` rejects your pattern, prefer:
 
-1. **Explicit codepoint classes** in UTF-8 mode (no `-ucp` needed):
+1. **A single `\p{...}` class with `+`** in UTF-8 mode (no `-ucp` needed — explicit `\p{...}` classes are Unicode-aware on their own):
    ```bash
-   # Match runs of "letter-ish" codepoints by enumerating ranges
-   hprscript -p '[\p{L}\p{N}_]+' -ucp file.txt
-   # If that's "too large", widen with `.`:
-   hprscript -p '\S+' file.txt           # ASCII whitespace boundary
+   # Match runs of Unicode letters
+   hprscript -p '\p{L}+' file.txt
+   # Wider net, cheaper pattern: anything between ASCII whitespace
+   hprscript -p '\S+' file.txt
    ```
 
-2. **Anchored patterns** so the engine has more structure to work with — `[\p{L}]{1,32}` often compiles where `\p{L}+` doesn't.
+2. **Unbounded repeats over bounded ones** — `\p{L}+` compiles where `\p{L}{1,32}` (or any `{n,m}` bound on a Unicode class) is rejected as too large. Multi-class unions like `[\p{L}\p{N}_]+` are rejected too; keep one `\p{...}` class per repeat. Literal anchors around the repeat also help — `<title>([\w\s\p{P}]+)</title>` compiles under `-ucp` even though bare `\w+` doesn't.
 
 3. **ASCII `\w` + non-ASCII bytes**: `[\w\x80-\xff]+` reads "ASCII word char or any non-ASCII byte" — works in default UTF-8 mode and is good enough for many "match an identifier including non-ASCII letters" cases.
 
@@ -1347,7 +1348,7 @@ The honest caveat: on a file containing invalid UTF-8, results from UTF-8-mode p
   "patterns": [
     {"id": "ascii-id",   "regexp": "[A-Z_][A-Z0-9_]*",
                          "utf8": false},
-    {"id": "uni-letter", "regexp": "\\p{L}{1,32}",
+    {"id": "uni-letter", "regexp": "\\p{L}+",
                          "ucp": true},
     {"id": "literal-jp", "regexp": "こんにちは"}
   ]
@@ -2045,7 +2046,7 @@ Beyond bare pattern-presence, three condition forms extend the same
 
 ```bash
 # Files where errors cluster (≥3 hits) in code that's actively being worked on.
-hprscript -p ERROR -name err -file-where 'count(err) >= 3 AND churn(30) > 2' -llm --glob '**/*.go'
+hprscript -p ERROR -name err -file-where 'count(err) >= 3 AND churn(30) > 2' -llm -glob '**/*.go'
 
 # Only Go files, regardless of what else -glob happened to sweep in.
 hprscript -p TODO -file-where 'lang == go' -f -glob '**/*'
@@ -2668,7 +2669,7 @@ The binary depends only on the platform C library — on Linux verify with `ldd 
 - **Case-insensitivity is per pattern.** Use `-pi <pattern>` (CLI) or `"case_insensitive": true` (script) on the patterns that need folding — and leave the rest case-sensitive. Mixing in one invocation keeps you to a single scan.
 - **Use `\b` (or `-w`) for identifier matching** to avoid matching inside larger words.
 - **Anchor with `^` / `$`** for line-shaped matches (multiline mode is the default).
-- **Pattern compile errors** mean the regex uses a feature Hyperscan doesn't support. Check the error message; common culprits are lookarounds, backreferences, and (with `-ucp`) `\w+`-style patterns. Rewrite to use plain `\b`, character classes, alternation, or `[\p{L}]{1,N}` instead of `\p{L}+`.
+- **Pattern compile errors** mean the regex uses a feature Hyperscan doesn't support. Check the error message; common culprits are lookarounds, backreferences, and (with `-ucp`) `\w+`-style patterns. Rewrite to use plain `\b`, character classes, alternation, or unbounded `\p{L}+` instead of bounded forms like `\p{L}{1,N}` (bounded repeats of Unicode classes are what blow the pattern up).
 - **UTF-8 is on by default**, so literal Cyrillic/CJK/emoji patterns and Unicode case-folding "just work". `from`/`to`/`col` are always **byte** offsets even in UTF-8 mode.
 - **Don't reach for `-ucp` reflexively.** Default `\w` is ASCII; that's usually what you want for code. Use `-ucp` only when you need Unicode `\w`/`\d`/`\s` and accept that some patterns won't compile.
 - **Use scripts for explicit staged correlation.** `variables` + `on_complete` computes aggregates without shell pipelines. `phases` expresses collect-then-resolve as sequential scan stages in one invocation while preserving state.

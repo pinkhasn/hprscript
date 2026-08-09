@@ -97,14 +97,14 @@ hprscript -pi 'привет' chat.log
 # Matches "привет", "ПРИВЕТ", "Привет".
 ```
 
-**`\w` / `\d` / `\s` cover all Unicode letters/digits/whitespace with `ucp`.** By default these classes are ASCII-only, so `\w+` won't match `naïve` (it stops at `i`). Turn on `ucp` and `\w+` matches `naïve`, `Москва`, `北京`, `العربية`, `日本語` — every Unicode letter or digit.
+**For Unicode word matching, use `\p{L}+` — not `\w+` with `ucp`.** By default `\w`/`\d`/`\s` are ASCII-only, so `\w+` won't match `naïve` (it stops at `i`). `ucp` makes those classes Unicode-aware, but Vectorscan then rejects unanchored `\w+`-style repeats (and any bounded repeat such as `\p{L}{4,}`) as "Pattern is too large" — see [the reference](HPRSCRIPT.md#when-to-use--ucp-vs-alternatives). The form that compiles and matches `naïve`, `Москва`, `北京`, `العربية`, `日本語` is `\p{L}+`, which is Unicode-aware in the default UTF-8 mode without `ucp`. (`ucp` still earns its keep in *anchored* patterns — see [recipe 22.6](#226-non-latin-titles--ucp-for-cross-script-w-utf-8-demo).)
 
 ```bash
 # Word-frequency over a multilingual corpus (Russian/Chinese/English mixed).
 hprscript -s '{
   "scan": ["corpus/*.txt"],
   "variables": {"freq":{"type":"map"}},
-  "patterns": [{"id":"w","ucp":true,"regexp":"\\w{4,}",
+  "patterns": [{"id":"w","regexp":"\\p{L}+",
     "on_match":[{"action":"map_increment","target":"freq","key":"$MATCH"}]}],
   "on_complete":[
     {"action":"for_each","var":"freq","key_as":"w","as":"n","do":[
@@ -2208,16 +2208,13 @@ hprscript -p '^@?\s+IN\s+(SOA|NS)\s+\S+' \
 
 ### 20.1 Find CSV rows with the wrong field count
 
-**Problem:** Lines that don't have exactly 6 commas (= 7 fields). Two patterns handle "too few" and "too many" separately.
+**Problem:** Lines that don't have exactly 6 commas (= 7 fields). Express the *correct* shape as one pattern and flag every row that lacks it with record-level absence — one call catches both "too few" and "too many". (A direct too-few pattern like `^[^,\n]*(,[^,\n]*){0,5}$` can match an empty line, which Vectorscan rejects: "Start of match is not currently supported for patterns which match an empty buffer".)
 
 **Input:** CSV file.
 
 ```bash
-hprscript \
-  -p '^[^,\n]*(,[^,\n]*){0,5}$'      \
-  -p '^([^,\n]*,){7,}[^,\n]*$'        \
-  -format '$PAT_ID  $FILE:$LINE  $MATCH' -glob '**/*.csv'
-# →  p0  too few fields    p1  too many fields
+hprscript -p '^([^,\n]*,){6}[^,\n]*$' -absent -records line -glob '**/*.csv'
+# → {"file":"data.csv","pat":"p0","line":3,"record":"1,2,3"}    ← wrong field count
 ```
 
 ### 20.2 Extract a specific column with `-extract`
@@ -2860,9 +2857,9 @@ hprscript -p '\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,4}\b' \
   -o -glob '**/*.txt' | sort | uniq -c | sort -rn | head -50
 ```
 
-### 27.5 Cross-script word frequency — `\w+` with `ucp` (UTF-8 demo)
+### 27.5 Cross-script word frequency — `\p{L}+` (UTF-8 demo)
 
-**Problem:** Count tokens (≥4 codepoints) across a multilingual corpus. By default `\w+` is ASCII; `ucp: true` extends it to all Unicode letters/digits, so `Москва`, `日本語`, `naïve` all match.
+**Problem:** Count word tokens across a multilingual corpus. By default `\w+` is ASCII-only, and its Unicode variant (`ucp: true`) is rejected by Vectorscan as "Pattern is too large" — as is any bounded repeat like `\p{L}{4,}`. The form that compiles is `\p{L}+`: Unicode-aware in default UTF-8 mode, no `ucp` needed. Filter short tokens downstream if you need a length floor.
 
 **Input:** Mixed-language corpus.
 
@@ -2871,7 +2868,7 @@ hprscript -s '{
   "scan": ["corpus/**/*.txt"],
   "variables": {"freq": {"type":"map"}},
   "patterns": [
-    {"id":"w","ucp":true,"regexp":"\\w{4,}",
+    {"id":"w","regexp":"\\p{L}+",
      "on_match":[{"action":"map_increment","target":"freq","key":"$MATCH"}]}
   ],
   "on_complete":[
@@ -2885,7 +2882,7 @@ hprscript -s '{
 # {"word":"because","count":234}
 ```
 
-**Compare:** without `ucp`, the same `\w{4,}` regex emits `naïve` as `na` + `ve` (two short matches, both filtered out by `{4,}`), missing the word entirely.
+**Compare:** without Unicode awareness, an ASCII `\w+` emits `naïve` as `na` + `ve` (two fragments), miscounting the word entirely.
 
 ### 27.6 Function-word frequency
 
@@ -3023,12 +3020,12 @@ git log main..HEAD --pretty='%H %s' | \
 
 ### 29.4 Long commit subjects (>72 chars)
 
-**Problem:** Subjects exceeding the conventional 72-character limit.
+**Problem:** Subjects exceeding the conventional 72-character limit. The large bounded repeat is rejected in UTF-8 mode ("Pattern is too large"); `-no-utf8` compiles it. Byte-level `.` means the 73 counts bytes, which matches the convention for ASCII subjects.
 
 **Input:** git log.
 
 ```bash
-git log --pretty='%s' | hprscript -p '^.{73,}$'
+git log --pretty='%s' | hprscript -p '^.{73,}$' -no-utf8
 ```
 
 ### 29.5 Co-author extraction
