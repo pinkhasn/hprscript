@@ -202,7 +202,9 @@ chmod 0640 "$TMP/bytes/crlf.txt"
 )
 expect_eq $'new\r\nlast' "$(<"$TMP/bytes/crlf.txt")" \
     'CRLF and missing final newline are preserved'
-expect_eq 640 "$(stat -c '%a' "$TMP/bytes/crlf.txt")" \
+MODE=$(stat -c '%a' "$TMP/bytes/crlf.txt" 2>/dev/null ||
+    stat -f '%Lp' "$TMP/bytes/crlf.txt")
+expect_eq 640 "$MODE" \
     'file permissions are preserved'
 
 mkdir "$TMP/corrupt"
