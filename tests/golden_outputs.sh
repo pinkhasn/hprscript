@@ -4,6 +4,7 @@ set -euo pipefail
 BIN=${HPRSCRIPT_BIN:-./hprscript}
 HERE=$(cd "$(dirname "$0")" && pwd)
 TMP=$(mktemp -d)
+TMP_REAL=$(cd "$TMP" && pwd -P)
 trap 'rm -rf "$TMP"' EXIT
 PASS=0
 
@@ -19,6 +20,7 @@ check() {
 normalize() {
     local input=$1 output=$2
     sed -E \
+      -e "s#$TMP_REAL#<ROOT>#g" \
       -e "s#$TMP#<ROOT>#g" \
       -e "s#$BIN#<BIN>#g" \
       -e 's/"created_at": "[^"]*"/"created_at": "<TIMESTAMP>"/' \
