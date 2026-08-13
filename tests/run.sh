@@ -1183,6 +1183,300 @@ expect_contains "-llm shows the name tag" "[warn]" "$OUT"
 rm -rf "$NP_FIX"
 
 # ---------------------------------------------------------------------------
+section "informative -llm output (-desc legend / no-matches footer)"
+LD_FIX="$HERE/_tmp_llmdesc"
+mkdir -p "$LD_FIX"
+printf 'WARN a\nERROR b\nx\nWARN c\n' > "$LD_FIX/log.txt"
+
+# --- zero-match footer
+OUT=$("$BIN" -p WARN -name warn -p NOPE_ZZZ -name ghost -llm "$LD_FIX/log.txt")
+expect_contains "-llm zero-match footer names silent pattern" "--- no matches: ghost (1 of 2 patterns) ---" "$OUT"
+OUT=$("$BIN" -p WARN -name warn -p ERROR -name err -llm "$LD_FIX/log.txt")
+expect_not_contains "-llm no footer when all patterns match" "no matches" "$OUT"
+OUT=$("$BIN" -p NOPE_A -p NOPE_B -llm "$LD_FIX/log.txt" ; echo "rc=$?")
+expect_contains "-llm all-zero footer lists every pattern" "--- no matches: p0, p1 (2 of 2 patterns) ---" "$OUT"
+expect_contains "-llm all-zero still exits 1" "rc=1" "$OUT"
+OUT=$("$BIN" -p WARN -p NOPE_ZZZ -name ghost -llm -limit 1 "$LD_FIX/log.txt")
+expect_contains "-llm footer qualified when limit stops scan" "no matches (scan stopped early): ghost" "$OUT"
+OUT=$("$BIN" -p WARN -p NOPE_ZZZ -name ghost -elide "$LD_FIX/log.txt")
+expect_contains "-elide zero-match footer" "--- no matches: ghost (1 of 2 patterns) ---" "$OUT"
+OUT=$("$BIN" -p WARN -p NOPE_ZZZ "$LD_FIX/log.txt")
+expect_not_contains "JSONL mode has no zero-match footer" "no matches" "$OUT"
+
+# --- -desc query legend
+OUT=$("$BIN" -p WARN -name warn -desc 'warning lines' -p ERROR -llm "$LD_FIX/log.txt")
+expect_contains "-desc legend described pattern" "  warn — warning lines" "$OUT"
+expect_contains "-desc legend regexp fallback" "  p1 — /ERROR/" "$OUT"
+FIRST=$(printf '%s\n' "$OUT" | head -1)
+expect_eq "-desc header is the first line" "query: 2 patterns over $LD_FIX/log.txt" "$FIRST"
+OUT=$("$BIN" -p WARN -p ERROR -llm "$LD_FIX/log.txt")
+expect_not_contains "no header without -desc" "query:" "$OUT"
+OUT=$("$BIN" -p WARN -desc 'warning lines' "$LD_FIX/log.txt")
+expect_not_contains "JSONL mode has no header" "query:" "$OUT"
+OUT=$("$BIN" -p NOPE_ZZZ -desc 'missing thing' -llm "$LD_FIX/log.txt")
+expect_contains "header still prints before all-zero footer" "query: 1 pattern over" "$OUT"
+expect_contains "singular footer wording" "(1 of 1 pattern) ---" "$OUT"
+OUT=$("$BIN" -p WARN -desc 'warning lines' -hotspots 1 -llm "$LD_FIX/log.txt")
+expect_contains "-hotspots -llm prints header before rows" "query: 1 pattern over" "$OUT"
+
+# --- -desc validation
+OUT=$("$BIN" -desc x -p WARN "$LD_FIX/log.txt" 2>&1) ; RC=$?
+expect_contains "-desc before pattern rejected" "-desc must follow" "$OUT"
+[[ "$RC" == "2" ]] && report ok "-desc before pattern exit 2" || report fail "-desc before pattern exit (got $RC)"
+OUT=$("$BIN" -p WARN -desc a -desc b "$LD_FIX/log.txt" 2>&1) ; RC=$?
+expect_contains "-desc repeated rejected" "repeated for the same pattern" "$OUT"
+OUT=$("$BIN" -p WARN -desc '' "$LD_FIX/log.txt" 2>&1) ; RC=$?
+expect_contains "-desc empty rejected" "empty description" "$OUT"
+
+# --- patterns-from description field
+cat > "$LD_FIX/rules.jsonl" <<'EOF'
+{"id":"warnish","regexp":"WARN","description":"warning lines"}
+{"id":"errish","regexp":"ERROR"}
+EOF
+OUT=$("$BIN" -patterns-from "$LD_FIX/rules.jsonl" -llm "$LD_FIX/log.txt")
+expect_contains "rule-file description in legend" "  warnish — warning lines" "$OUT"
+expect_contains "rule-file undescribed pattern falls back to regexp" "  errish — /ERROR/" "$OUT"
+printf '{"id":"x","regexp":"y","description":5}\n' > "$LD_FIX/bad.jsonl"
+OUT=$("$BIN" -patterns-from "$LD_FIX/bad.jsonl" -llm "$LD_FIX/log.txt" 2>&1) ; RC=$?
+expect_contains "rule-file description type-checked" "'description' must be a string" "$OUT"
+[[ "$RC" == "2" ]] && report ok "rule-file bad description exit 2" || report fail "rule-file bad description exit (got $RC)"
+rm -rf "$LD_FIX"
+
+# ---------------------------------------------------------------------------
+section "per-match role tags (def/comment/string/import)"
+RT_FIX="$HERE/_tmp_roles"
+mkdir -p "$RT_FIX"
+cat > "$RT_FIX/a.go" <<'EOF'
+package main
+
+import "fmt"
+
+// TODO comment hit
+func Target() {
+	s := "TODO in string"
+	u := "http://x/TODO"
+	fmt.Println(s, u) // trailing TODO note
+}
+EOF
+
+OUT=$("$BIN" -p TODO -llm "$RT_FIX/a.go")
+expect_contains "comment tag" "// TODO comment hit  [comment]" "$OUT"
+expect_contains "string tag" '"TODO in string"  [string]' "$OUT"
+expect_contains "trailing comment tag" "trailing TODO note  [comment]" "$OUT"
+expect_contains "// inside a string is not a comment" 'http://x/TODO"  [string]' "$OUT"
+
+OUT=$("$BIN" -p 'func Target' -llm -scope go "$RT_FIX/a.go")
+expect_contains "def tag on signature line" "[def func Target]" "$OUT"
+expect_not_contains "def replaces [in] on the signature" "[in func Target]" "$OUT"
+
+OUT=$("$BIN" -p 'import' -llm "$RT_FIX/a.go")
+expect_contains "import tag" 'import "fmt"  [import]' "$OUT"
+
+# Position-accurate roles beat line-based ones: a trailing comment on a
+# signature line is a comment, not a def.
+cat > "$RT_FIX/b.go" <<'EOF'
+package main
+
+func Helper() { // TODO here
+}
+EOF
+OUT=$("$BIN" -p TODO -llm -scope go "$RT_FIX/b.go")
+expect_contains "comment beats def on signature line" "[comment]" "$OUT"
+expect_not_contains "no def tag for trailing comment" "[def" "$OUT"
+
+OUT=$("$BIN" -p TODO "$RT_FIX/a.go")
+expect_contains "JSONL role field" '"role":"comment"' "$OUT"
+OUT=$("$BIN" -p TODO -format '$LINE:$ROLE' "$RT_FIX/a.go")
+expect_contains "\$ROLE format token" "5:comment" "$OUT"
+OUT=$("$BIN" -p TODO -sample 2 -llm "$RT_FIX/a.go")
+expect_contains "-sample keeps role tags" "[comment]" "$OUT"
+
+OUT=$("$BIN" -p TODO -llm -no-roles "$RT_FIX/a.go")
+expect_not_contains "-no-roles drops -llm tags" "[comment]" "$OUT"
+OUT=$("$BIN" -p TODO -no-roles "$RT_FIX/a.go")
+expect_not_contains "-no-roles drops the JSONL field" '"role"' "$OUT"
+
+cat > "$RT_FIX/c.c" <<'EOF'
+#include <stdio.h>
+/* start
+   TODO inside block
+   end */
+int x;
+EOF
+OUT=$("$BIN" -p TODO -llm "$RT_FIX/c.c")
+expect_contains "block comment spans lines" "TODO inside block  [comment]" "$OUT"
+OUT=$("$BIN" -p 'stdio' -llm "$RT_FIX/c.c")
+expect_contains "#include line tagged import" "[import]" "$OUT"
+
+cat > "$RT_FIX/p.py" <<'EOF'
+import os
+# TODO hash comment
+s = "TODO quoted"
+d = """
+TODO in docstring
+"""
+EOF
+OUT=$("$BIN" -p TODO -llm "$RT_FIX/p.py")
+expect_contains "python hash comment" "# TODO hash comment  [comment]" "$OUT"
+expect_contains "python string" '"TODO quoted"  [string]' "$OUT"
+expect_contains "python triple-quote string" "TODO in docstring  [string]" "$OUT"
+OUT=$("$BIN" -p 'import os' -llm "$RT_FIX/p.py")
+expect_contains "python import tag" "[import]" "$OUT"
+
+printf '// TODO not code\n' > "$RT_FIX/x.txt"
+OUT=$("$BIN" -p TODO -llm "$RT_FIX/x.txt")
+expect_not_contains "unknown extension: no tags" "[comment]" "$OUT"
+rm -rf "$RT_FIX"
+
+# ---------------------------------------------------------------------------
+section "scope rollup (-rollup) and co-occurrence footer"
+RU_FIX="$HERE/_tmp_rollup"
+mkdir -p "$RU_FIX"
+cat > "$RU_FIX/m.go" <<'EOF'
+package main
+
+func Alpha() {
+	work()
+	work()
+	other()
+}
+
+func Beta() {
+	work()
+}
+EOF
+
+OUT=$("$BIN" -p 'work\(\)' -name w -p 'other\(\)' -name o -rollup "$RU_FIX/m.go")
+expect_contains "rollup line with counts" "3-7 func Alpha — 3 hits (w×2, o×1)" "$OUT"
+expect_contains "rollup second scope" "9-11 func Beta — 1 hit (w×1)" "$OUT"
+expect_contains "rollup representative line" "    4: 	work()" "$OUT"
+expect_contains "rollup file header" "$RU_FIX/m.go" "$OUT"
+
+OUT=$("$BIN" -p 'work\(\)' -rollup "$RU_FIX/m.go")
+expect_contains "single pattern: no breakdown" "3-7 func Alpha — 2 hits" "$OUT"
+expect_not_contains "single pattern: no ×" "×" "$OUT"
+
+printf 'TODO one\nx\nTODO two\n' > "$RU_FIX/notes.txt"
+OUT=$("$BIN" -p TODO -rollup "$RU_FIX/notes.txt")
+expect_contains "scopeless matches roll up as top level" "(top level) — 2 hits" "$OUT"
+
+OUT=$("$BIN" -p 'zz_nope' -rollup "$RU_FIX/m.go" ; echo "rc=$?")
+expect_contains "rollup no matches exit 1" "rc=1" "$OUT"
+expect_contains "rollup zero-match footer" "--- no matches: p0 (1 of 1 pattern) ---" "$OUT"
+
+OUT=$("$BIN" -p x -rollup -llm 2>&1) ; RC=$?
+expect_contains "-rollup is an exclusive output mode" "mutually exclusive" "$OUT"
+[[ "$RC" == "2" ]] && report ok "-rollup + -llm exit 2" || report fail "-rollup + -llm exit (got $RC)"
+OUT=$("$BIN" -p x -rollup -sample 3 "$RU_FIX/m.go" 2>&1) ; RC=$?
+expect_contains "-rollup + -sample rejected" "don't compose with -sample" "$OUT"
+
+# --- co-occurrence footer
+cat > "$RU_FIX/a.log" <<'EOF'
+WARN x
+ERROR y
+EOF
+printf 'WARN only\n' > "$RU_FIX/b.log"
+printf 'ERROR only\n' > "$RU_FIX/c.log"
+OUT=$("$BIN" -p WARN -name warn -p ERROR -name err -llm "$RU_FIX/a.log" "$RU_FIX/b.log" "$RU_FIX/c.log")
+expect_contains "co-occurrence crosstab" "--- files: warn 2, err 2; both: 1 ($RU_FIX/a.log) ---" "$OUT"
+
+OUT=$("$BIN" -p WARN -name warn -p ERROR -name err -llm "$RU_FIX/b.log" "$RU_FIX/c.log")
+expect_contains "zero overlap stated explicitly" "both: 0" "$OUT"
+
+OUT=$("$BIN" -p WARN -p 'zz_nope' -llm "$RU_FIX/b.log")
+expect_not_contains "one active pattern: no co-occurrence footer" "--- files:" "$OUT"
+
+OUT=$("$BIN" -p WARN -name warn -p ERROR -name err -p 'x$' -name xx -llm "$RU_FIX/a.log" "$RU_FIX/b.log" "$RU_FIX/c.log")
+expect_contains ">2 patterns: multi-pattern form with sets" "multi-pattern: 1 ($RU_FIX/a.log warn+err+xx)" "$OUT"
+
+OUT=$("$BIN" -p WARN -name warn -p ERROR -name err "$RU_FIX/a.log")
+expect_not_contains "JSONL mode: no co-occurrence footer" "--- files:" "$OUT"
+
+OUT=$("$BIN" -p 'work\(\)' -name w -p 'other\(\)' -name o -rollup "$RU_FIX/m.go")
+expect_contains "rollup gets the co-occurrence footer" "--- files: w 1, o 1; both: 1" "$OUT"
+rm -rf "$RU_FIX"
+
+# ---------------------------------------------------------------------------
+section "stable refs (-refs / hprscript expand)"
+EX_FIX="$HERE/_tmp_expand"
+mkdir -p "$EX_FIX"
+cat > "$EX_FIX/m.go" <<'EOF'
+package main
+
+func Alpha() {
+	work()
+	work()
+	other()
+}
+
+func Beta() {
+	work()
+}
+EOF
+
+# fnv1a is a pure function, so ref hashes are deterministic and can be
+# asserted literally: trimmed "work()" → 1a87e3, "other()" → 737a8a.
+OUT=$("$BIN" -p 'work\(\)' -llm -refs "$EX_FIX/m.go")
+expect_contains "-refs appends @hash in -llm" "4@1a87e3: 	work()" "$OUT"
+OUT=$("$BIN" -p 'other\(\)' -rollup -refs "$EX_FIX/m.go")
+expect_contains "-refs on rollup representative" "6@737a8a: 	other()" "$OUT"
+OUT=$("$BIN" -p 'work\(\)' -llm "$EX_FIX/m.go")
+expect_not_contains "no @hash without -refs" "@" "$OUT"
+
+OUT=$("$BIN" expand "$EX_FIX/m.go:4")
+expect_contains "expand: bare file:line resolves scope" "$EX_FIX/m.go:3-7 func Alpha" "$OUT"
+expect_contains "expand: prints full body" "	other()" "$OUT"
+OUT=$("$BIN" expand "$EX_FIX/m.go:4@1a87e3" ; echo "rc=$?")
+expect_contains "expand: verified ref ok" "func Alpha" "$OUT"
+expect_contains "expand: verified ref exit 0" "rc=0" "$OUT"
+
+OUT=$("$BIN" expand "$EX_FIX/m.go:4" "$EX_FIX/m.go:10")
+expect_contains "expand: batch second ref" "func Beta" "$OUT"
+OUT=$("$BIN" expand "$EX_FIX/m.go:1")
+expect_contains "expand: scopeless line falls back to context" "(no enclosing scope)" "$OUT"
+expect_contains "expand: ref line is marked" "> 1: package main" "$OUT"
+
+OUT=$("$BIN" expand "$EX_FIX/m.go:4@ffffff" ; echo "rc=$?")
+expect_contains "expand: wrong hash reports stale" "stale" "$OUT"
+expect_contains "expand: stale exit 3" "rc=3" "$OUT"
+OUT=$("$BIN" expand "$EX_FIX/m.go:999" ; echo "rc=$?")
+expect_contains "expand: line beyond EOF is stale" "stale" "$OUT"
+expect_contains "expand: beyond-EOF exit 3" "rc=3" "$OUT"
+
+# Content moved: insert a comment above Alpha, then expand with the OLD
+# line number + hash — recovery must find the line again by content.
+cat > "$EX_FIX/moved.go" <<'EOF'
+package main
+
+// new comment
+func Alpha() {
+	work()
+	work()
+	other()
+}
+EOF
+OUT=$("$BIN" expand "$EX_FIX/moved.go:6@737a8a" ; echo "rc=$?")
+expect_contains "expand: moved line recovered by hash" "(ref line moved: 6 → 7)" "$OUT"
+expect_contains "expand: moved ref still expands scope" "func Alpha" "$OUT"
+expect_contains "expand: moved ref exit 0" "rc=0" "$OUT"
+
+OUT=$("$BIN" expand "not-a-ref" 2>&1) ; RC=$?
+expect_contains "expand: bad ref syntax rejected" "bad ref" "$OUT"
+[[ "$RC" == "2" ]] && report ok "expand bad ref exit 2" || report fail "expand bad ref exit (got $RC)"
+OUT=$("$BIN" expand 2>&1) ; RC=$?
+expect_contains "expand: refs required" "at least one" "$OUT"
+[[ "$RC" == "2" ]] && report ok "expand no refs exit 2" || report fail "expand no refs exit (got $RC)"
+OUT=$("$BIN" expand -p x "$EX_FIX/m.go:4" 2>&1) ; RC=$?
+expect_contains "expand rejects patterns" "not patterns" "$OUT"
+[[ "$RC" == "2" ]] && report ok "expand -p exit 2" || report fail "expand -p exit (got $RC)"
+OUT=$("$BIN" expand -llm "$EX_FIX/m.go:4" 2>&1) ; RC=$?
+expect_contains "expand rejects output modes" "do not apply" "$OUT"
+
+OUT=$("$BIN" expand -max-block-bytes 20 "$EX_FIX/m.go:4")
+expect_contains "expand honors -max-block-bytes" "-max-block-bytes reached" "$OUT"
+rm -rf "$EX_FIX"
+
+# ---------------------------------------------------------------------------
 section "fixed strings (-F / -Fi / -patterns-from)"
 FS_FIX="$HERE/_tmp_fixed"
 mkdir -p "$FS_FIX"
@@ -1937,7 +2231,7 @@ OUT=$("$BIN" -p x -elide -llm 2>&1) ; RC=$?
 expect_contains "-elide output-mode conflict" "mutually exclusive" "$OUT"
 [[ "$RC" == "2" ]] && report ok "-elide output-mode conflict exit 2" || report fail "-elide output-mode conflict exit (got $RC)"
 OUT=$("$BIN" -p x -elide -sample 5 2>&1) ; RC=$?
-expect_contains "-elide + -sample rejected" "doesn't compose with -sample" "$OUT"
+expect_contains "-elide + -sample rejected" "don't compose with -sample" "$OUT"
 [[ "$RC" == "2" ]] && report ok "-elide + -sample exit 2" || report fail "-elide + -sample exit (got $RC)"
 
 # --- -m caps how many matches participate in the render (pattern excludes

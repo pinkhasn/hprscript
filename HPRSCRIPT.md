@@ -65,6 +65,7 @@ hprscript -s '<json>' [files...]
 hprscript -script <path> [files...]
 hprscript script.json [files...]            # positional arg as script file
 cat script.json | hprscript                  # script piped on stdin
+hprscript expand <file:line[@hash]> [...refs]      # print a hit's enclosing scope
 hprscript edit -p <pat> <edit flags> [files...]   # discover/preview/plan edits
 hprscript apply <plan.json> [apply flags]          # verify and apply exact stored edits
 ```
@@ -102,7 +103,8 @@ simultaneous.
 | `-pi <pattern>` | Case-insensitive search pattern (HS `CASELESS`; folds Unicode by default; repeatable, mixable with `-p`) |
 | `-F <string>` / `-Fi <string>` | Fixed-string pattern (case-sensitive / -insensitive) — matched literally, no regex interpretation. Repeatable, mixable with `-p`/`-pi`. |
 | `-name <id>` | Name the preceding `-p`/`-pi`/`-F`/`-Fi`/`-ident`: the id (`[A-Za-z_]\w*`) replaces the auto `p<i>`/`ident<i>` in `pat`, `$PAT_ID`, `-llm` tags, relations, and `-file-where`. |
-| `-patterns-from <f>` | Load additional patterns from a JSONL rule file — one `{"id","regexp"\|"literal","case_insensitive","word_boundary","utf8","ref"}` object per line, `#` comments allowed. Repeatable. See [Fixed strings & pattern files](#fixed-strings--pattern-files--f--fi--patterns-from). |
+| `-desc <text>` | Describe the preceding pattern in free text. When any pattern has one, `-llm`/`-elide`/`-rollup` output opens with a [query legend](#query-header-and-result-footers) so each result block is self-describing. |
+| `-patterns-from <f>` | Load additional patterns from a JSONL rule file — one `{"id","regexp"\|"literal","description","case_insensitive","word_boundary","utf8","ref"}` object per line, `#` comments allowed. Repeatable. See [Fixed strings & pattern files](#fixed-strings--pattern-files--f--fi--patterns-from). |
 | `-ident '<terms>'` | Match identifiers whose subtokens include ALL given space-separated terms, regardless of casing/separator (`parseConfig` ~ `parse_config`). Repeatable = OR. See [Identifier matching](#identifier-matching--ident). |
 | `-file-where <expr>` | Per-file predicate: pattern ids, plus `count(pat) > n` / `churn(days) > n` / `lang == name` conditions (`'err AND NOT recovery'`, `'churn(30) > 2'`). See [Per-file conditions](#per-file-conditions--file-where). |
 | `-order-by <f>` | Sort `-f`/`-c` output by `score`/`count`/`path` instead of walk order. See [Sorting file-grouped output](#sorting-file-grouped-output--order-by). |
@@ -115,6 +117,8 @@ simultaneous.
 | `-git-range <r>` | Scan the files changed in a diff range (`origin/main...HEAD`). Repeatable. |
 | `-git-added-lines` | Restrict matches to lines **added** by the selected diffs (quick mode; needs `-git-changed`/`-git-staged`/`-git-range`). |
 | `-w` | Whole-word matching (wraps the pattern as `\b(?:expr)\b`) |
+| `-no-roles` | Disable per-match role classification (`role` JSONL field, `[def]`/`[comment]`/`[string]`/`[import]` tags in `-llm`, `$ROLE`). See [Per-match role tags](#per-match-role-tags). |
+| `-refs` | Append a `@hash` content check to line numbers in `-llm`/`-rollup` output, making each hit a ref that `hprscript expand` verifies. See [Stable refs & expand](#stable-refs--expand--refs--hprscript-expand). |
 | `-no-utf8` | Disable UTF-8 mode (byte-level matching — see [UTF-8 / Unicode](#utf-8--unicode-support)) |
 | `-ucp` | Enable Unicode property classes for `\w`/`\d`/`\s` (opt-in; may reject some patterns) |
 | `-limit <n>` | Maximum global results — scanning stops once reached |
@@ -157,6 +161,7 @@ simultaneous.
 | `-absent` | Files where the pattern is **not** found (like `grep -L`) |
 | `-llm` | Token-efficient plain text grouped by file (LLM-friendly). See [LLM output mode](#llm-output-mode). |
 | `-elide` | Scope-aware chunks with unmatched interior lines folded away. See [Elided scope output](#elided-scope-output--elide). |
+| `-rollup` | One line per enclosing scope: line range, name, per-pattern match counts, one representative line. See [Scope rollup](#scope-rollup--rollup). |
 
 `-format` template tokens (substituted per match):
 
@@ -170,6 +175,7 @@ simultaneous.
 | `$MATCH` | Matched text |
 | `$CONTEXT` | Match line plus `-A`/`-B`/`-C` surrounding lines |
 | `$PAT_ID` | Pattern id (`p0`, `p1`, … unless overridden in script mode) |
+| `$ROLE` | Match's lexical role: `def`/`comment`/`string`/`import`, empty for plain code. See [Per-match role tags](#per-match-role-tags). |
 | `$BLOCK` | Block content (when `-block-open`/`-close` is active) |
 | `$BLOCK_FULL` | Match start through block end (signature + body) |
 | `$BLOCK_START` / `$BLOCK_END` | Byte offsets of block start / end (exclusive) |
@@ -366,6 +372,20 @@ Names must be identifiers (`[A-Za-z_][A-Za-z0-9_]*`) and unique — a collision
 with another name or with a different pattern's auto id (`p0`, `p1`, …) is
 rejected at startup.
 
+`-desc <text>` is the same kind of postfix modifier, but for meaning instead
+of identity: free text explaining what the pattern is *for*. It surfaces as a
+one-time query legend at the top of `-llm`/`-elide` output (see
+[Query header and result footers](#query-header-and-result-footers)),
+so a reader of the results — human or LLM — doesn't have to reverse-engineer
+intent from the regex:
+
+```bash
+hprscript \
+  -p 'md5|sha1'      -name weak_hash -desc 'weak hash algorithm usage' \
+  -p 'rand\.Intn'    -name weak_rand -desc 'non-crypto RNG in security context' \
+  -llm -glob '**/*.go'
+```
+
 ---
 
 ## Fixed strings & pattern files (`-F` / `-Fi` / `-patterns-from`)
@@ -393,9 +413,11 @@ hprscript -patterns-from ioc-pack.jsonl -C 1 -glob '**/*.log'
 ```
 
 Each entry takes exactly one of `regexp` or `literal`, plus optional `id`
-(same rules as `-name`), `case_insensitive`, `word_boundary`, and `utf8`
-(the latter two default to the global `-w` / `-no-utf8` flags). Unknown
-fields are rejected with the file and line number. `-patterns-from` is
+(same rules as `-name`), `description` (free text, same role as `-desc` —
+shown in the `-llm`/`-elide` query legend), `case_insensitive`,
+`word_boundary`, and `utf8` (the latter two default to the global `-w` /
+`-no-utf8` flags). Unknown fields are rejected with the file and line
+number. `-patterns-from` is
 repeatable, appends to any `-p`/`-F` patterns, and cannot be combined with
 `-s`/`-script` (scripts declare their own patterns).
 
@@ -2253,6 +2275,33 @@ hprscript -p 'BEGIN.*PRIVATE KEY' -summary -diagnostics -require-complete -glob 
 
 ---
 
+## Per-match role tags
+
+The first question a reader of search results resolves for almost every hit is "what kind of occurrence is this?" — a definition, a comment mention, a string literal, an import. hprscript answers it per match, by default, in every per-match output mode:
+
+| Role | Meaning | Detection |
+|---|---|---|
+| `def` | Match sits on a scope's signature line | The match's line is an anchor line in the scope index (needs an active `-scope`) |
+| `comment` | Match is inside a line or block comment | Single-pass, escape-aware lexer over the file |
+| `string` | Match is inside a string literal | Same lexer (quotes, raw/backtick strings, Python triple quotes) |
+| `import` | Match's line is an import/include/use statement | Line-prefix check, only outside comments/strings |
+
+Surfaces: the default JSONL output gains a `"role":"comment"` field (omitted for plain code), `-llm` appends bracket tags, and `-format` recognises `$ROLE`. In `-llm`, a match on a signature line renders as `[def func Target]` **instead of** the misleading `[in func Target]`:
+
+```
+a.go
+  3: import "fmt"  [import]
+  5: // TODO comment hit  [comment]
+  6: func Target() {  [def func Target]
+  7: 	s := "TODO in string"  [string]  [in func Target]
+```
+
+Precedence is position-accurate first: a trailing comment on a signature line is `comment`, not `def`. Comment/string lexing covers the scope-pack languages (Go, Rust, C, C++, Java, JS, TS) plus Python, shell, Ruby, YAML, and TOML; files with unrecognized extensions simply get no role tags. `def` additionally requires an active `-scope` config, since it reads the scope index's anchor lines.
+
+The classification is lexical, not syntactic — it will not distinguish a call from a reference, and block-delimiter oddities inside unrecognized constructs can skew it. It is computed lazily, only for files that produce output, so clean files cost nothing. `-no-roles` turns it off entirely.
+
+---
+
 ## LLM output mode
 
 `-llm` emits a compact, plain-text format intended for direct consumption by language models — no JSON parsing, no per-match metadata noise, just file → line → matched text. Far cheaper in tokens than `-j` for the same information.
@@ -2263,10 +2312,48 @@ Layout: one **file header** per file (deduped — never repeated), then each mat
 |---|---|
 | (none) | `  <line>: <match line>` — with ≥2 patterns: `  <line>: [<pat>] <match line>` |
 | `-block-open`/`-block-close` | `  <line_start>-<line_end>` then the full block content on following lines |
-| `-scope <pack>` / `-scope-pattern …` | `  <line>: <match line>  [in <kind> <name>]` |
+| `-scope <pack>` / `-scope-pattern …` | `  <line>: <match line>  [in <kind> <name>]` — or `  [def <kind> <name>]` when the match sits on the signature line itself |
 | Both block + scope | block form, with a `[in <kind> <name>]` suffix on the header |
 
+Line-shape matches also carry [role tags](#per-match-role-tags) — `[comment]`, `[string]`, `[import]` — unless `-no-roles` is given.
+
 When `-limit` or `-max-output-bytes` truncates the output, a final `--- limit reached: ... ---` (or `--- output-byte budget reached ... ---`) footer line is emitted so the reader knows the result was cut, not finished.
+
+### Query header and result footers
+
+Three additions make each `-llm`/`-elide`/`-rollup` result block self-describing — useful when the output is read later (or by a different agent) than the command that produced it:
+
+**Query header.** When any pattern carries a description (`-desc`, or `description` in a `-patterns-from` rule file), the output opens with an echo of the interpreted query and a one-line legend per pattern — described patterns show their description, the rest fall back to their regexp so the legend is complete on its own:
+
+```
+query: 2 patterns over src, **/*.go
+  weak_hash — weak hash algorithm usage
+  p1 — /rand\.Intn/
+```
+
+No `-desc` anywhere → no header, so existing output is unchanged unless you opt in.
+
+**No-matches footer.** A batched pattern that matched nothing would otherwise just vanish from the output — and absence is often the finding (`no callers of X` can be the whole answer). Any pattern that ends the scan with zero matches (after `-in-scope`/relations/`-file-where` filtering) is named explicitly in a trailing footer:
+
+```
+--- no matches: weak_rand (1 of 2 patterns) ---
+```
+
+The counts cover the whole scan, not just the displayed subset, so the footer stays truthful under `-sample`/`-hotspots`. When `-limit` or `-max-output-bytes` stopped the scan early the claim only holds for the scanned prefix, and the footer says so: `--- no matches (scan stopped early): … ---`. Exit codes are unaffected (still 1 when nothing matched at all).
+
+**Co-occurrence footer.** Batched patterns are usually batched to be *correlated* — so the per-file join is handed over instead of left to the reader. When at least two patterns matched somewhere, a trailing footer gives each pattern's distinct-file count and the overlap. Two patterns get an exact crosstab:
+
+```
+--- files: warn 12, err 41; both: 3 (a.go, b.go, c.go) ---
+```
+
+Three or more report the multi-pattern files with their pattern sets:
+
+```
+--- files: warn 12, err 41, todo 7; multi-pattern: 2 (a.go warn+err, b.go warn+err+todo) ---
+```
+
+`both: 0` is stated explicitly — absence of overlap is a finding. At most 5 files are named (`+N more` covers the rest); counts are whole-scan and post-filter, qualified with `(scan stopped early)` like the no-matches footer when a limit cut the scan.
 
 ### Examples
 
@@ -2350,6 +2437,65 @@ hprscript -p 'cli\.limit' -elide -scope cpp src/runner.cpp
 - Renders a whole file's kept matches in one call rather than streaming per match, so it's mutually exclusive with `-sample` (see [Sample mode](#sample-mode--sample-n)).
 - `-m` caps how many of a file's matches participate in the render; there's no mid-file stopping point the way per-match modes have one.
 - No per-match pattern-id tagging inside a rendered window (unlike `-llm`'s `[<pat>]` tags) — use `-llm` or the default JSON mode when you need to attribute a specific line to a specific pattern.
+
+---
+
+## Scope rollup (`-rollup`)
+
+Between per-match lines (`-llm`) and ranked files (`-hotspots`) there's a missing altitude: *which functions* are involved, and how heavily. Ten hits inside one function is one fact, not ten. `-rollup` renders one line per innermost enclosing scope — line range, kind and name, match count with a per-pattern breakdown (count-descending), plus the scope's first matched line as a representative:
+
+```bash
+hprscript -p 'work\(\)' -name w -p 'other\(\)' -name o -rollup pkg/
+# →
+# pkg/m.go
+#   3-7 func Alpha — 3 hits (w×2, o×1)
+#     4: 	work()
+#   9-11 func Beta — 1 hit (w×1)
+#     10: 	work()
+# --- files: w 1, o 1; both: 1 (pkg/m.go) ---
+```
+
+Implies `-scope auto` when no `-scope` config is given (same convention as `-elide`). Matches outside any detected scope — including whole files in languages without a scope pack — group under a single `(top level)` row, so a config file or log collapses to a one-row-per-file summary. The per-pattern breakdown is omitted when only one pattern is active.
+
+`-rollup` is an output mode, mutually exclusive with `-j`/`-f`/`-c`/`-o`/`-format`/`-absent`/`-llm`/`-elide` and with `-sample` (it renders whole-file batches). It participates in the [query header and result footers](#query-header-and-result-footers) like `-llm` and `-elide`. `-m` caps how many of a file's matches participate.
+
+Use it as the first call of an investigation — it answers "where is this concentrated?" in a handful of tokens — then drill into specific scopes with `-in-scope` or `-elide`.
+
+---
+
+## Stable refs & expand (`-refs` / `hprscript expand`)
+
+Search output names every hit as `file:line`. `hprscript expand` turns that pointer into the full enclosing scope — the drill-down half of the search → expand loop — without the caller reconstructing a pattern and re-scanning:
+
+```bash
+hprscript -p 'work\(\)' -llm pkg/m.go
+# pkg/m.go
+#   4: 	work()
+
+hprscript expand pkg/m.go:4
+# pkg/m.go:3-7 func Alpha
+# func Alpha() {
+# 	work()
+# 	work()
+# 	other()
+# }
+```
+
+Multiple refs expand in one call (blank-line separated). The scope pack resolves per file (`-scope auto` semantics; `-scope`/`-scope-pattern` override). A line outside any detected scope falls back to a numbered context window with the ref line marked `>` (window size from `-C`, default 5). `-max-block-bytes` caps each render at a line boundary with an explicit `… (+N more lines)` marker.
+
+**Verified refs.** Files change between a search and the follow-up — especially mid-edit. `-refs` (in `-llm`/`-rollup` search output) appends a content check to each line number:
+
+```
+  4@1a87e3: 	work()
+```
+
+The hash covers the line's whitespace-trimmed text. `expand file:line@hash` verifies it before rendering: an unchanged line expands normally; a line whose content moved (code inserted above it) is found again by content and reported as `(ref line moved: 4 → 7)`; a line that no longer exists anywhere reports in-band as stale and exits 3 — expand never silently renders the wrong code:
+
+```
+pkg/m.go:4@ffffff: stale — line 4 changed and no line with this hash exists
+```
+
+Exit codes: 0 = every ref expanded, 3 = at least one stale ref (reported on stdout), 2 = bad ref syntax or unreadable file (stderr). `expand` is read-only, takes refs rather than patterns, and rejects output-mode flags.
 
 ---
 

@@ -11,6 +11,7 @@
 #include "pipeline.hpp"
 #include "planner.hpp"
 #include "rank.hpp"
+#include "roles.hpp"
 #include "scope.hpp"
 #include "seen.hpp"
 #include "walker.hpp"
@@ -69,6 +70,8 @@ struct BufferedFile {
     hpr::LineIndex idx;
     hpr::ScopeIndex scope;
     bool scope_built = false;
+    hpr::RoleIndex roles;
+    bool roles_built = false;
     std::vector<hpr::Match> kept;
 };
 
@@ -76,7 +79,7 @@ BufferedFile buffer_file(const std::string &display_name,
                          std::string_view content,
                          const std::string &eff_scope_lang,
                          const hpr::ScopeConfig &user_scope_custom,
-                         bool rebuild_scope) {
+                         bool rebuild_scope, bool rebuild_roles = false) {
     BufferedFile bf;
     bf.path = display_name;
     bf.content.assign(content.data(), content.size());
@@ -90,7 +93,32 @@ BufferedFile buffer_file(const std::string &display_name,
                 bf.scope_built = true;
         }
     }
+    if (rebuild_roles) {
+        if (const hpr::RoleConfig *rc =
+                hpr::role_config_for_path(display_name)) {
+            bf.roles.build(bf.content, *rc, bf.idx);
+            bf.roles_built = true;
+        }
+    }
     return bf;
+}
+
+// One token per input source, in the walker's precedence order: globs,
+// positional paths, file lists, git selections. Shared by -explain-plan's
+// stage.inputs and the -llm/-elide query header so the two never drift.
+std::vector<std::string> input_tokens(const hpr::Cli &cli) {
+    std::vector<std::string> in;
+    in.insert(in.end(), cli.globs.begin(), cli.globs.end());
+    in.insert(in.end(), cli.positional.begin(), cli.positional.end());
+    for (const auto &fl : cli.file_lists)
+        in.push_back(std::string(fl.nul ? "files0:" : "files:") + fl.path);
+    if (cli.git_changed) in.push_back("git:changed");
+    if (cli.git_staged) in.push_back("git:staged");
+    if (cli.git_untracked) in.push_back("git:untracked");
+    for (const auto &range : cli.git_ranges)
+        in.push_back("git:range:" + range);
+    if (in.empty()) in.push_back("<stdin>");
+    return in;
 }
 
 // Render a buffered file's matches via -elide's logic into an owned string
@@ -150,17 +178,7 @@ int run_search(const Cli &cli) {
         stage.id = "scan0";
         stage.sets = {"quick"};
         stage.patterns = patterns.size();
-        stage.inputs.insert(stage.inputs.end(), cli.globs.begin(), cli.globs.end());
-        stage.inputs.insert(stage.inputs.end(), cli.positional.begin(),
-                            cli.positional.end());
-        for (const auto &fl : cli.file_lists)
-            stage.inputs.push_back(std::string(fl.nul ? "files0:" : "files:") + fl.path);
-        if (cli.git_changed) stage.inputs.push_back("git:changed");
-        if (cli.git_staged) stage.inputs.push_back("git:staged");
-        if (cli.git_untracked) stage.inputs.push_back("git:untracked");
-        for (const auto &range : cli.git_ranges)
-            stage.inputs.push_back("git:range:" + range);
-        if (stage.inputs.empty()) stage.inputs.push_back("<stdin>");
+        stage.inputs = input_tokens(cli);
         stage.scope = cli.scope_lang;
         if (stage.scope.empty() &&
             (!cli.scope_pattern.empty() || !cli.in_scopes.empty()))
@@ -256,7 +274,67 @@ int run_search(const Cli &cli) {
     oo.extract_table = extract_table.any() ? &extract_table : nullptr;
     oo.pattern_count = patterns.size();
     oo.global_limit = cli.limit;
+    oo.patterns = &patterns; // outlives the Formatter (borrowed)
+    oo.refs = cli.refs;
+
+    // The three LLM-facing modes share the query header and the trailing
+    // co-occurrence / no-matches footers.
+    const bool llm_facing = oo.mode == OutputMode::Llm ||
+                            oo.mode == OutputMode::Elide ||
+                            oo.mode == OutputMode::Rollup;
+
+    // Query header: when any pattern carries a description, LLM-facing
+    // output opens with an echo of the interpreted query plus a one-line
+    // legend per pattern. Pre-rendered here so the Formatter stays ignorant
+    // of Cli; patterns without a description fall back to their regexp so
+    // the legend is complete on its own.
+    if (llm_facing) {
+        bool any_desc = false;
+        for (const auto &p : patterns)
+            if (!p.desc.empty()) { any_desc = true; break; }
+        if (any_desc) {
+            auto flatten = [](std::string_view sv) {
+                std::string out(sv);
+                for (char &c : out)
+                    if (c == '\n' || c == '\r' || c == '\t') c = ' ';
+                return out;
+            };
+            std::string head = "query: ";
+            head += std::to_string(patterns.size());
+            head += patterns.size() == 1 ? " pattern over " : " patterns over ";
+            std::vector<std::string> toks = input_tokens(cli);
+            for (size_t i = 0; i < toks.size(); ++i) {
+                if (i) head += ", ";
+                head += toks[i];
+            }
+            oo.header_lines.push_back(std::move(head));
+            for (const auto &p : patterns) {
+                std::string line = "  ";
+                line += p.id;
+                line += " \xE2\x80\x94 "; // em dash
+                if (!p.desc.empty()) {
+                    line += flatten(p.desc);
+                } else if (!p.regexp.empty()) {
+                    line += '/';
+                    line += flatten(p.regexp);
+                    line += '/';
+                } else {
+                    line += "(ident group)";
+                }
+                oo.header_lines.push_back(std::move(line));
+            }
+        }
+    }
     Formatter fmt(oo, stdout);
+
+    // Role classification is on by default for the per-match output modes
+    // that surface it (JSONL `role`, -llm tags, -format $ROLE). The index is
+    // built lazily, only for files that actually have kept matches.
+    const bool roles_enabled =
+        !cli.no_roles &&
+        (oo.mode == OutputMode::JsonLines || oo.mode == OutputMode::Llm ||
+         oo.mode == OutputMode::Custom);
+
     // Block extraction populates `block_line_start`/`_end` from the line
     // index, so we need it whenever block delimiters are configured (even
     // for output modes that wouldn't otherwise build it).
@@ -298,7 +376,7 @@ int run_search(const Cli &cli) {
     // context anyway.
     std::string eff_scope_lang = cli.scope_lang;
     if ((tf.scope_needed() || oo.mode == OutputMode::Elide ||
-         cli.budget_bytes > 0) &&
+         oo.mode == OutputMode::Rollup || cli.budget_bytes > 0) &&
         eff_scope_lang.empty() && cli.scope_pattern.empty())
         eff_scope_lang = "auto";
     bool scope_enabled = !eff_scope_lang.empty() ||
@@ -356,11 +434,13 @@ int run_search(const Cli &cli) {
         // Sample is incompatible with output modes that don't emit per-match
         // data — let the user know rather than silently doing nothing.
         if (oo.mode == OutputMode::FilesOnly || oo.mode == OutputMode::Counts ||
-            oo.mode == OutputMode::Absent || oo.mode == OutputMode::Elide) {
+            oo.mode == OutputMode::Absent || oo.mode == OutputMode::Elide ||
+            oo.mode == OutputMode::Rollup) {
             std::fprintf(stderr,
                          "hprscript: -sample requires a per-match output mode "
-                         "(default JSONL, -o, -format, -llm) — -elide renders "
-                         "whole-file batches and doesn't compose with -sample\n");
+                         "(default JSONL, -o, -format, -llm) — -elide/-rollup "
+                         "render whole-file batches and don't compose with "
+                         "-sample\n");
             return 2;
         }
     }
@@ -496,6 +576,26 @@ int run_search(const Cli &cli) {
                              ident_groups);
     const bool have_rels = !cli.relations.empty();
 
+    // Kept (post-filter) matches per pattern across the whole scan — the
+    // source of truth for the -llm/-elide "no matches" footer. Counted here
+    // rather than in the Formatter because buffering modes (-sample,
+    // -hotspots) only show a subset: "matched nowhere in the scan" must not
+    // depend on what happened to be displayed.
+    std::vector<uint64_t> pattern_hits(patterns.size(), 0);
+
+    // Cross-pattern co-occurrence, per file: distinct-file counts per
+    // pattern, plus which files matched more than one pattern. Feeds the
+    // trailing co-occurrence footer in the LLM-facing modes.
+    std::vector<uint64_t> pattern_file_counts(patterns.size(), 0);
+    uint64_t multi_pattern_files = 0;
+    struct MultiFile {
+        std::string file;
+        std::vector<uint32_t> pats;
+    };
+    std::vector<MultiFile> multi_sample; // first few, for the footer's list
+    static constexpr size_t MULTI_SAMPLE_CAP = 5;
+    std::vector<char> file_pats(patterns.size()); // per-file scratch
+
     auto scan_buf = [&](const std::string &display_name,
                         std::string_view content) -> bool {
         LineIndex idx;
@@ -526,6 +626,30 @@ int run_search(const Cli &cli) {
             !fw.pass(kept, patterns.size(), display_name, churn_map)) {
             fmt.on_file_end(display_name, false);
             return true;
+        }
+
+        for (const auto &m : kept) ++pattern_hits[m.pattern_index];
+
+        if (!kept.empty()) {
+            std::fill(file_pats.begin(), file_pats.end(), 0);
+            for (const auto &m : kept) file_pats[m.pattern_index] = 1;
+            uint32_t distinct = 0;
+            for (size_t pi = 0; pi < file_pats.size(); ++pi) {
+                if (!file_pats[pi]) continue;
+                ++pattern_file_counts[pi];
+                ++distinct;
+            }
+            if (distinct >= 2) {
+                ++multi_pattern_files;
+                if (multi_sample.size() < MULTI_SAMPLE_CAP) {
+                    MultiFile mf;
+                    mf.file = display_name;
+                    for (size_t pi = 0; pi < file_pats.size(); ++pi)
+                        if (file_pats[pi])
+                            mf.pats.push_back(static_cast<uint32_t>(pi));
+                    multi_sample.push_back(std::move(mf));
+                }
+            }
         }
 
         // -records line (with -absent): emit one record per non-empty line
@@ -572,7 +696,8 @@ int run_search(const Cli &cli) {
             sample_files.push_back(buffer_file(display_name, content,
                                                eff_scope_lang,
                                                user_scope_custom,
-                                               scope_ptr != nullptr));
+                                               scope_ptr != nullptr,
+                                               roles_enabled));
             stats.buffered_bytes_peak += content.size();
             for (size_t mi = 0; mi < kept.size(); ++mi) {
                 if (sample_recs.size() >= SAMPLE_REC_CAP) {
@@ -652,13 +777,33 @@ int run_search(const Cli &cli) {
                 // and discarded like -budget — so every mark commits.
                 if (seen_active) for (const auto &m : marks) seen_store.mark(m);
             }
+        } else if (oo.mode == OutputMode::Rollup) {
+            std::vector<Match> capped = kept;
+            if (cli.per_file_limit > 0 &&
+                capped.size() > static_cast<size_t>(cli.per_file_limit))
+                capped.resize(static_cast<size_t>(cli.per_file_limit));
+            if (!capped.empty()) {
+                had_match = true;
+                fmt.on_file_rollup(display_name, capped, content, idx,
+                                   scope_ptr);
+            }
         } else {
+            RoleIndex role_idx;
+            const RoleIndex *roles_ptr = nullptr;
+            if (roles_enabled && !kept.empty()) {
+                if (const RoleConfig *rc =
+                        role_config_for_path(display_name)) {
+                    role_idx.build(content, *rc, idx);
+                    roles_ptr = &role_idx;
+                }
+            }
             uint64_t per_file = 0;
             for (const auto &m : kept) {
                 had_match = true;
                 ++per_file;
                 const Pattern &pat = patterns[m.pattern_index];
-                fmt.on_match(display_name, pat, m, content, idx, scope_ptr);
+                fmt.on_match(display_name, pat, m, content, idx, scope_ptr,
+                             roles_ptr);
                 if (fmt.over_budget()) break;
                 if (cli.per_file_limit > 0 &&
                     per_file >= static_cast<uint64_t>(cli.per_file_limit)) break;
@@ -782,7 +927,8 @@ int run_search(const Cli &cli) {
             const BufferedFile &sf = sample_files[r.file_idx];
             const Pattern &pat = patterns[r.m.pattern_index];
             fmt.on_match(sf.path, pat, r.m, sf.content, sf.idx,
-                         sf.scope_built ? &sf.scope : nullptr);
+                         sf.scope_built ? &sf.scope : nullptr,
+                         sf.roles_built ? &sf.roles : nullptr);
             if (fmt.over_budget()) {
                 if (stats.stop_reason.empty())
                     stats.stop_reason = "output_budget";
@@ -811,6 +957,9 @@ int run_search(const Cli &cli) {
                 if (seen_active) for (const auto &m : marks) seen_store.mark(m);
                 ++hs_emitted_rows;
             } else if (oo.mode == OutputMode::Llm) {
+                // Hotspot rows bypass the Formatter, so the query header
+                // has to be requested explicitly (idempotent).
+                fmt.emit_header();
                 std::string line = r.file;
                 line += ':';
                 line += std::to_string(r.window_lo);
@@ -990,6 +1139,62 @@ int run_search(const Cli &cli) {
         }
     }
 
+    if (llm_facing) {
+        std::vector<std::string> zero;
+        for (size_t i = 0; i < patterns.size(); ++i)
+            if (pattern_hits[i] == 0) zero.push_back(patterns[i].id);
+        fmt.set_zero_match_patterns(std::move(zero), patterns.size());
+
+        // Co-occurrence footer: batched patterns are usually batched to be
+        // correlated — hand over the per-file join instead of leaving it to
+        // the reader. Only meaningful when at least two patterns matched
+        // somewhere; `both: 0` is stated explicitly (absence of overlap is
+        // a finding). Counts are whole-scan, qualified on early stops.
+        size_t active = 0;
+        for (uint64_t c : pattern_file_counts)
+            if (c > 0) ++active;
+        if (patterns.size() >= 2 && active >= 2) {
+            const bool stopped = stats.stop_reason == "limit" ||
+                                 stats.stop_reason == "output_budget";
+            std::string f = stopped ? "--- files (scan stopped early): "
+                                    : "--- files: ";
+            bool first = true;
+            for (size_t i = 0; i < patterns.size(); ++i) {
+                if (pattern_file_counts[i] == 0) continue;
+                if (!first) f += ", ";
+                first = false;
+                f += patterns[i].id;
+                f += ' ';
+                f += std::to_string(pattern_file_counts[i]);
+            }
+            f += "; ";
+            f += (patterns.size() == 2) ? "both: " : "multi-pattern: ";
+            f += std::to_string(multi_pattern_files);
+            if (multi_pattern_files > 0) {
+                f += " (";
+                for (size_t i = 0; i < multi_sample.size(); ++i) {
+                    if (i) f += ", ";
+                    f += multi_sample[i].file;
+                    if (patterns.size() > 2) {
+                        f += ' ';
+                        for (size_t k = 0; k < multi_sample[i].pats.size(); ++k) {
+                            if (k) f += '+';
+                            f += patterns[multi_sample[i].pats[k]].id;
+                        }
+                    }
+                }
+                if (multi_pattern_files > multi_sample.size()) {
+                    f += ", +";
+                    f += std::to_string(multi_pattern_files -
+                                        multi_sample.size());
+                    f += " more";
+                }
+                f += ')';
+            }
+            f += " ---";
+            fmt.set_cooccurrence_footer(std::move(f));
+        }
+    }
     fmt.on_complete();
 
     if (cli.summary) {

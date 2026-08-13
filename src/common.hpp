@@ -24,6 +24,10 @@ struct Pattern {
     bool ucp = false;
     double weight = 1.0;        // reserved for ranking mode (post-MVP)
 
+    // Free-text meaning of the pattern (-desc / rule-file `description`).
+    // Surfaced once as a query-legend line in -llm/-elide output.
+    std::string desc;
+
     // Reference-only pattern (edit mode's -ref): participates in matching —
     // relations and -file-where see its matches — but never produces edit
     // sites. The qualifier in `-far hit:allow:0` needs this, or its own

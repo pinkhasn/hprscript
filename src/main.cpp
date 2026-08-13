@@ -11,6 +11,7 @@
 #include "cli.hpp"
 #include "edit.hpp"
 #include "edit_plan.hpp"
+#include "expand.hpp"
 #include "investigate.hpp"
 #include "query.hpp"
 #include "runner.hpp"
@@ -61,6 +62,10 @@ int main(int argc, char **argv) {
 
     if (cli.investigate.active) {
         return hpr::run_investigate(cli);
+    }
+
+    if (cli.expand.active) {
+        return hpr::run_expand(cli);
     }
 
     // Edit subcommand (`hprscript edit …`) — the only mode that can write.

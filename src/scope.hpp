@@ -56,6 +56,12 @@ public:
     // (smallest) containing range wins.
     const ScopeRange *find_innermost(uint64_t offset) const;
 
+    // Scope whose signature (anchor) line is `line` (1-based), or nullptr.
+    // A match on this line sits on the definition itself, not inside a body —
+    // role classification renders it as `def` rather than `in`. Signatures
+    // spanning multiple lines only register their first line.
+    const ScopeRange *anchor_on_line(uint32_t line) const;
+
     // Full range list, sorted by start_off ascending (nested ranges are
     // interleaved). Used for ancestor-chain checks (-in-scope), anchorless
     // scope edits, and -list-scopes.

@@ -63,7 +63,7 @@ bool parse_nonneg(const char *s, int64_t &out) {
 bool set_output_mode(Cli &cli, OutputMode mode) {
     if (cli.out_mode_set) {
         cli.error = true;
-        cli.error_message = "output modes -j/-f/-c/-o/-format/-absent/-llm/-elide are mutually exclusive";
+        cli.error_message = "output modes -j/-f/-c/-o/-format/-absent/-llm/-elide/-rollup are mutually exclusive";
         return false;
     }
     cli.out_mode = mode;
@@ -182,6 +182,7 @@ void print_help(FILE *out) {
 "  hprscript investigate -p <seed> [options] [inputs]\n"
 "  hprscript query -q '<json>' [input overrides]\n"
 "  hprscript query -query <path> [input overrides]\n"
+"  hprscript expand <file:line[@hash]> [...refs]\n"
 "  hprscript edit -p <pat> <edit flags> [files...]\n"
 "  hprscript apply <plan.json> [apply flags]\n"
 "\n"
@@ -192,9 +193,11 @@ void print_help(FILE *out) {
 "  -Fi <string>     Case-insensitive fixed-string pattern\n"
 "  -name <id>       Name the preceding pattern (shown as pat/$PAT_ID, usable\n"
 "                   as the A/B side of relations and in -file-where)\n"
+"  -desc <text>     Describe the preceding pattern; descriptions print once\n"
+"                   as a query-legend header in -llm/-elide output\n"
 "  -patterns-from <f>  Load patterns from a JSONL rule file: one object per\n"
-"                   line {id, regexp|literal, case_insensitive, word_boundary,\n"
-"                   utf8}; '#' comment lines allowed (repeatable)\n"
+"                   line {id, regexp|literal, description, case_insensitive,\n"
+"                   word_boundary, utf8}; '#' comment lines allowed (repeatable)\n"
 "  -extract n1,n2,…  Re-extract capture groups from the preceding -p/-pi\n"
 "  -ident 't1 t2 …'  Match identifiers whose subtokens include ALL given\n"
 "                   terms, regardless of casing/separator (parseConfig ~\n"
@@ -213,6 +216,12 @@ void print_help(FILE *out) {
 "  -git-added-lines Restrict matches to lines ADDED by the selected diffs\n"
 "                   (needs -git-changed/-staged/-range; -p mode only)\n"
 "  -w               Whole-word match (\\b…\\b)\n"
+"  -no-roles        Disable per-match role classification (the `role` JSONL\n"
+"                   field, [def]/[comment]/[string]/[import] tags in -llm,\n"
+"                   and $ROLE in -format)\n"
+"  -refs            Append a @hash content check to line numbers in\n"
+"                   -llm/-rollup output; the resulting file:line@hash refs\n"
+"                   are verified by 'hprscript expand'\n"
 "  -no-utf8         Disable UTF-8 mode (byte-level matching)\n"
 "  -ucp             Enable Unicode \\w/\\d/\\s (may reject some patterns)\n"
 "  -limit <n>       Max global results\n"
@@ -234,10 +243,16 @@ void print_help(FILE *out) {
 "                   each pattern (record-level absence, e.g. JSONL fields)\n"
 "  -llm             Token-efficient text for LLM consumption (auto-detects\n"
 "                   block/scope; dedupes file paths; prints a 'limit reached'\n"
-"                   footer when -limit or -max-output-bytes truncates output)\n"
+"                   footer when -limit or -max-output-bytes truncates output;\n"
+"                   ends with a 'no matches' footer naming patterns that\n"
+"                   matched nothing)\n"
 "  -elide           Scope-aware chunks: signature + matched lines with -A/-B\n"
 "                   context; untouched interior lines fold as \"… (+N lines)\"\n"
 "                   (implies -scope auto when no -scope config is given)\n"
+"  -rollup          One line per enclosing scope: line range, name, match\n"
+"                   count with per-pattern breakdown, and one representative\n"
+"                   line; scopeless matches group as \"(top level)\" (implies\n"
+"                   -scope auto when no -scope config is given)\n"
 "\n"
 "Block extraction (with -p):\n"
 "  -block-open <s>   Opening delimiter (e.g. \"{\")\n"
@@ -302,6 +317,12 @@ void print_help(FILE *out) {
 "  -list-scopes         List the scope index instead of searching: one\n"
 "                       record per function/class (JSONL, or -llm flat).\n"
 "                       Honors -in-scope/-in-scope-kind; takes no patterns\n"
+"\n"
+"Expand mode (hprscript expand <file:line[@hash]> ...):\n"
+"  Print the enclosing scope of each ref (a search hit's file:line).\n"
+"  With @hash (from -refs) the line is verified first: a moved line is\n"
+"  found again by content; a vanished one reports 'stale' (exit 3).\n"
+"  Honors -scope*/-C (context for scopeless lines)/-max-block-bytes.\n"
 "\n"
 "Script mode:\n"
 "  -s <json>        Inline script\n"
@@ -395,6 +416,9 @@ Cli parse_cli(int argc, char **argv) {
         first = 2;
     } else if (argc > 1 && eq(argv[1], "query")) {
         cli.query.active = true;
+        first = 2;
+    } else if (argc > 1 && eq(argv[1], "expand")) {
+        cli.expand.active = true;
         first = 2;
     }
     for (int i = first; i < argc; ++i) {
@@ -624,6 +648,34 @@ Cli parse_cli(int argc, char **argv) {
             cli.patterns.back().name = v;
             continue;
         }
+        if (eq(a, "-desc")) {
+            const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
+            if (cli.patterns.empty()) {
+                cli.error = true;
+                cli.error_message = "-desc must follow a -p/-pi/-F/-Fi";
+                return cli;
+            }
+            if (v[0] == '\0') {
+                cli.error = true;
+                cli.error_message = "-desc: empty description";
+                return cli;
+            }
+            if (!cli.patterns.back().desc.empty()) {
+                cli.error = true;
+                cli.error_message = "-desc repeated for the same pattern";
+                return cli;
+            }
+            cli.patterns.back().desc = v;
+            continue;
+        }
+        if (eq(a, "-no-roles") || eq(a, "--no-roles")) {
+            cli.no_roles = true;
+            continue;
+        }
+        if (eq(a, "-refs") || eq(a, "--refs")) {
+            cli.refs = true;
+            continue;
+        }
         if (eq(a, "-glob")) {
             const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
             cli.globs.emplace_back(v);
@@ -730,6 +782,7 @@ Cli parse_cli(int argc, char **argv) {
         if (eq(a, "-absent")) { if (!set_output_mode(cli, OutputMode::Absent)) return cli; continue; }
         if (eq(a, "-llm"))    { if (!set_output_mode(cli, OutputMode::Llm))    return cli; continue; }
         if (eq(a, "-elide"))  { if (!set_output_mode(cli, OutputMode::Elide))  return cli; continue; }
+        if (eq(a, "-rollup")) { if (!set_output_mode(cli, OutputMode::Rollup)) return cli; continue; }
         if (eq(a, "-format")) {
             const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
             if (!set_output_mode(cli, OutputMode::Custom)) return cli;
@@ -1196,6 +1249,19 @@ Cli parse_cli(int argc, char **argv) {
             cli.error_message = "query cannot combine with quick-search output selectors";
         }
     }
+    if (cli.expand.active && !cli.error && !cli.show_help &&
+        !cli.show_version) {
+        if (!cli.patterns.empty() || !cli.patterns_from.empty() ||
+            !cli.script_inline.empty() || !cli.script_path.empty()) {
+            cli.error = true;
+            cli.error_message =
+                "expand takes <file:line[@hash]> refs, not patterns/scripts";
+        } else if (cli.out_mode_set) {
+            cli.error = true;
+            cli.error_message =
+                "expand output is plain text; output-mode flags do not apply";
+        }
+    }
     return cli;
 }
 
@@ -1229,7 +1295,7 @@ bool load_patterns_from(Cli &cli) {
                 if (kv.first != "id" && kv.first != "regexp" &&
                     kv.first != "literal" && kv.first != "case_insensitive" &&
                     kv.first != "word_boundary" && kv.first != "utf8" &&
-                    kv.first != "ref")
+                    kv.first != "ref" && kv.first != "description")
                     return fail("unknown field '" + kv.first + "'");
             }
             const json::Value *re = pr.value.find("regexp");
@@ -1269,6 +1335,11 @@ bool load_patterns_from(Cli &cli) {
             if (const json::Value *v = pr.value.find("ref")) {
                 if (!v->is_bool()) return fail("'ref' must be a boolean");
                 p.ref = v->as_bool();
+            }
+            if (const json::Value *v = pr.value.find("description")) {
+                if (!v->is_string())
+                    return fail("'description' must be a string");
+                p.desc = v->as_string();
             }
             cli.patterns.push_back(std::move(p));
         }

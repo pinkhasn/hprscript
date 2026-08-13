@@ -1,6 +1,8 @@
 #include "output.hpp"
 
 #include "block.hpp"
+#include "expand.hpp" // ref_hash6 (-refs)
+#include "roles.hpp"
 #include "seen.hpp"
 
 #include <algorithm>
@@ -166,6 +168,29 @@ std::string_view truncate_safe(std::string_view sv, uint64_t limit,
     return sv.substr(0, n);
 }
 
+// Per-match role: "comment"/"string"/"def"/"import", or nullptr for plain
+// code. Position-accurate lexer roles win over the line-based ones — a
+// trailing comment on a signature line is a comment, not a def. `def_out`
+// receives the defined scope when the result is "def".
+const char *resolve_role(const RoleIndex *roles, const ScopeIndex *scope,
+                         uint64_t offset, uint32_t line,
+                         const ScopeRange **def_out) {
+    if (def_out) *def_out = nullptr;
+    if (roles) {
+        LexRole lr = roles->at(offset);
+        if (lr == LexRole::Comment) return "comment";
+        if (lr == LexRole::Str) return "string";
+    }
+    if (scope) {
+        if (const ScopeRange *sr = scope->anchor_on_line(line)) {
+            if (def_out) *def_out = sr;
+            return "def";
+        }
+    }
+    if (roles && roles->import_line(line)) return "import";
+    return nullptr;
+}
+
 } // namespace
 
 Formatter::Formatter(OutputOptions opts, FILE *out) : opts_(opts), out_(out) {}
@@ -235,7 +260,8 @@ std::string_view Formatter::context_block(std::string_view buf,
 
 void Formatter::emit_json(const std::string &file, const Pattern &pattern,
                           const Match &m, std::string_view buf,
-                          const LineIndex &idx, const ScopeIndex *scope) {
+                          const LineIndex &idx, const ScopeIndex *scope,
+                          const RoleIndex *roles) {
     refresh_file_cache(file);
     refresh_pattern_cache(pattern);
 
@@ -326,6 +352,11 @@ void Formatter::emit_json(const std::string &file, const Pattern &pattern,
             s += "}";
         }
     }
+    if (const char *role = resolve_role(roles, scope, m.from, line, nullptr)) {
+        s += ",\"role\":\"";
+        s += role;
+        s += '"';
+    }
     s += "}\n";
     write_out(s);
 }
@@ -347,7 +378,8 @@ void Formatter::emit_match_only(std::string_view buf, const Match &m,
 
 void Formatter::emit_custom(const std::string &file, const Pattern &pattern,
                             const Match &m, std::string_view buf,
-                            const LineIndex &idx, const ScopeIndex *scope) {
+                            const LineIndex &idx, const ScopeIndex *scope,
+                            const RoleIndex *roles) {
     uint32_t line = idx.line_of(m.from);
     uint32_t col = idx.col_of(m.from);
     std::string_view match_text(buf.data() + m.from, m.to - m.from);
@@ -392,6 +424,7 @@ void Formatter::emit_custom(const std::string &file, const Pattern &pattern,
         return true;
     };
     const ScopeRange *sr = (scope ? scope->find_innermost(m.from) : nullptr);
+    const char *role = resolve_role(roles, scope, m.from, line, nullptr);
     static const char EXTRACT_PREFIX[] = "$EXTRACT_";
     static constexpr size_t EXTRACT_PREFIX_LEN = sizeof(EXTRACT_PREFIX) - 1;
     for (size_t i = 0; i < fmt.size();) {
@@ -415,6 +448,7 @@ void Formatter::emit_custom(const std::string &file, const Pattern &pattern,
         if (try_num(i, "$FROM", m.from)) continue;
         if (try_num(i, "$TO", m.to)) continue;
         if (try_str(i, "$PAT_ID", pattern.id)) continue;
+        if (try_str(i, "$ROLE", role ? std::string_view(role) : std::string_view{})) continue;
         if (try_str(i, "$ENCLOSING_NAME", sr ? std::string_view(sr->name) : std::string_view{})) continue;
         if (try_str(i, "$ENCLOSING_KIND", sr ? std::string_view(sr->kind) : std::string_view{})) continue;
         if (try_num(i, "$ENCLOSING_LINE_START", sr ? sr->line_start : 0)) continue;
@@ -454,9 +488,27 @@ void Formatter::emit_custom(const std::string &file, const Pattern &pattern,
     write_out(out);
 }
 
+void Formatter::emit_header() {
+    if (header_done_) return;
+    header_done_ = true;
+    if (opts_.mode != OutputMode::Llm && opts_.mode != OutputMode::Elide &&
+        opts_.mode != OutputMode::Rollup)
+        return;
+    if (opts_.header_lines.empty()) return;
+    auto &s = scratch_;
+    s.clear();
+    for (const auto &line : opts_.header_lines) {
+        s += line;
+        s += '\n';
+    }
+    write_out(s);
+}
+
 void Formatter::emit_llm(const std::string &file, const Pattern &pattern,
                          const Match &m, std::string_view buf,
-                         const LineIndex &idx, const ScopeIndex *scope) {
+                         const LineIndex &idx, const ScopeIndex *scope,
+                         const RoleIndex *roles) {
+    emit_header();
     auto &s = scratch_;
 
     // Per-file header: print the path once per consecutive run on that file.
@@ -500,6 +552,10 @@ void Formatter::emit_llm(const std::string &file, const Pattern &pattern,
     s.clear();
     s += "  ";
     append_uint32(s, line);
+    if (opts_.refs) {
+        s += '@';
+        s += ref_hash6(idx.line_text(line));
+    }
     s += ": ";
     if (opts_.pattern_count > 1 && !pattern.id.empty()) {
         s += '[';
@@ -511,7 +567,22 @@ void Formatter::emit_llm(const std::string &file, const Pattern &pattern,
     if (!ctx_view.empty() && ctx_view.back() == '\n')
         ctx_view.remove_suffix(1);
     s.append(ctx_view.data(), ctx_view.size());
-    if (scope) {
+    const ScopeRange *def_sr = nullptr;
+    const char *role = resolve_role(roles, scope, m.from, line, &def_sr);
+    if (def_sr) {
+        // The match sits on the signature line itself — `[def func X]`
+        // rather than the misleading `[in func X]`.
+        s += "  [def ";
+        s.append(def_sr->kind);
+        s += ' ';
+        s.append(def_sr->name);
+        s += ']';
+    } else if (role) {
+        s += "  [";
+        s += role;
+        s += ']';
+    }
+    if (scope && !def_sr) {
         if (const ScopeRange *sr = scope->find_innermost(m.from)) {
             s += "  [in ";
             s.append(sr->kind);
@@ -542,6 +613,7 @@ void Formatter::on_file_elide(const std::string &file,
                               const ScopeIndex *scope, const SeenStore *seen,
                               std::vector<SeenMark> *marks_out) {
     if (kept.empty()) return;
+    emit_header();
     emitted_ += static_cast<uint64_t>(kept.size());
 
     bool first_block = true;
@@ -704,12 +776,116 @@ void Formatter::on_file_elide(const std::string &file,
     flush();
 }
 
+void Formatter::on_file_rollup(const std::string &file,
+                               const std::vector<Match> &kept,
+                               std::string_view buf, const LineIndex &idx,
+                               const ScopeIndex *scope) {
+    if (kept.empty()) return;
+    emit_header();
+    emitted_ += static_cast<uint64_t>(kept.size());
+
+    // Group by innermost enclosing scope in first-seen order. Unlike
+    // -elide's contiguous-run flushing, a map keeps a scope's count whole
+    // even when nesting interleaves its matches; every no-scope match lands
+    // in one shared "(top level)" group.
+    struct Group {
+        const ScopeRange *sr;
+        std::vector<const Match *> ms;
+    };
+    std::vector<Group> groups;
+    std::unordered_map<const ScopeRange *, size_t> group_of;
+    for (const auto &m : kept) {
+        const ScopeRange *sr = scope ? scope->find_innermost(m.from) : nullptr;
+        auto it = group_of.find(sr);
+        if (it == group_of.end()) {
+            group_of.emplace(sr, groups.size());
+            groups.push_back({sr, {&m}});
+        } else {
+            groups[it->second].ms.push_back(&m);
+        }
+    }
+
+    auto &s = scratch_;
+    if (llm_last_file_ != file) {
+        llm_last_file_ = file;
+        s.clear();
+        s.append(file);
+        s += '\n';
+        write_out(s);
+    }
+
+    for (const auto &g : groups) {
+        s.clear();
+        s += "  ";
+        if (g.sr) {
+            append_uint32(s, g.sr->line_start);
+            s += '-';
+            append_uint32(s, g.sr->line_end);
+            s += ' ';
+            s += g.sr->kind;
+            s += ' ';
+            s += g.sr->name;
+        } else {
+            s += "(top level)";
+        }
+        s += " \xE2\x80\x94 "; // em dash
+        append_uint(s, g.ms.size());
+        s += g.ms.size() == 1 ? " hit" : " hits";
+
+        // Per-pattern breakdown, count-descending — only worth the tokens
+        // when more than one pattern is in play.
+        if (opts_.pattern_count > 1 && opts_.patterns) {
+            std::vector<std::pair<uint32_t, uint64_t>> counts; // (pat, n)
+            for (const Match *m : g.ms) {
+                bool found = false;
+                for (auto &c : counts)
+                    if (c.first == m->pattern_index) {
+                        ++c.second;
+                        found = true;
+                        break;
+                    }
+                if (!found) counts.push_back({m->pattern_index, 1});
+            }
+            std::stable_sort(counts.begin(), counts.end(),
+                             [](const auto &a, const auto &b) {
+                                 return a.second > b.second;
+                             });
+            s += " (";
+            for (size_t i = 0; i < counts.size(); ++i) {
+                if (i) s += ", ";
+                s += (*opts_.patterns)[counts[i].first].id;
+                s += "\xC3\x97"; // ×
+                append_uint(s, counts[i].second);
+            }
+            s += ')';
+        }
+        s += '\n';
+
+        // One representative: the group's first match line.
+        uint32_t line = idx.line_of(g.ms.front()->from);
+        std::string_view text = idx.line_text(line);
+        text = truncate_safe(text, opts_.max_context_bytes, nullptr);
+        if (!text.empty() && text.back() == '\n') text.remove_suffix(1);
+        s += "    ";
+        append_uint32(s, line);
+        if (opts_.refs) {
+            s += '@';
+            s += ref_hash6(idx.line_text(line));
+        }
+        s += ": ";
+        s.append(text.data(), text.size());
+        s += '\n';
+        write_out(s);
+    }
+}
+
 void Formatter::on_match(const std::string &file, const Pattern &pattern,
                          const Match &m, std::string_view buf,
-                         const LineIndex &idx, const ScopeIndex *scope) {
+                         const LineIndex &idx, const ScopeIndex *scope,
+                         const RoleIndex *roles) {
     ++emitted_;
     switch (opts_.mode) {
-        case OutputMode::JsonLines:   emit_json(file, pattern, m, buf, idx, scope); break;
+        case OutputMode::JsonLines:   emit_json(file, pattern, m, buf, idx, scope, roles); break;
         case OutputMode::FilesOnly:
             // Print the file once, on first match. Counter tracked below.
             if (per_file_counts_[file]++ == 0) {
@@ -721,12 +897,14 @@ void Formatter::on_match(const std::string &file, const Pattern &pattern,
             per_file_counts_[file]++;
             break;
         case OutputMode::MatchOnly:   emit_match_only(buf, m, idx); break;
-        case OutputMode::Custom:      emit_custom(file, pattern, m, buf, idx, scope); break;
-        case OutputMode::Llm:         emit_llm(file, pattern, m, buf, idx, scope); break;
+        case OutputMode::Custom:      emit_custom(file, pattern, m, buf, idx, scope, roles); break;
+        case OutputMode::Llm:         emit_llm(file, pattern, m, buf, idx, scope, roles); break;
         case OutputMode::Elide:
-            // Elide renders a whole file's matches at once via
-            // on_file_elide(); it never streams through on_match(). Undo
-            // the ++emitted_ above so callers can't double-count by mistake.
+        case OutputMode::Rollup:
+            // Elide/Rollup render a whole file's matches at once via
+            // on_file_elide()/on_file_rollup(); they never stream through
+            // on_match(). Undo the ++emitted_ above so callers can't
+            // double-count by mistake.
             --emitted_;
             break;
         case OutputMode::Absent:
@@ -759,8 +937,35 @@ void Formatter::on_file_end(const std::string &file, bool had_match) {
 }
 
 void Formatter::on_complete() {
-    if (opts_.mode == OutputMode::Llm || opts_.mode == OutputMode::Elide) {
+    if (opts_.mode == OutputMode::Llm || opts_.mode == OutputMode::Elide ||
+        opts_.mode == OutputMode::Rollup) {
         char buf[160];
+        if (!cooccurrence_footer_.empty()) {
+            emit_header();
+            std::string s = cooccurrence_footer_;
+            s += '\n';
+            std::fwrite(s.data(), 1, s.size(), out_);
+        }
+        if (!zero_match_ids_.empty()) {
+            // A batched pattern that matched nothing must be stated, not
+            // inferred from its absence in the output. When the scan stopped
+            // early (limit / output budget) the claim is only valid for the
+            // scanned prefix, so it's qualified.
+            emit_header();
+            std::string s = (limit_hit_ || over_budget_)
+                ? "--- no matches (scan stopped early): "
+                : "--- no matches: ";
+            for (size_t i = 0; i < zero_match_ids_.size(); ++i) {
+                if (i) s += ", ";
+                s += zero_match_ids_[i];
+            }
+            s += " (";
+            s += std::to_string(zero_match_ids_.size());
+            s += " of ";
+            s += std::to_string(patterns_total_);
+            s += patterns_total_ == 1 ? " pattern) ---\n" : " patterns) ---\n";
+            std::fwrite(s.data(), 1, s.size(), out_);
+        }
         if (limit_hit_) {
             int n = std::snprintf(buf, sizeof(buf),
                 "--- limit reached: stopped at %llu matches; more may exist (re-run with -limit 0 for all) ---\n",

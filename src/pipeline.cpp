@@ -428,6 +428,7 @@ std::vector<Pattern> build_patterns(const Cli &cli) {
         p.ucp = p.utf8 && cli.ucp;
         p.extract_names = cp.extract_names;
         p.ref = cp.ref;
+        p.desc = cp.desc;
         patterns.push_back(std::move(p));
         ++regex_i;
     }
@@ -438,6 +439,7 @@ std::vector<Pattern> build_patterns(const Cli &cli) {
         p.id = cp.name.empty() ? "ident" + std::to_string(ident_i) : cp.name;
         // regexp deliberately left empty — ident-backed patterns never
         // reach Matcher::compile.
+        p.desc = cp.desc;
         patterns.push_back(std::move(p));
         ++ident_i;
     }

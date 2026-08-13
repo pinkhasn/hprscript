@@ -22,6 +22,7 @@ namespace hpr {
 
 class SeenStore;    // src/seen.hpp — -seen cross-invocation dedup
 struct SeenMark;
+class RoleIndex;    // src/roles.hpp — comment/string/import classification
 
 enum class OutputMode {
     JsonLines,    // one JSON object per line (default)
@@ -32,6 +33,7 @@ enum class OutputMode {
     Absent,       // grep -L: files where pattern is NOT present
     Llm,          // -llm: token-efficient text for LLM consumption
     Elide,        // -elide: scope-aware chunk rendering, whole file at once
+    Rollup,       // -rollup: one line per enclosing scope with match counts
 };
 
 // True iff the given output mode reads line/col/context from a LineIndex.
@@ -42,6 +44,7 @@ inline bool needs_line_index(OutputMode m) {
         case OutputMode::Custom:
         case OutputMode::Llm:
         case OutputMode::Elide:
+        case OutputMode::Rollup:
             return true;
         case OutputMode::FilesOnly:
         case OutputMode::Counts:
@@ -77,20 +80,39 @@ struct OutputOptions {
     // and surfaced in JSON / format-template output. Pointer is borrowed.
     const ExtractTable *extract_table = nullptr;
 
+    // Full pattern list (borrowed) — Rollup mode needs it to render
+    // per-pattern counts by id. nullptr disables the breakdown.
+    const std::vector<Pattern> *patterns = nullptr;
+
     // LLM mode only: total pattern count (so the formatter can decide whether
     // to prefix records with the pattern id) and the effective global limit
     // (so on_complete can emit a "limit reached" footer).
     size_t pattern_count = 1;
     int64_t global_limit = -1;
+
+    // -refs: append @hash (see ref_hash6 in src/expand.hpp) to line numbers
+    // in Llm/Rollup output, making each hit an expand-verifiable ref.
+    bool refs = false;
+
+    // LLM-facing query header (-llm/-elide only): pre-rendered lines, no
+    // trailing newlines, printed once before the first output. The runner
+    // fills this when any pattern carries a -desc/description; empty = no
+    // header.
+    std::vector<std::string> header_lines;
 };
 
 class Formatter {
 public:
     Formatter(OutputOptions opts, FILE *out);
 
+    // `roles` (optional) classifies the match position lexically; combined
+    // with `scope`'s anchor lines it yields a per-match role —
+    // def/comment/string/import — surfaced as `role` in JSONL, bracket tags
+    // in -llm, and $ROLE in -format. nullptr = no role classification.
     void on_match(const std::string &file, const Pattern &pattern,
                   const Match &m, std::string_view buf, const LineIndex &idx,
-                  const ScopeIndex *scope = nullptr);
+                  const ScopeIndex *scope = nullptr,
+                  const RoleIndex *roles = nullptr);
 
     // -elide mode: render one file's entire kept-match set in a single call,
     // grouped by innermost enclosing scope. Each scope prints its signature
@@ -111,6 +133,16 @@ public:
                        std::string_view buf, const LineIndex &idx,
                        const ScopeIndex *scope, const SeenStore *seen = nullptr,
                        std::vector<SeenMark> *marks_out = nullptr);
+
+    // -rollup mode: render one file's kept-match set as one line per
+    // innermost enclosing scope — `<lines> <kind> <name> — N hits
+    // (<pat>×<n>, …)` plus the first matched line as a representative.
+    // Matches outside any scope group under a single "(top level)" row, so
+    // files without scope detection collapse to a per-file summary. `kept`
+    // must be sorted by `from` (the collector's normal emission order).
+    void on_file_rollup(const std::string &file, const std::vector<Match> &kept,
+                        std::string_view buf, const LineIndex &idx,
+                        const ScopeIndex *scope);
 
     // Record-level absence (-records line with -absent): emit one JSON line
     // for a record (line) of `file` that lacks `pattern`. Only meaningful in
@@ -138,18 +170,41 @@ public:
     // hit. LLM mode prints a "limit reached" footer in on_complete().
     void mark_limit_hit() { limit_hit_ = true; }
 
+    // Print the query header (opts_.header_lines) now if it hasn't printed
+    // yet. Idempotent; no-op outside Llm/Elide or with no header configured.
+    // Emission paths call it internally before the first output; the runner
+    // also calls it before rows that bypass the formatter (-hotspots -llm).
+    void emit_header();
+
+    // Runner reports which patterns ended the scan with zero kept matches
+    // (post-filter, whole scan — not just the shown subset), so
+    // on_complete() can state absence explicitly instead of letting a
+    // batched pattern vanish from Llm/Elide output silently. `total` is the
+    // full pattern count.
+    void set_zero_match_patterns(std::vector<std::string> ids, size_t total) {
+        zero_match_ids_ = std::move(ids);
+        patterns_total_ = total;
+    }
+
+    // Pre-rendered cross-pattern co-occurrence footer (no trailing newline),
+    // built by the runner from whole-scan per-file pattern sets. Printed by
+    // on_complete() in the LLM-facing modes; empty = none.
+    void set_cooccurrence_footer(std::string line) {
+        cooccurrence_footer_ = std::move(line);
+    }
+
 private:
     void emit_json(const std::string &file, const Pattern &pattern,
                    const Match &m, std::string_view buf, const LineIndex &idx,
-                   const ScopeIndex *scope);
+                   const ScopeIndex *scope, const RoleIndex *roles);
     void emit_match_only(std::string_view buf, const Match &m,
                          const LineIndex &idx);
     void emit_custom(const std::string &file, const Pattern &pattern,
                      const Match &m, std::string_view buf, const LineIndex &idx,
-                     const ScopeIndex *scope);
+                     const ScopeIndex *scope, const RoleIndex *roles);
     void emit_llm(const std::string &file, const Pattern &pattern,
                   const Match &m, std::string_view buf, const LineIndex &idx,
-                  const ScopeIndex *scope);
+                  const ScopeIndex *scope, const RoleIndex *roles);
 
     // Compute the joined context block (prev N lines + match line + next N
     // lines) as a single string view into buf. Trailing newline is excluded.
@@ -171,6 +226,10 @@ private:
     uint64_t bytes_emitted_ = 0; // total bytes written to out_
     bool over_budget_ = false;   // sticky once max_output_bytes is exceeded
     bool limit_hit_ = false;     // set by mark_limit_hit() (LLM footer)
+    bool header_done_ = false;   // query header printed (emit_header dedupe)
+    std::vector<std::string> zero_match_ids_; // patterns with 0 kept matches
+    size_t patterns_total_ = 0;  // denominator for the "no matches" footer
+    std::string cooccurrence_footer_; // set_cooccurrence_footer()
     std::string llm_last_file_;  // last file printed as a header (-llm/-elide dedupe)
     std::unordered_map<std::string, uint64_t> per_file_counts_;
 
