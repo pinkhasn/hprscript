@@ -275,6 +275,7 @@ int run_search(const Cli &cli) {
     oo.pattern_count = patterns.size();
     oo.global_limit = cli.limit;
     oo.patterns = &patterns; // outlives the Formatter (borrowed)
+    oo.refs = cli.refs;
 
     // The three LLM-facing modes share the query header and the trailing
     // co-occurrence / no-matches footers.

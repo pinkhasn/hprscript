@@ -65,6 +65,7 @@ hprscript -s '<json>' [files...]
 hprscript -script <path> [files...]
 hprscript script.json [files...]            # positional arg as script file
 cat script.json | hprscript                  # script piped on stdin
+hprscript expand <file:line[@hash]> [...refs]      # print a hit's enclosing scope
 hprscript edit -p <pat> <edit flags> [files...]   # discover/preview/plan edits
 hprscript apply <plan.json> [apply flags]          # verify and apply exact stored edits
 ```
@@ -117,6 +118,7 @@ simultaneous.
 | `-git-added-lines` | Restrict matches to lines **added** by the selected diffs (quick mode; needs `-git-changed`/`-git-staged`/`-git-range`). |
 | `-w` | Whole-word matching (wraps the pattern as `\b(?:expr)\b`) |
 | `-no-roles` | Disable per-match role classification (`role` JSONL field, `[def]`/`[comment]`/`[string]`/`[import]` tags in `-llm`, `$ROLE`). See [Per-match role tags](#per-match-role-tags). |
+| `-refs` | Append a `@hash` content check to line numbers in `-llm`/`-rollup` output, making each hit a ref that `hprscript expand` verifies. See [Stable refs & expand](#stable-refs--expand--refs--hprscript-expand). |
 | `-no-utf8` | Disable UTF-8 mode (byte-level matching — see [UTF-8 / Unicode](#utf-8--unicode-support)) |
 | `-ucp` | Enable Unicode property classes for `\w`/`\d`/`\s` (opt-in; may reject some patterns) |
 | `-limit <n>` | Maximum global results — scanning stops once reached |
@@ -2458,6 +2460,42 @@ Implies `-scope auto` when no `-scope` config is given (same convention as `-eli
 `-rollup` is an output mode, mutually exclusive with `-j`/`-f`/`-c`/`-o`/`-format`/`-absent`/`-llm`/`-elide` and with `-sample` (it renders whole-file batches). It participates in the [query header and result footers](#query-header-and-result-footers) like `-llm` and `-elide`. `-m` caps how many of a file's matches participate.
 
 Use it as the first call of an investigation — it answers "where is this concentrated?" in a handful of tokens — then drill into specific scopes with `-in-scope` or `-elide`.
+
+---
+
+## Stable refs & expand (`-refs` / `hprscript expand`)
+
+Search output names every hit as `file:line`. `hprscript expand` turns that pointer into the full enclosing scope — the drill-down half of the search → expand loop — without the caller reconstructing a pattern and re-scanning:
+
+```bash
+hprscript -p 'work\(\)' -llm pkg/m.go
+# pkg/m.go
+#   4: 	work()
+
+hprscript expand pkg/m.go:4
+# pkg/m.go:3-7 func Alpha
+# func Alpha() {
+# 	work()
+# 	work()
+# 	other()
+# }
+```
+
+Multiple refs expand in one call (blank-line separated). The scope pack resolves per file (`-scope auto` semantics; `-scope`/`-scope-pattern` override). A line outside any detected scope falls back to a numbered context window with the ref line marked `>` (window size from `-C`, default 5). `-max-block-bytes` caps each render at a line boundary with an explicit `… (+N more lines)` marker.
+
+**Verified refs.** Files change between a search and the follow-up — especially mid-edit. `-refs` (in `-llm`/`-rollup` search output) appends a content check to each line number:
+
+```
+  4@1a87e3: 	work()
+```
+
+The hash covers the line's whitespace-trimmed text. `expand file:line@hash` verifies it before rendering: an unchanged line expands normally; a line whose content moved (code inserted above it) is found again by content and reported as `(ref line moved: 4 → 7)`; a line that no longer exists anywhere reports in-band as stale and exits 3 — expand never silently renders the wrong code:
+
+```
+pkg/m.go:4@ffffff: stale — line 4 changed and no line with this hash exists
+```
+
+Exit codes: 0 = every ref expanded, 3 = at least one stale ref (reported on stdout), 2 = bad ref syntax or unreadable file (stderr). `expand` is read-only, takes refs rather than patterns, and rejects output-mode flags.
 
 ---
 

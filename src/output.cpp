@@ -1,6 +1,7 @@
 #include "output.hpp"
 
 #include "block.hpp"
+#include "expand.hpp" // ref_hash6 (-refs)
 #include "roles.hpp"
 #include "seen.hpp"
 
@@ -551,6 +552,10 @@ void Formatter::emit_llm(const std::string &file, const Pattern &pattern,
     s.clear();
     s += "  ";
     append_uint32(s, line);
+    if (opts_.refs) {
+        s += '@';
+        s += ref_hash6(idx.line_text(line));
+    }
     s += ": ";
     if (opts_.pattern_count > 1 && !pattern.id.empty()) {
         s += '[';
@@ -863,6 +868,10 @@ void Formatter::on_file_rollup(const std::string &file,
         if (!text.empty() && text.back() == '\n') text.remove_suffix(1);
         s += "    ";
         append_uint32(s, line);
+        if (opts_.refs) {
+            s += '@';
+            s += ref_hash6(idx.line_text(line));
+        }
         s += ": ";
         s.append(text.data(), text.size());
         s += '\n';

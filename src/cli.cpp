@@ -182,6 +182,7 @@ void print_help(FILE *out) {
 "  hprscript investigate -p <seed> [options] [inputs]\n"
 "  hprscript query -q '<json>' [input overrides]\n"
 "  hprscript query -query <path> [input overrides]\n"
+"  hprscript expand <file:line[@hash]> [...refs]\n"
 "  hprscript edit -p <pat> <edit flags> [files...]\n"
 "  hprscript apply <plan.json> [apply flags]\n"
 "\n"
@@ -218,6 +219,9 @@ void print_help(FILE *out) {
 "  -no-roles        Disable per-match role classification (the `role` JSONL\n"
 "                   field, [def]/[comment]/[string]/[import] tags in -llm,\n"
 "                   and $ROLE in -format)\n"
+"  -refs            Append a @hash content check to line numbers in\n"
+"                   -llm/-rollup output; the resulting file:line@hash refs\n"
+"                   are verified by 'hprscript expand'\n"
 "  -no-utf8         Disable UTF-8 mode (byte-level matching)\n"
 "  -ucp             Enable Unicode \\w/\\d/\\s (may reject some patterns)\n"
 "  -limit <n>       Max global results\n"
@@ -314,6 +318,12 @@ void print_help(FILE *out) {
 "                       record per function/class (JSONL, or -llm flat).\n"
 "                       Honors -in-scope/-in-scope-kind; takes no patterns\n"
 "\n"
+"Expand mode (hprscript expand <file:line[@hash]> ...):\n"
+"  Print the enclosing scope of each ref (a search hit's file:line).\n"
+"  With @hash (from -refs) the line is verified first: a moved line is\n"
+"  found again by content; a vanished one reports 'stale' (exit 3).\n"
+"  Honors -scope*/-C (context for scopeless lines)/-max-block-bytes.\n"
+"\n"
 "Script mode:\n"
 "  -s <json>        Inline script\n"
 "  -script <path>   Script file\n"
@@ -406,6 +416,9 @@ Cli parse_cli(int argc, char **argv) {
         first = 2;
     } else if (argc > 1 && eq(argv[1], "query")) {
         cli.query.active = true;
+        first = 2;
+    } else if (argc > 1 && eq(argv[1], "expand")) {
+        cli.expand.active = true;
         first = 2;
     }
     for (int i = first; i < argc; ++i) {
@@ -657,6 +670,10 @@ Cli parse_cli(int argc, char **argv) {
         }
         if (eq(a, "-no-roles") || eq(a, "--no-roles")) {
             cli.no_roles = true;
+            continue;
+        }
+        if (eq(a, "-refs") || eq(a, "--refs")) {
+            cli.refs = true;
             continue;
         }
         if (eq(a, "-glob")) {
@@ -1230,6 +1247,19 @@ Cli parse_cli(int argc, char **argv) {
                    cli.order_by != Cli::OrderBy::None) {
             cli.error = true;
             cli.error_message = "query cannot combine with quick-search output selectors";
+        }
+    }
+    if (cli.expand.active && !cli.error && !cli.show_help &&
+        !cli.show_version) {
+        if (!cli.patterns.empty() || !cli.patterns_from.empty() ||
+            !cli.script_inline.empty() || !cli.script_path.empty()) {
+            cli.error = true;
+            cli.error_message =
+                "expand takes <file:line[@hash]> refs, not patterns/scripts";
+        } else if (cli.out_mode_set) {
+            cli.error = true;
+            cli.error_message =
+                "expand output is plain text; output-mode flags do not apply";
         }
     }
     return cli;

@@ -33,6 +33,7 @@ Invoke the binary through Bash as `hprscript`. Use one call per reasoning stage 
 | File outline / enclosing function | `-list-scopes` / `-scope auto` |
 | Representative usages | `-sample N` |
 | Which functions are involved, and how heavily | `-rollup` (one line per scope with per-pattern counts) |
+| Full function around a known hit | `hprscript expand file:line[@hash]` (batch refs in one call) |
 | Ranked files / packed evidence | `-hotspots N` / `-budget N` |
 | Compact scope excerpts | `-elide` |
 | Cross-run chunk deduplication | `-elide` or `-budget` with `-seen <path>` |
@@ -80,6 +81,8 @@ hprscript -p 'func\s+(\w+)\(([^)]*)\)' -extract name,args \
 ```
 
 Prefer `-in-scope` over line numbers when code may move. Balanced block tracking is lexical, not language-aware; delimiters inside strings or comments can skew it.
+
+To read the whole function around a hit, run `hprscript expand <file>:<line>` on the hit's location instead of re-searching with block flags; batch several refs in one call. Add `-refs` to the search so hits carry `file:line@hash` — expand then verifies the line, recovers it by content if it moved, and reports `stale` (exit 3) instead of rendering the wrong code after an edit.
 
 Relate named patterns by distance or enclosing scope:
 

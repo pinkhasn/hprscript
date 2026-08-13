@@ -90,6 +90,10 @@ struct OutputOptions {
     size_t pattern_count = 1;
     int64_t global_limit = -1;
 
+    // -refs: append @hash (see ref_hash6 in src/expand.hpp) to line numbers
+    // in Llm/Rollup output, making each hit an expand-verifiable ref.
+    bool refs = false;
+
     // LLM-facing query header (-llm/-elide only): pre-rendered lines, no
     // trailing newlines, printed once before the first output. The runner
     // fills this when any pattern carries a -desc/description; empty = no

@@ -1397,6 +1397,86 @@ expect_contains "rollup gets the co-occurrence footer" "--- files: w 1, o 1; bot
 rm -rf "$RU_FIX"
 
 # ---------------------------------------------------------------------------
+section "stable refs (-refs / hprscript expand)"
+EX_FIX="$HERE/_tmp_expand"
+mkdir -p "$EX_FIX"
+cat > "$EX_FIX/m.go" <<'EOF'
+package main
+
+func Alpha() {
+	work()
+	work()
+	other()
+}
+
+func Beta() {
+	work()
+}
+EOF
+
+# fnv1a is a pure function, so ref hashes are deterministic and can be
+# asserted literally: trimmed "work()" → 1a87e3, "other()" → 737a8a.
+OUT=$("$BIN" -p 'work\(\)' -llm -refs "$EX_FIX/m.go")
+expect_contains "-refs appends @hash in -llm" "4@1a87e3: 	work()" "$OUT"
+OUT=$("$BIN" -p 'other\(\)' -rollup -refs "$EX_FIX/m.go")
+expect_contains "-refs on rollup representative" "6@737a8a: 	other()" "$OUT"
+OUT=$("$BIN" -p 'work\(\)' -llm "$EX_FIX/m.go")
+expect_not_contains "no @hash without -refs" "@" "$OUT"
+
+OUT=$("$BIN" expand "$EX_FIX/m.go:4")
+expect_contains "expand: bare file:line resolves scope" "$EX_FIX/m.go:3-7 func Alpha" "$OUT"
+expect_contains "expand: prints full body" "	other()" "$OUT"
+OUT=$("$BIN" expand "$EX_FIX/m.go:4@1a87e3" ; echo "rc=$?")
+expect_contains "expand: verified ref ok" "func Alpha" "$OUT"
+expect_contains "expand: verified ref exit 0" "rc=0" "$OUT"
+
+OUT=$("$BIN" expand "$EX_FIX/m.go:4" "$EX_FIX/m.go:10")
+expect_contains "expand: batch second ref" "func Beta" "$OUT"
+OUT=$("$BIN" expand "$EX_FIX/m.go:1")
+expect_contains "expand: scopeless line falls back to context" "(no enclosing scope)" "$OUT"
+expect_contains "expand: ref line is marked" "> 1: package main" "$OUT"
+
+OUT=$("$BIN" expand "$EX_FIX/m.go:4@ffffff" ; echo "rc=$?")
+expect_contains "expand: wrong hash reports stale" "stale" "$OUT"
+expect_contains "expand: stale exit 3" "rc=3" "$OUT"
+OUT=$("$BIN" expand "$EX_FIX/m.go:999" ; echo "rc=$?")
+expect_contains "expand: line beyond EOF is stale" "stale" "$OUT"
+expect_contains "expand: beyond-EOF exit 3" "rc=3" "$OUT"
+
+# Content moved: insert a comment above Alpha, then expand with the OLD
+# line number + hash — recovery must find the line again by content.
+cat > "$EX_FIX/moved.go" <<'EOF'
+package main
+
+// new comment
+func Alpha() {
+	work()
+	work()
+	other()
+}
+EOF
+OUT=$("$BIN" expand "$EX_FIX/moved.go:6@737a8a" ; echo "rc=$?")
+expect_contains "expand: moved line recovered by hash" "(ref line moved: 6 → 7)" "$OUT"
+expect_contains "expand: moved ref still expands scope" "func Alpha" "$OUT"
+expect_contains "expand: moved ref exit 0" "rc=0" "$OUT"
+
+OUT=$("$BIN" expand "not-a-ref" 2>&1) ; RC=$?
+expect_contains "expand: bad ref syntax rejected" "bad ref" "$OUT"
+[[ "$RC" == "2" ]] && report ok "expand bad ref exit 2" || report fail "expand bad ref exit (got $RC)"
+OUT=$("$BIN" expand 2>&1) ; RC=$?
+expect_contains "expand: refs required" "at least one" "$OUT"
+[[ "$RC" == "2" ]] && report ok "expand no refs exit 2" || report fail "expand no refs exit (got $RC)"
+OUT=$("$BIN" expand -p x "$EX_FIX/m.go:4" 2>&1) ; RC=$?
+expect_contains "expand rejects patterns" "not patterns" "$OUT"
+[[ "$RC" == "2" ]] && report ok "expand -p exit 2" || report fail "expand -p exit (got $RC)"
+OUT=$("$BIN" expand -llm "$EX_FIX/m.go:4" 2>&1) ; RC=$?
+expect_contains "expand rejects output modes" "do not apply" "$OUT"
+
+OUT=$("$BIN" expand -max-block-bytes 20 "$EX_FIX/m.go:4")
+expect_contains "expand honors -max-block-bytes" "-max-block-bytes reached" "$OUT"
+rm -rf "$EX_FIX"
+
+# ---------------------------------------------------------------------------
 section "fixed strings (-F / -Fi / -patterns-from)"
 FS_FIX="$HERE/_tmp_fixed"
 mkdir -p "$FS_FIX"

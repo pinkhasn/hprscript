@@ -122,6 +122,13 @@ struct QueryOptions {
     std::string path;
 };
 
+// `hprscript expand <file:line[@hash]> …` — print the enclosing scope of a
+// search hit. Refs travel in Cli::positional; scope/-C/-max-block-bytes
+// flags are shared with search mode. See src/expand.hpp.
+struct ExpandOptions {
+    bool active = false;
+};
+
 struct Cli {
     // Original argv, retained for immutable edit-plan provenance.
     std::vector<std::string> command;
@@ -184,6 +191,10 @@ struct Cli {
     // default for per-match output modes; roles are computed lazily per
     // matched file, so the cost only exists where output is produced.
     bool no_roles = false;
+    // -refs: append a @hash content check to line numbers in -llm/-rollup
+    // output, making each hit a verified `file:line@hash` ref that
+    // `hprscript expand` can check for drift before expanding.
+    bool refs = false;
     bool ucp = false;            // -ucp: enable Unicode \w/\d/\s (opt-in)
     int64_t limit = -1;          // global match cap (-limit)
     int64_t per_file_limit = -1; // per-file cap (-m)
@@ -320,6 +331,7 @@ struct Cli {
     ApplyOptions apply;
     InvestigateOptions investigate;
     QueryOptions query;
+    ExpandOptions expand;
 
     // Misc.
     bool show_version = false;
