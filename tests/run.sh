@@ -1243,6 +1243,92 @@ expect_contains "rule-file description type-checked" "'description' must be a st
 rm -rf "$LD_FIX"
 
 # ---------------------------------------------------------------------------
+section "per-match role tags (def/comment/string/import)"
+RT_FIX="$HERE/_tmp_roles"
+mkdir -p "$RT_FIX"
+cat > "$RT_FIX/a.go" <<'EOF'
+package main
+
+import "fmt"
+
+// TODO comment hit
+func Target() {
+	s := "TODO in string"
+	u := "http://x/TODO"
+	fmt.Println(s, u) // trailing TODO note
+}
+EOF
+
+OUT=$("$BIN" -p TODO -llm "$RT_FIX/a.go")
+expect_contains "comment tag" "// TODO comment hit  [comment]" "$OUT"
+expect_contains "string tag" '"TODO in string"  [string]' "$OUT"
+expect_contains "trailing comment tag" "trailing TODO note  [comment]" "$OUT"
+expect_contains "// inside a string is not a comment" 'http://x/TODO"  [string]' "$OUT"
+
+OUT=$("$BIN" -p 'func Target' -llm -scope go "$RT_FIX/a.go")
+expect_contains "def tag on signature line" "[def func Target]" "$OUT"
+expect_not_contains "def replaces [in] on the signature" "[in func Target]" "$OUT"
+
+OUT=$("$BIN" -p 'import' -llm "$RT_FIX/a.go")
+expect_contains "import tag" 'import "fmt"  [import]' "$OUT"
+
+# Position-accurate roles beat line-based ones: a trailing comment on a
+# signature line is a comment, not a def.
+cat > "$RT_FIX/b.go" <<'EOF'
+package main
+
+func Helper() { // TODO here
+}
+EOF
+OUT=$("$BIN" -p TODO -llm -scope go "$RT_FIX/b.go")
+expect_contains "comment beats def on signature line" "[comment]" "$OUT"
+expect_not_contains "no def tag for trailing comment" "[def" "$OUT"
+
+OUT=$("$BIN" -p TODO "$RT_FIX/a.go")
+expect_contains "JSONL role field" '"role":"comment"' "$OUT"
+OUT=$("$BIN" -p TODO -format '$LINE:$ROLE' "$RT_FIX/a.go")
+expect_contains "\$ROLE format token" "5:comment" "$OUT"
+OUT=$("$BIN" -p TODO -sample 2 -llm "$RT_FIX/a.go")
+expect_contains "-sample keeps role tags" "[comment]" "$OUT"
+
+OUT=$("$BIN" -p TODO -llm -no-roles "$RT_FIX/a.go")
+expect_not_contains "-no-roles drops -llm tags" "[comment]" "$OUT"
+OUT=$("$BIN" -p TODO -no-roles "$RT_FIX/a.go")
+expect_not_contains "-no-roles drops the JSONL field" '"role"' "$OUT"
+
+cat > "$RT_FIX/c.c" <<'EOF'
+#include <stdio.h>
+/* start
+   TODO inside block
+   end */
+int x;
+EOF
+OUT=$("$BIN" -p TODO -llm "$RT_FIX/c.c")
+expect_contains "block comment spans lines" "TODO inside block  [comment]" "$OUT"
+OUT=$("$BIN" -p 'stdio' -llm "$RT_FIX/c.c")
+expect_contains "#include line tagged import" "[import]" "$OUT"
+
+cat > "$RT_FIX/p.py" <<'EOF'
+import os
+# TODO hash comment
+s = "TODO quoted"
+d = """
+TODO in docstring
+"""
+EOF
+OUT=$("$BIN" -p TODO -llm "$RT_FIX/p.py")
+expect_contains "python hash comment" "# TODO hash comment  [comment]" "$OUT"
+expect_contains "python string" '"TODO quoted"  [string]' "$OUT"
+expect_contains "python triple-quote string" "TODO in docstring  [string]" "$OUT"
+OUT=$("$BIN" -p 'import os' -llm "$RT_FIX/p.py")
+expect_contains "python import tag" "[import]" "$OUT"
+
+printf '// TODO not code\n' > "$RT_FIX/x.txt"
+OUT=$("$BIN" -p TODO -llm "$RT_FIX/x.txt")
+expect_not_contains "unknown extension: no tags" "[comment]" "$OUT"
+rm -rf "$RT_FIX"
+
+# ---------------------------------------------------------------------------
 section "fixed strings (-F / -Fi / -patterns-from)"
 FS_FIX="$HERE/_tmp_fixed"
 mkdir -p "$FS_FIX"

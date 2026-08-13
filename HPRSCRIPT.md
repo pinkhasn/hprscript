@@ -116,6 +116,7 @@ simultaneous.
 | `-git-range <r>` | Scan the files changed in a diff range (`origin/main...HEAD`). Repeatable. |
 | `-git-added-lines` | Restrict matches to lines **added** by the selected diffs (quick mode; needs `-git-changed`/`-git-staged`/`-git-range`). |
 | `-w` | Whole-word matching (wraps the pattern as `\b(?:expr)\b`) |
+| `-no-roles` | Disable per-match role classification (`role` JSONL field, `[def]`/`[comment]`/`[string]`/`[import]` tags in `-llm`, `$ROLE`). See [Per-match role tags](#per-match-role-tags). |
 | `-no-utf8` | Disable UTF-8 mode (byte-level matching — see [UTF-8 / Unicode](#utf-8--unicode-support)) |
 | `-ucp` | Enable Unicode property classes for `\w`/`\d`/`\s` (opt-in; may reject some patterns) |
 | `-limit <n>` | Maximum global results — scanning stops once reached |
@@ -171,6 +172,7 @@ simultaneous.
 | `$MATCH` | Matched text |
 | `$CONTEXT` | Match line plus `-A`/`-B`/`-C` surrounding lines |
 | `$PAT_ID` | Pattern id (`p0`, `p1`, … unless overridden in script mode) |
+| `$ROLE` | Match's lexical role: `def`/`comment`/`string`/`import`, empty for plain code. See [Per-match role tags](#per-match-role-tags). |
 | `$BLOCK` | Block content (when `-block-open`/`-close` is active) |
 | `$BLOCK_FULL` | Match start through block end (signature + body) |
 | `$BLOCK_START` / `$BLOCK_END` | Byte offsets of block start / end (exclusive) |
@@ -2270,6 +2272,33 @@ hprscript -p 'BEGIN.*PRIVATE KEY' -summary -diagnostics -require-complete -glob 
 
 ---
 
+## Per-match role tags
+
+The first question a reader of search results resolves for almost every hit is "what kind of occurrence is this?" — a definition, a comment mention, a string literal, an import. hprscript answers it per match, by default, in every per-match output mode:
+
+| Role | Meaning | Detection |
+|---|---|---|
+| `def` | Match sits on a scope's signature line | The match's line is an anchor line in the scope index (needs an active `-scope`) |
+| `comment` | Match is inside a line or block comment | Single-pass, escape-aware lexer over the file |
+| `string` | Match is inside a string literal | Same lexer (quotes, raw/backtick strings, Python triple quotes) |
+| `import` | Match's line is an import/include/use statement | Line-prefix check, only outside comments/strings |
+
+Surfaces: the default JSONL output gains a `"role":"comment"` field (omitted for plain code), `-llm` appends bracket tags, and `-format` recognises `$ROLE`. In `-llm`, a match on a signature line renders as `[def func Target]` **instead of** the misleading `[in func Target]`:
+
+```
+a.go
+  3: import "fmt"  [import]
+  5: // TODO comment hit  [comment]
+  6: func Target() {  [def func Target]
+  7: 	s := "TODO in string"  [string]  [in func Target]
+```
+
+Precedence is position-accurate first: a trailing comment on a signature line is `comment`, not `def`. Comment/string lexing covers the scope-pack languages (Go, Rust, C, C++, Java, JS, TS) plus Python, shell, Ruby, YAML, and TOML; files with unrecognized extensions simply get no role tags. `def` additionally requires an active `-scope` config, since it reads the scope index's anchor lines.
+
+The classification is lexical, not syntactic — it will not distinguish a call from a reference, and block-delimiter oddities inside unrecognized constructs can skew it. It is computed lazily, only for files that produce output, so clean files cost nothing. `-no-roles` turns it off entirely.
+
+---
+
 ## LLM output mode
 
 `-llm` emits a compact, plain-text format intended for direct consumption by language models — no JSON parsing, no per-match metadata noise, just file → line → matched text. Far cheaper in tokens than `-j` for the same information.
@@ -2280,8 +2309,10 @@ Layout: one **file header** per file (deduped — never repeated), then each mat
 |---|---|
 | (none) | `  <line>: <match line>` — with ≥2 patterns: `  <line>: [<pat>] <match line>` |
 | `-block-open`/`-block-close` | `  <line_start>-<line_end>` then the full block content on following lines |
-| `-scope <pack>` / `-scope-pattern …` | `  <line>: <match line>  [in <kind> <name>]` |
+| `-scope <pack>` / `-scope-pattern …` | `  <line>: <match line>  [in <kind> <name>]` — or `  [def <kind> <name>]` when the match sits on the signature line itself |
 | Both block + scope | block form, with a `[in <kind> <name>]` suffix on the header |
+
+Line-shape matches also carry [role tags](#per-match-role-tags) — `[comment]`, `[string]`, `[import]` — unless `-no-roles` is given.
 
 When `-limit` or `-max-output-bytes` truncates the output, a final `--- limit reached: ... ---` (or `--- output-byte budget reached ... ---`) footer line is emitted so the reader knows the result was cut, not finished.
 

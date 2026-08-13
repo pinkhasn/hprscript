@@ -11,6 +11,7 @@
 #include "pipeline.hpp"
 #include "planner.hpp"
 #include "rank.hpp"
+#include "roles.hpp"
 #include "scope.hpp"
 #include "seen.hpp"
 #include "walker.hpp"
@@ -69,6 +70,8 @@ struct BufferedFile {
     hpr::LineIndex idx;
     hpr::ScopeIndex scope;
     bool scope_built = false;
+    hpr::RoleIndex roles;
+    bool roles_built = false;
     std::vector<hpr::Match> kept;
 };
 
@@ -76,7 +79,7 @@ BufferedFile buffer_file(const std::string &display_name,
                          std::string_view content,
                          const std::string &eff_scope_lang,
                          const hpr::ScopeConfig &user_scope_custom,
-                         bool rebuild_scope) {
+                         bool rebuild_scope, bool rebuild_roles = false) {
     BufferedFile bf;
     bf.path = display_name;
     bf.content.assign(content.data(), content.size());
@@ -88,6 +91,13 @@ BufferedFile buffer_file(const std::string &display_name,
             std::string serr;
             if (bf.scope.build(bf.content, sc, bf.idx, &serr))
                 bf.scope_built = true;
+        }
+    }
+    if (rebuild_roles) {
+        if (const hpr::RoleConfig *rc =
+                hpr::role_config_for_path(display_name)) {
+            bf.roles.build(bf.content, *rc, bf.idx);
+            bf.roles_built = true;
         }
     }
     return bf;
@@ -308,6 +318,15 @@ int run_search(const Cli &cli) {
         }
     }
     Formatter fmt(oo, stdout);
+
+    // Role classification is on by default for the per-match output modes
+    // that surface it (JSONL `role`, -llm tags, -format $ROLE). The index is
+    // built lazily, only for files that actually have kept matches.
+    const bool roles_enabled =
+        !cli.no_roles &&
+        (oo.mode == OutputMode::JsonLines || oo.mode == OutputMode::Llm ||
+         oo.mode == OutputMode::Custom);
+
     // Block extraction populates `block_line_start`/`_end` from the line
     // index, so we need it whenever block delimiters are configured (even
     // for output modes that wouldn't otherwise build it).
@@ -632,7 +651,8 @@ int run_search(const Cli &cli) {
             sample_files.push_back(buffer_file(display_name, content,
                                                eff_scope_lang,
                                                user_scope_custom,
-                                               scope_ptr != nullptr));
+                                               scope_ptr != nullptr,
+                                               roles_enabled));
             stats.buffered_bytes_peak += content.size();
             for (size_t mi = 0; mi < kept.size(); ++mi) {
                 if (sample_recs.size() >= SAMPLE_REC_CAP) {
@@ -713,12 +733,22 @@ int run_search(const Cli &cli) {
                 if (seen_active) for (const auto &m : marks) seen_store.mark(m);
             }
         } else {
+            RoleIndex role_idx;
+            const RoleIndex *roles_ptr = nullptr;
+            if (roles_enabled && !kept.empty()) {
+                if (const RoleConfig *rc =
+                        role_config_for_path(display_name)) {
+                    role_idx.build(content, *rc, idx);
+                    roles_ptr = &role_idx;
+                }
+            }
             uint64_t per_file = 0;
             for (const auto &m : kept) {
                 had_match = true;
                 ++per_file;
                 const Pattern &pat = patterns[m.pattern_index];
-                fmt.on_match(display_name, pat, m, content, idx, scope_ptr);
+                fmt.on_match(display_name, pat, m, content, idx, scope_ptr,
+                             roles_ptr);
                 if (fmt.over_budget()) break;
                 if (cli.per_file_limit > 0 &&
                     per_file >= static_cast<uint64_t>(cli.per_file_limit)) break;
@@ -842,7 +872,8 @@ int run_search(const Cli &cli) {
             const BufferedFile &sf = sample_files[r.file_idx];
             const Pattern &pat = patterns[r.m.pattern_index];
             fmt.on_match(sf.path, pat, r.m, sf.content, sf.idx,
-                         sf.scope_built ? &sf.scope : nullptr);
+                         sf.scope_built ? &sf.scope : nullptr,
+                         sf.roles_built ? &sf.roles : nullptr);
             if (fmt.over_budget()) {
                 if (stats.stop_reason.empty())
                     stats.stop_reason = "output_budget";

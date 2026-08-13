@@ -215,6 +215,9 @@ void print_help(FILE *out) {
 "  -git-added-lines Restrict matches to lines ADDED by the selected diffs\n"
 "                   (needs -git-changed/-staged/-range; -p mode only)\n"
 "  -w               Whole-word match (\\b…\\b)\n"
+"  -no-roles        Disable per-match role classification (the `role` JSONL\n"
+"                   field, [def]/[comment]/[string]/[import] tags in -llm,\n"
+"                   and $ROLE in -format)\n"
 "  -no-utf8         Disable UTF-8 mode (byte-level matching)\n"
 "  -ucp             Enable Unicode \\w/\\d/\\s (may reject some patterns)\n"
 "  -limit <n>       Max global results\n"
@@ -646,6 +649,10 @@ Cli parse_cli(int argc, char **argv) {
                 return cli;
             }
             cli.patterns.back().desc = v;
+            continue;
+        }
+        if (eq(a, "-no-roles") || eq(a, "--no-roles")) {
+            cli.no_roles = true;
             continue;
         }
         if (eq(a, "-glob")) {

@@ -13,6 +13,7 @@ Invoke the binary through Bash as `hprscript`. Use one call per reasoning stage 
 
 - Put distinguishable terms in separate `-p` or `-pi` flags so every hit retains its pattern ID.
 - Prefer `-llm` when reading results, `-f` for paths, `-c` for counts, and `-limit N` for existence checks. In `-llm`/`-elide` output, patterns with zero matches are named in a trailing `--- no matches: … ---` footer — treat that as explicit evidence of absence, qualified with "scan stopped early" when a limit cut the scan.
+- Trust per-match role tags instead of re-deriving them: `[comment]`/`[string]`/`[import]` in `-llm` (a `role` field in JSONL, `$ROLE` in `-format`) classify each hit lexically, and with `-scope` active a hit on a signature line reads `[def func X]` while body hits read `[in func X]`. Untagged hits in a recognized language are plain code.
 - Use an absolute path or glob when the effective cwd is uncertain. Inspect the first emitted path and stop if it escapes the intended tree.
 - Add `-summary -require-complete` when a broad sweep must be exhaustive. Do not present a partial scan as complete.
 - Restructure unsupported lookarounds or backreferences, or express the relationship with `query` or script phases. Do not fall back to grep or rg.

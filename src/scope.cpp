@@ -170,6 +170,16 @@ bool ScopeIndex::build(std::string_view buf, const ScopeConfig &cfg,
     return true;
 }
 
+const ScopeRange *ScopeIndex::anchor_on_line(uint32_t line) const {
+    // ranges_ is sorted by start_off, so line_start is non-decreasing.
+    auto it = std::lower_bound(ranges_.begin(), ranges_.end(), line,
+                               [](const ScopeRange &r, uint32_t l) {
+                                   return r.line_start < l;
+                               });
+    if (it != ranges_.end() && it->line_start == line) return &*it;
+    return nullptr;
+}
+
 const ScopeRange *ScopeIndex::find_innermost(uint64_t offset) const {
     // Linear scan picks the smallest-by-end range that contains offset. Could
     // be tightened with an interval tree, but typical files have <1k scopes

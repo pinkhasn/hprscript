@@ -1,6 +1,7 @@
 #include "output.hpp"
 
 #include "block.hpp"
+#include "roles.hpp"
 #include "seen.hpp"
 
 #include <algorithm>
@@ -166,6 +167,29 @@ std::string_view truncate_safe(std::string_view sv, uint64_t limit,
     return sv.substr(0, n);
 }
 
+// Per-match role: "comment"/"string"/"def"/"import", or nullptr for plain
+// code. Position-accurate lexer roles win over the line-based ones — a
+// trailing comment on a signature line is a comment, not a def. `def_out`
+// receives the defined scope when the result is "def".
+const char *resolve_role(const RoleIndex *roles, const ScopeIndex *scope,
+                         uint64_t offset, uint32_t line,
+                         const ScopeRange **def_out) {
+    if (def_out) *def_out = nullptr;
+    if (roles) {
+        LexRole lr = roles->at(offset);
+        if (lr == LexRole::Comment) return "comment";
+        if (lr == LexRole::Str) return "string";
+    }
+    if (scope) {
+        if (const ScopeRange *sr = scope->anchor_on_line(line)) {
+            if (def_out) *def_out = sr;
+            return "def";
+        }
+    }
+    if (roles && roles->import_line(line)) return "import";
+    return nullptr;
+}
+
 } // namespace
 
 Formatter::Formatter(OutputOptions opts, FILE *out) : opts_(opts), out_(out) {}
@@ -235,7 +259,8 @@ std::string_view Formatter::context_block(std::string_view buf,
 
 void Formatter::emit_json(const std::string &file, const Pattern &pattern,
                           const Match &m, std::string_view buf,
-                          const LineIndex &idx, const ScopeIndex *scope) {
+                          const LineIndex &idx, const ScopeIndex *scope,
+                          const RoleIndex *roles) {
     refresh_file_cache(file);
     refresh_pattern_cache(pattern);
 
@@ -326,6 +351,11 @@ void Formatter::emit_json(const std::string &file, const Pattern &pattern,
             s += "}";
         }
     }
+    if (const char *role = resolve_role(roles, scope, m.from, line, nullptr)) {
+        s += ",\"role\":\"";
+        s += role;
+        s += '"';
+    }
     s += "}\n";
     write_out(s);
 }
@@ -347,7 +377,8 @@ void Formatter::emit_match_only(std::string_view buf, const Match &m,
 
 void Formatter::emit_custom(const std::string &file, const Pattern &pattern,
                             const Match &m, std::string_view buf,
-                            const LineIndex &idx, const ScopeIndex *scope) {
+                            const LineIndex &idx, const ScopeIndex *scope,
+                            const RoleIndex *roles) {
     uint32_t line = idx.line_of(m.from);
     uint32_t col = idx.col_of(m.from);
     std::string_view match_text(buf.data() + m.from, m.to - m.from);
@@ -392,6 +423,7 @@ void Formatter::emit_custom(const std::string &file, const Pattern &pattern,
         return true;
     };
     const ScopeRange *sr = (scope ? scope->find_innermost(m.from) : nullptr);
+    const char *role = resolve_role(roles, scope, m.from, line, nullptr);
     static const char EXTRACT_PREFIX[] = "$EXTRACT_";
     static constexpr size_t EXTRACT_PREFIX_LEN = sizeof(EXTRACT_PREFIX) - 1;
     for (size_t i = 0; i < fmt.size();) {
@@ -415,6 +447,7 @@ void Formatter::emit_custom(const std::string &file, const Pattern &pattern,
         if (try_num(i, "$FROM", m.from)) continue;
         if (try_num(i, "$TO", m.to)) continue;
         if (try_str(i, "$PAT_ID", pattern.id)) continue;
+        if (try_str(i, "$ROLE", role ? std::string_view(role) : std::string_view{})) continue;
         if (try_str(i, "$ENCLOSING_NAME", sr ? std::string_view(sr->name) : std::string_view{})) continue;
         if (try_str(i, "$ENCLOSING_KIND", sr ? std::string_view(sr->kind) : std::string_view{})) continue;
         if (try_num(i, "$ENCLOSING_LINE_START", sr ? sr->line_start : 0)) continue;
@@ -471,7 +504,8 @@ void Formatter::emit_header() {
 
 void Formatter::emit_llm(const std::string &file, const Pattern &pattern,
                          const Match &m, std::string_view buf,
-                         const LineIndex &idx, const ScopeIndex *scope) {
+                         const LineIndex &idx, const ScopeIndex *scope,
+                         const RoleIndex *roles) {
     emit_header();
     auto &s = scratch_;
 
@@ -527,7 +561,22 @@ void Formatter::emit_llm(const std::string &file, const Pattern &pattern,
     if (!ctx_view.empty() && ctx_view.back() == '\n')
         ctx_view.remove_suffix(1);
     s.append(ctx_view.data(), ctx_view.size());
-    if (scope) {
+    const ScopeRange *def_sr = nullptr;
+    const char *role = resolve_role(roles, scope, m.from, line, &def_sr);
+    if (def_sr) {
+        // The match sits on the signature line itself — `[def func X]`
+        // rather than the misleading `[in func X]`.
+        s += "  [def ";
+        s.append(def_sr->kind);
+        s += ' ';
+        s.append(def_sr->name);
+        s += ']';
+    } else if (role) {
+        s += "  [";
+        s += role;
+        s += ']';
+    }
+    if (scope && !def_sr) {
         if (const ScopeRange *sr = scope->find_innermost(m.from)) {
             s += "  [in ";
             s.append(sr->kind);
@@ -723,10 +772,11 @@ void Formatter::on_file_elide(const std::string &file,
 
 void Formatter::on_match(const std::string &file, const Pattern &pattern,
                          const Match &m, std::string_view buf,
-                         const LineIndex &idx, const ScopeIndex *scope) {
+                         const LineIndex &idx, const ScopeIndex *scope,
+                         const RoleIndex *roles) {
     ++emitted_;
     switch (opts_.mode) {
-        case OutputMode::JsonLines:   emit_json(file, pattern, m, buf, idx, scope); break;
+        case OutputMode::JsonLines:   emit_json(file, pattern, m, buf, idx, scope, roles); break;
         case OutputMode::FilesOnly:
             // Print the file once, on first match. Counter tracked below.
             if (per_file_counts_[file]++ == 0) {
@@ -738,8 +788,8 @@ void Formatter::on_match(const std::string &file, const Pattern &pattern,
             per_file_counts_[file]++;
             break;
         case OutputMode::MatchOnly:   emit_match_only(buf, m, idx); break;
-        case OutputMode::Custom:      emit_custom(file, pattern, m, buf, idx, scope); break;
-        case OutputMode::Llm:         emit_llm(file, pattern, m, buf, idx, scope); break;
+        case OutputMode::Custom:      emit_custom(file, pattern, m, buf, idx, scope, roles); break;
+        case OutputMode::Llm:         emit_llm(file, pattern, m, buf, idx, scope, roles); break;
         case OutputMode::Elide:
             // Elide renders a whole file's matches at once via
             // on_file_elide(); it never streams through on_match(). Undo

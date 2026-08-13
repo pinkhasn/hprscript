@@ -179,6 +179,11 @@ struct Cli {
     std::string seen_path;
     bool word_boundary = false;
     bool no_utf8 = false;        // -no-utf8: byte-mode matching
+    // -no-roles: disable per-match role classification (def/comment/string/
+    // import — the `role` JSONL field, -llm bracket tags, and $ROLE). On by
+    // default for per-match output modes; roles are computed lazily per
+    // matched file, so the cost only exists where output is produced.
+    bool no_roles = false;
     bool ucp = false;            // -ucp: enable Unicode \w/\d/\s (opt-in)
     int64_t limit = -1;          // global match cap (-limit)
     int64_t per_file_limit = -1; // per-file cap (-m)

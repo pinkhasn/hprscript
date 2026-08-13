@@ -22,6 +22,7 @@ namespace hpr {
 
 class SeenStore;    // src/seen.hpp — -seen cross-invocation dedup
 struct SeenMark;
+class RoleIndex;    // src/roles.hpp — comment/string/import classification
 
 enum class OutputMode {
     JsonLines,    // one JSON object per line (default)
@@ -94,9 +95,14 @@ class Formatter {
 public:
     Formatter(OutputOptions opts, FILE *out);
 
+    // `roles` (optional) classifies the match position lexically; combined
+    // with `scope`'s anchor lines it yields a per-match role —
+    // def/comment/string/import — surfaced as `role` in JSONL, bracket tags
+    // in -llm, and $ROLE in -format. nullptr = no role classification.
     void on_match(const std::string &file, const Pattern &pattern,
                   const Match &m, std::string_view buf, const LineIndex &idx,
-                  const ScopeIndex *scope = nullptr);
+                  const ScopeIndex *scope = nullptr,
+                  const RoleIndex *roles = nullptr);
 
     // -elide mode: render one file's entire kept-match set in a single call,
     // grouped by innermost enclosing scope. Each scope prints its signature
@@ -163,15 +169,15 @@ public:
 private:
     void emit_json(const std::string &file, const Pattern &pattern,
                    const Match &m, std::string_view buf, const LineIndex &idx,
-                   const ScopeIndex *scope);
+                   const ScopeIndex *scope, const RoleIndex *roles);
     void emit_match_only(std::string_view buf, const Match &m,
                          const LineIndex &idx);
     void emit_custom(const std::string &file, const Pattern &pattern,
                      const Match &m, std::string_view buf, const LineIndex &idx,
-                     const ScopeIndex *scope);
+                     const ScopeIndex *scope, const RoleIndex *roles);
     void emit_llm(const std::string &file, const Pattern &pattern,
                   const Match &m, std::string_view buf, const LineIndex &idx,
-                  const ScopeIndex *scope);
+                  const ScopeIndex *scope, const RoleIndex *roles);
 
     // Compute the joined context block (prev N lines + match line + next N
     // lines) as a single string view into buf. Trailing newline is excluded.
