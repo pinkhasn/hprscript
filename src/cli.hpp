@@ -23,6 +23,10 @@ struct CliPattern {
     // `-p`/`-pi`, or by `id` in a -patterns-from file). Empty → auto `p<i>`.
     // Shown as `pat`/$PAT_ID and usable as the A/B side of relations.
     std::string name;
+    // Free-text meaning (set by `-desc` on the most recently declared
+    // pattern, or by `description` in a -patterns-from file). When any
+    // pattern has one, -llm/-elide output opens with a query-legend header.
+    std::string desc;
     // Comma-separated capture group names (set by `-extract` on the most
     // recently declared `-p`/`-pi`). Maps capture group i+1 → names[i].
     std::vector<std::string> extract_names;

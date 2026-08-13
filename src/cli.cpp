@@ -192,9 +192,11 @@ void print_help(FILE *out) {
 "  -Fi <string>     Case-insensitive fixed-string pattern\n"
 "  -name <id>       Name the preceding pattern (shown as pat/$PAT_ID, usable\n"
 "                   as the A/B side of relations and in -file-where)\n"
+"  -desc <text>     Describe the preceding pattern; descriptions print once\n"
+"                   as a query-legend header in -llm/-elide output\n"
 "  -patterns-from <f>  Load patterns from a JSONL rule file: one object per\n"
-"                   line {id, regexp|literal, case_insensitive, word_boundary,\n"
-"                   utf8}; '#' comment lines allowed (repeatable)\n"
+"                   line {id, regexp|literal, description, case_insensitive,\n"
+"                   word_boundary, utf8}; '#' comment lines allowed (repeatable)\n"
 "  -extract n1,n2,…  Re-extract capture groups from the preceding -p/-pi\n"
 "  -ident 't1 t2 …'  Match identifiers whose subtokens include ALL given\n"
 "                   terms, regardless of casing/separator (parseConfig ~\n"
@@ -234,7 +236,9 @@ void print_help(FILE *out) {
 "                   each pattern (record-level absence, e.g. JSONL fields)\n"
 "  -llm             Token-efficient text for LLM consumption (auto-detects\n"
 "                   block/scope; dedupes file paths; prints a 'limit reached'\n"
-"                   footer when -limit or -max-output-bytes truncates output)\n"
+"                   footer when -limit or -max-output-bytes truncates output;\n"
+"                   ends with a 'no matches' footer naming patterns that\n"
+"                   matched nothing)\n"
 "  -elide           Scope-aware chunks: signature + matched lines with -A/-B\n"
 "                   context; untouched interior lines fold as \"… (+N lines)\"\n"
 "                   (implies -scope auto when no -scope config is given)\n"
@@ -622,6 +626,26 @@ Cli parse_cli(int argc, char **argv) {
                 return cli;
             }
             cli.patterns.back().name = v;
+            continue;
+        }
+        if (eq(a, "-desc")) {
+            const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
+            if (cli.patterns.empty()) {
+                cli.error = true;
+                cli.error_message = "-desc must follow a -p/-pi/-F/-Fi";
+                return cli;
+            }
+            if (v[0] == '\0') {
+                cli.error = true;
+                cli.error_message = "-desc: empty description";
+                return cli;
+            }
+            if (!cli.patterns.back().desc.empty()) {
+                cli.error = true;
+                cli.error_message = "-desc repeated for the same pattern";
+                return cli;
+            }
+            cli.patterns.back().desc = v;
             continue;
         }
         if (eq(a, "-glob")) {
@@ -1229,7 +1253,7 @@ bool load_patterns_from(Cli &cli) {
                 if (kv.first != "id" && kv.first != "regexp" &&
                     kv.first != "literal" && kv.first != "case_insensitive" &&
                     kv.first != "word_boundary" && kv.first != "utf8" &&
-                    kv.first != "ref")
+                    kv.first != "ref" && kv.first != "description")
                     return fail("unknown field '" + kv.first + "'");
             }
             const json::Value *re = pr.value.find("regexp");
@@ -1269,6 +1293,11 @@ bool load_patterns_from(Cli &cli) {
             if (const json::Value *v = pr.value.find("ref")) {
                 if (!v->is_bool()) return fail("'ref' must be a boolean");
                 p.ref = v->as_bool();
+            }
+            if (const json::Value *v = pr.value.find("description")) {
+                if (!v->is_string())
+                    return fail("'description' must be a string");
+                p.desc = v->as_string();
             }
             cli.patterns.push_back(std::move(p));
         }

@@ -1183,6 +1183,66 @@ expect_contains "-llm shows the name tag" "[warn]" "$OUT"
 rm -rf "$NP_FIX"
 
 # ---------------------------------------------------------------------------
+section "informative -llm output (-desc legend / no-matches footer)"
+LD_FIX="$HERE/_tmp_llmdesc"
+mkdir -p "$LD_FIX"
+printf 'WARN a\nERROR b\nx\nWARN c\n' > "$LD_FIX/log.txt"
+
+# --- zero-match footer
+OUT=$("$BIN" -p WARN -name warn -p NOPE_ZZZ -name ghost -llm "$LD_FIX/log.txt")
+expect_contains "-llm zero-match footer names silent pattern" "--- no matches: ghost (1 of 2 patterns) ---" "$OUT"
+OUT=$("$BIN" -p WARN -name warn -p ERROR -name err -llm "$LD_FIX/log.txt")
+expect_not_contains "-llm no footer when all patterns match" "no matches" "$OUT"
+OUT=$("$BIN" -p NOPE_A -p NOPE_B -llm "$LD_FIX/log.txt" ; echo "rc=$?")
+expect_contains "-llm all-zero footer lists every pattern" "--- no matches: p0, p1 (2 of 2 patterns) ---" "$OUT"
+expect_contains "-llm all-zero still exits 1" "rc=1" "$OUT"
+OUT=$("$BIN" -p WARN -p NOPE_ZZZ -name ghost -llm -limit 1 "$LD_FIX/log.txt")
+expect_contains "-llm footer qualified when limit stops scan" "no matches (scan stopped early): ghost" "$OUT"
+OUT=$("$BIN" -p WARN -p NOPE_ZZZ -name ghost -elide "$LD_FIX/log.txt")
+expect_contains "-elide zero-match footer" "--- no matches: ghost (1 of 2 patterns) ---" "$OUT"
+OUT=$("$BIN" -p WARN -p NOPE_ZZZ "$LD_FIX/log.txt")
+expect_not_contains "JSONL mode has no zero-match footer" "no matches" "$OUT"
+
+# --- -desc query legend
+OUT=$("$BIN" -p WARN -name warn -desc 'warning lines' -p ERROR -llm "$LD_FIX/log.txt")
+expect_contains "-desc legend described pattern" "  warn — warning lines" "$OUT"
+expect_contains "-desc legend regexp fallback" "  p1 — /ERROR/" "$OUT"
+FIRST=$(printf '%s\n' "$OUT" | head -1)
+expect_eq "-desc header is the first line" "query: 2 patterns over $LD_FIX/log.txt" "$FIRST"
+OUT=$("$BIN" -p WARN -p ERROR -llm "$LD_FIX/log.txt")
+expect_not_contains "no header without -desc" "query:" "$OUT"
+OUT=$("$BIN" -p WARN -desc 'warning lines' "$LD_FIX/log.txt")
+expect_not_contains "JSONL mode has no header" "query:" "$OUT"
+OUT=$("$BIN" -p NOPE_ZZZ -desc 'missing thing' -llm "$LD_FIX/log.txt")
+expect_contains "header still prints before all-zero footer" "query: 1 pattern over" "$OUT"
+expect_contains "singular footer wording" "(1 of 1 pattern) ---" "$OUT"
+OUT=$("$BIN" -p WARN -desc 'warning lines' -hotspots 1 -llm "$LD_FIX/log.txt")
+expect_contains "-hotspots -llm prints header before rows" "query: 1 pattern over" "$OUT"
+
+# --- -desc validation
+OUT=$("$BIN" -desc x -p WARN "$LD_FIX/log.txt" 2>&1) ; RC=$?
+expect_contains "-desc before pattern rejected" "-desc must follow" "$OUT"
+[[ "$RC" == "2" ]] && report ok "-desc before pattern exit 2" || report fail "-desc before pattern exit (got $RC)"
+OUT=$("$BIN" -p WARN -desc a -desc b "$LD_FIX/log.txt" 2>&1) ; RC=$?
+expect_contains "-desc repeated rejected" "repeated for the same pattern" "$OUT"
+OUT=$("$BIN" -p WARN -desc '' "$LD_FIX/log.txt" 2>&1) ; RC=$?
+expect_contains "-desc empty rejected" "empty description" "$OUT"
+
+# --- patterns-from description field
+cat > "$LD_FIX/rules.jsonl" <<'EOF'
+{"id":"warnish","regexp":"WARN","description":"warning lines"}
+{"id":"errish","regexp":"ERROR"}
+EOF
+OUT=$("$BIN" -patterns-from "$LD_FIX/rules.jsonl" -llm "$LD_FIX/log.txt")
+expect_contains "rule-file description in legend" "  warnish — warning lines" "$OUT"
+expect_contains "rule-file undescribed pattern falls back to regexp" "  errish — /ERROR/" "$OUT"
+printf '{"id":"x","regexp":"y","description":5}\n' > "$LD_FIX/bad.jsonl"
+OUT=$("$BIN" -patterns-from "$LD_FIX/bad.jsonl" -llm "$LD_FIX/log.txt" 2>&1) ; RC=$?
+expect_contains "rule-file description type-checked" "'description' must be a string" "$OUT"
+[[ "$RC" == "2" ]] && report ok "rule-file bad description exit 2" || report fail "rule-file bad description exit (got $RC)"
+rm -rf "$LD_FIX"
+
+# ---------------------------------------------------------------------------
 section "fixed strings (-F / -Fi / -patterns-from)"
 FS_FIX="$HERE/_tmp_fixed"
 mkdir -p "$FS_FIX"

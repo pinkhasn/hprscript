@@ -454,9 +454,25 @@ void Formatter::emit_custom(const std::string &file, const Pattern &pattern,
     write_out(out);
 }
 
+void Formatter::emit_header() {
+    if (header_done_) return;
+    header_done_ = true;
+    if (opts_.mode != OutputMode::Llm && opts_.mode != OutputMode::Elide)
+        return;
+    if (opts_.header_lines.empty()) return;
+    auto &s = scratch_;
+    s.clear();
+    for (const auto &line : opts_.header_lines) {
+        s += line;
+        s += '\n';
+    }
+    write_out(s);
+}
+
 void Formatter::emit_llm(const std::string &file, const Pattern &pattern,
                          const Match &m, std::string_view buf,
                          const LineIndex &idx, const ScopeIndex *scope) {
+    emit_header();
     auto &s = scratch_;
 
     // Per-file header: print the path once per consecutive run on that file.
@@ -542,6 +558,7 @@ void Formatter::on_file_elide(const std::string &file,
                               const ScopeIndex *scope, const SeenStore *seen,
                               std::vector<SeenMark> *marks_out) {
     if (kept.empty()) return;
+    emit_header();
     emitted_ += static_cast<uint64_t>(kept.size());
 
     bool first_block = true;
@@ -761,6 +778,26 @@ void Formatter::on_file_end(const std::string &file, bool had_match) {
 void Formatter::on_complete() {
     if (opts_.mode == OutputMode::Llm || opts_.mode == OutputMode::Elide) {
         char buf[160];
+        if (!zero_match_ids_.empty()) {
+            // A batched pattern that matched nothing must be stated, not
+            // inferred from its absence in the output. When the scan stopped
+            // early (limit / output budget) the claim is only valid for the
+            // scanned prefix, so it's qualified.
+            emit_header();
+            std::string s = (limit_hit_ || over_budget_)
+                ? "--- no matches (scan stopped early): "
+                : "--- no matches: ";
+            for (size_t i = 0; i < zero_match_ids_.size(); ++i) {
+                if (i) s += ", ";
+                s += zero_match_ids_[i];
+            }
+            s += " (";
+            s += std::to_string(zero_match_ids_.size());
+            s += " of ";
+            s += std::to_string(patterns_total_);
+            s += patterns_total_ == 1 ? " pattern) ---\n" : " patterns) ---\n";
+            std::fwrite(s.data(), 1, s.size(), out_);
+        }
         if (limit_hit_) {
             int n = std::snprintf(buf, sizeof(buf),
                 "--- limit reached: stopped at %llu matches; more may exist (re-run with -limit 0 for all) ---\n",

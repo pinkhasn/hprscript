@@ -102,7 +102,8 @@ simultaneous.
 | `-pi <pattern>` | Case-insensitive search pattern (HS `CASELESS`; folds Unicode by default; repeatable, mixable with `-p`) |
 | `-F <string>` / `-Fi <string>` | Fixed-string pattern (case-sensitive / -insensitive) — matched literally, no regex interpretation. Repeatable, mixable with `-p`/`-pi`. |
 | `-name <id>` | Name the preceding `-p`/`-pi`/`-F`/`-Fi`/`-ident`: the id (`[A-Za-z_]\w*`) replaces the auto `p<i>`/`ident<i>` in `pat`, `$PAT_ID`, `-llm` tags, relations, and `-file-where`. |
-| `-patterns-from <f>` | Load additional patterns from a JSONL rule file — one `{"id","regexp"\|"literal","case_insensitive","word_boundary","utf8","ref"}` object per line, `#` comments allowed. Repeatable. See [Fixed strings & pattern files](#fixed-strings--pattern-files--f--fi--patterns-from). |
+| `-desc <text>` | Describe the preceding pattern in free text. When any pattern has one, `-llm`/`-elide` output opens with a [query legend](#query-header-and-no-matches-footer) so each result block is self-describing. |
+| `-patterns-from <f>` | Load additional patterns from a JSONL rule file — one `{"id","regexp"\|"literal","description","case_insensitive","word_boundary","utf8","ref"}` object per line, `#` comments allowed. Repeatable. See [Fixed strings & pattern files](#fixed-strings--pattern-files--f--fi--patterns-from). |
 | `-ident '<terms>'` | Match identifiers whose subtokens include ALL given space-separated terms, regardless of casing/separator (`parseConfig` ~ `parse_config`). Repeatable = OR. See [Identifier matching](#identifier-matching--ident). |
 | `-file-where <expr>` | Per-file predicate: pattern ids, plus `count(pat) > n` / `churn(days) > n` / `lang == name` conditions (`'err AND NOT recovery'`, `'churn(30) > 2'`). See [Per-file conditions](#per-file-conditions--file-where). |
 | `-order-by <f>` | Sort `-f`/`-c` output by `score`/`count`/`path` instead of walk order. See [Sorting file-grouped output](#sorting-file-grouped-output--order-by). |
@@ -366,6 +367,20 @@ Names must be identifiers (`[A-Za-z_][A-Za-z0-9_]*`) and unique — a collision
 with another name or with a different pattern's auto id (`p0`, `p1`, …) is
 rejected at startup.
 
+`-desc <text>` is the same kind of postfix modifier, but for meaning instead
+of identity: free text explaining what the pattern is *for*. It surfaces as a
+one-time query legend at the top of `-llm`/`-elide` output (see
+[Query header and no-matches footer](#query-header-and-no-matches-footer)),
+so a reader of the results — human or LLM — doesn't have to reverse-engineer
+intent from the regex:
+
+```bash
+hprscript \
+  -p 'md5|sha1'      -name weak_hash -desc 'weak hash algorithm usage' \
+  -p 'rand\.Intn'    -name weak_rand -desc 'non-crypto RNG in security context' \
+  -llm -glob '**/*.go'
+```
+
 ---
 
 ## Fixed strings & pattern files (`-F` / `-Fi` / `-patterns-from`)
@@ -393,9 +408,11 @@ hprscript -patterns-from ioc-pack.jsonl -C 1 -glob '**/*.log'
 ```
 
 Each entry takes exactly one of `regexp` or `literal`, plus optional `id`
-(same rules as `-name`), `case_insensitive`, `word_boundary`, and `utf8`
-(the latter two default to the global `-w` / `-no-utf8` flags). Unknown
-fields are rejected with the file and line number. `-patterns-from` is
+(same rules as `-name`), `description` (free text, same role as `-desc` —
+shown in the `-llm`/`-elide` query legend), `case_insensitive`,
+`word_boundary`, and `utf8` (the latter two default to the global `-w` /
+`-no-utf8` flags). Unknown fields are rejected with the file and line
+number. `-patterns-from` is
 repeatable, appends to any `-p`/`-F` patterns, and cannot be combined with
 `-s`/`-script` (scripts declare their own patterns).
 
@@ -2267,6 +2284,28 @@ Layout: one **file header** per file (deduped — never repeated), then each mat
 | Both block + scope | block form, with a `[in <kind> <name>]` suffix on the header |
 
 When `-limit` or `-max-output-bytes` truncates the output, a final `--- limit reached: ... ---` (or `--- output-byte budget reached ... ---`) footer line is emitted so the reader knows the result was cut, not finished.
+
+### Query header and no-matches footer
+
+Two additions make each `-llm`/`-elide` result block self-describing — useful when the output is read later (or by a different agent) than the command that produced it:
+
+**Query header.** When any pattern carries a description (`-desc`, or `description` in a `-patterns-from` rule file), the output opens with an echo of the interpreted query and a one-line legend per pattern — described patterns show their description, the rest fall back to their regexp so the legend is complete on its own:
+
+```
+query: 2 patterns over src, **/*.go
+  weak_hash — weak hash algorithm usage
+  p1 — /rand\.Intn/
+```
+
+No `-desc` anywhere → no header, so existing output is unchanged unless you opt in.
+
+**No-matches footer.** A batched pattern that matched nothing would otherwise just vanish from the output — and absence is often the finding (`no callers of X` can be the whole answer). Any pattern that ends the scan with zero matches (after `-in-scope`/relations/`-file-where` filtering) is named explicitly in a trailing footer:
+
+```
+--- no matches: weak_rand (1 of 2 patterns) ---
+```
+
+The counts cover the whole scan, not just the displayed subset, so the footer stays truthful under `-sample`/`-hotspots`. When `-limit` or `-max-output-bytes` stopped the scan early the claim only holds for the scanned prefix, and the footer says so: `--- no matches (scan stopped early): … ---`. Exit codes are unaffected (still 1 when nothing matched at all).
 
 ### Examples
 

@@ -93,6 +93,24 @@ BufferedFile buffer_file(const std::string &display_name,
     return bf;
 }
 
+// One token per input source, in the walker's precedence order: globs,
+// positional paths, file lists, git selections. Shared by -explain-plan's
+// stage.inputs and the -llm/-elide query header so the two never drift.
+std::vector<std::string> input_tokens(const hpr::Cli &cli) {
+    std::vector<std::string> in;
+    in.insert(in.end(), cli.globs.begin(), cli.globs.end());
+    in.insert(in.end(), cli.positional.begin(), cli.positional.end());
+    for (const auto &fl : cli.file_lists)
+        in.push_back(std::string(fl.nul ? "files0:" : "files:") + fl.path);
+    if (cli.git_changed) in.push_back("git:changed");
+    if (cli.git_staged) in.push_back("git:staged");
+    if (cli.git_untracked) in.push_back("git:untracked");
+    for (const auto &range : cli.git_ranges)
+        in.push_back("git:range:" + range);
+    if (in.empty()) in.push_back("<stdin>");
+    return in;
+}
+
 // Render a buffered file's matches via -elide's logic into an owned string
 // instead of stdout, so -budget can measure the size before committing to
 // it. Reuses Formatter/on_file_elide verbatim through a memory-backed
@@ -150,17 +168,7 @@ int run_search(const Cli &cli) {
         stage.id = "scan0";
         stage.sets = {"quick"};
         stage.patterns = patterns.size();
-        stage.inputs.insert(stage.inputs.end(), cli.globs.begin(), cli.globs.end());
-        stage.inputs.insert(stage.inputs.end(), cli.positional.begin(),
-                            cli.positional.end());
-        for (const auto &fl : cli.file_lists)
-            stage.inputs.push_back(std::string(fl.nul ? "files0:" : "files:") + fl.path);
-        if (cli.git_changed) stage.inputs.push_back("git:changed");
-        if (cli.git_staged) stage.inputs.push_back("git:staged");
-        if (cli.git_untracked) stage.inputs.push_back("git:untracked");
-        for (const auto &range : cli.git_ranges)
-            stage.inputs.push_back("git:range:" + range);
-        if (stage.inputs.empty()) stage.inputs.push_back("<stdin>");
+        stage.inputs = input_tokens(cli);
         stage.scope = cli.scope_lang;
         if (stage.scope.empty() &&
             (!cli.scope_pattern.empty() || !cli.in_scopes.empty()))
@@ -256,6 +264,49 @@ int run_search(const Cli &cli) {
     oo.extract_table = extract_table.any() ? &extract_table : nullptr;
     oo.pattern_count = patterns.size();
     oo.global_limit = cli.limit;
+
+    // Query header: when any pattern carries a description, LLM-facing
+    // output opens with an echo of the interpreted query plus a one-line
+    // legend per pattern. Pre-rendered here so the Formatter stays ignorant
+    // of Cli; patterns without a description fall back to their regexp so
+    // the legend is complete on its own.
+    if (oo.mode == OutputMode::Llm || oo.mode == OutputMode::Elide) {
+        bool any_desc = false;
+        for (const auto &p : patterns)
+            if (!p.desc.empty()) { any_desc = true; break; }
+        if (any_desc) {
+            auto flatten = [](std::string_view sv) {
+                std::string out(sv);
+                for (char &c : out)
+                    if (c == '\n' || c == '\r' || c == '\t') c = ' ';
+                return out;
+            };
+            std::string head = "query: ";
+            head += std::to_string(patterns.size());
+            head += patterns.size() == 1 ? " pattern over " : " patterns over ";
+            std::vector<std::string> toks = input_tokens(cli);
+            for (size_t i = 0; i < toks.size(); ++i) {
+                if (i) head += ", ";
+                head += toks[i];
+            }
+            oo.header_lines.push_back(std::move(head));
+            for (const auto &p : patterns) {
+                std::string line = "  ";
+                line += p.id;
+                line += " \xE2\x80\x94 "; // em dash
+                if (!p.desc.empty()) {
+                    line += flatten(p.desc);
+                } else if (!p.regexp.empty()) {
+                    line += '/';
+                    line += flatten(p.regexp);
+                    line += '/';
+                } else {
+                    line += "(ident group)";
+                }
+                oo.header_lines.push_back(std::move(line));
+            }
+        }
+    }
     Formatter fmt(oo, stdout);
     // Block extraction populates `block_line_start`/`_end` from the line
     // index, so we need it whenever block delimiters are configured (even
@@ -496,6 +547,13 @@ int run_search(const Cli &cli) {
                              ident_groups);
     const bool have_rels = !cli.relations.empty();
 
+    // Kept (post-filter) matches per pattern across the whole scan — the
+    // source of truth for the -llm/-elide "no matches" footer. Counted here
+    // rather than in the Formatter because buffering modes (-sample,
+    // -hotspots) only show a subset: "matched nowhere in the scan" must not
+    // depend on what happened to be displayed.
+    std::vector<uint64_t> pattern_hits(patterns.size(), 0);
+
     auto scan_buf = [&](const std::string &display_name,
                         std::string_view content) -> bool {
         LineIndex idx;
@@ -527,6 +585,8 @@ int run_search(const Cli &cli) {
             fmt.on_file_end(display_name, false);
             return true;
         }
+
+        for (const auto &m : kept) ++pattern_hits[m.pattern_index];
 
         // -records line (with -absent): emit one record per non-empty line
         // lacking each pattern, then skip the per-file emission path (and the
@@ -811,6 +871,9 @@ int run_search(const Cli &cli) {
                 if (seen_active) for (const auto &m : marks) seen_store.mark(m);
                 ++hs_emitted_rows;
             } else if (oo.mode == OutputMode::Llm) {
+                // Hotspot rows bypass the Formatter, so the query header
+                // has to be requested explicitly (idempotent).
+                fmt.emit_header();
                 std::string line = r.file;
                 line += ':';
                 line += std::to_string(r.window_lo);
@@ -990,6 +1053,12 @@ int run_search(const Cli &cli) {
         }
     }
 
+    if (oo.mode == OutputMode::Llm || oo.mode == OutputMode::Elide) {
+        std::vector<std::string> zero;
+        for (size_t i = 0; i < patterns.size(); ++i)
+            if (pattern_hits[i] == 0) zero.push_back(patterns[i].id);
+        fmt.set_zero_match_patterns(std::move(zero), patterns.size());
+    }
     fmt.on_complete();
 
     if (cli.summary) {

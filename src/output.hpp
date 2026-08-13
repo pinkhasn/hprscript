@@ -82,6 +82,12 @@ struct OutputOptions {
     // (so on_complete can emit a "limit reached" footer).
     size_t pattern_count = 1;
     int64_t global_limit = -1;
+
+    // LLM-facing query header (-llm/-elide only): pre-rendered lines, no
+    // trailing newlines, printed once before the first output. The runner
+    // fills this when any pattern carries a -desc/description; empty = no
+    // header.
+    std::vector<std::string> header_lines;
 };
 
 class Formatter {
@@ -138,6 +144,22 @@ public:
     // hit. LLM mode prints a "limit reached" footer in on_complete().
     void mark_limit_hit() { limit_hit_ = true; }
 
+    // Print the query header (opts_.header_lines) now if it hasn't printed
+    // yet. Idempotent; no-op outside Llm/Elide or with no header configured.
+    // Emission paths call it internally before the first output; the runner
+    // also calls it before rows that bypass the formatter (-hotspots -llm).
+    void emit_header();
+
+    // Runner reports which patterns ended the scan with zero kept matches
+    // (post-filter, whole scan — not just the shown subset), so
+    // on_complete() can state absence explicitly instead of letting a
+    // batched pattern vanish from Llm/Elide output silently. `total` is the
+    // full pattern count.
+    void set_zero_match_patterns(std::vector<std::string> ids, size_t total) {
+        zero_match_ids_ = std::move(ids);
+        patterns_total_ = total;
+    }
+
 private:
     void emit_json(const std::string &file, const Pattern &pattern,
                    const Match &m, std::string_view buf, const LineIndex &idx,
@@ -171,6 +193,9 @@ private:
     uint64_t bytes_emitted_ = 0; // total bytes written to out_
     bool over_budget_ = false;   // sticky once max_output_bytes is exceeded
     bool limit_hit_ = false;     // set by mark_limit_hit() (LLM footer)
+    bool header_done_ = false;   // query header printed (emit_header dedupe)
+    std::vector<std::string> zero_match_ids_; // patterns with 0 kept matches
+    size_t patterns_total_ = 0;  // denominator for the "no matches" footer
     std::string llm_last_file_;  // last file printed as a header (-llm/-elide dedupe)
     std::unordered_map<std::string, uint64_t> per_file_counts_;
 
