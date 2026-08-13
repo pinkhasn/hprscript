@@ -490,7 +490,8 @@ void Formatter::emit_custom(const std::string &file, const Pattern &pattern,
 void Formatter::emit_header() {
     if (header_done_) return;
     header_done_ = true;
-    if (opts_.mode != OutputMode::Llm && opts_.mode != OutputMode::Elide)
+    if (opts_.mode != OutputMode::Llm && opts_.mode != OutputMode::Elide &&
+        opts_.mode != OutputMode::Rollup)
         return;
     if (opts_.header_lines.empty()) return;
     auto &s = scratch_;
@@ -770,6 +771,105 @@ void Formatter::on_file_elide(const std::string &file,
     flush();
 }
 
+void Formatter::on_file_rollup(const std::string &file,
+                               const std::vector<Match> &kept,
+                               std::string_view buf, const LineIndex &idx,
+                               const ScopeIndex *scope) {
+    if (kept.empty()) return;
+    emit_header();
+    emitted_ += static_cast<uint64_t>(kept.size());
+
+    // Group by innermost enclosing scope in first-seen order. Unlike
+    // -elide's contiguous-run flushing, a map keeps a scope's count whole
+    // even when nesting interleaves its matches; every no-scope match lands
+    // in one shared "(top level)" group.
+    struct Group {
+        const ScopeRange *sr;
+        std::vector<const Match *> ms;
+    };
+    std::vector<Group> groups;
+    std::unordered_map<const ScopeRange *, size_t> group_of;
+    for (const auto &m : kept) {
+        const ScopeRange *sr = scope ? scope->find_innermost(m.from) : nullptr;
+        auto it = group_of.find(sr);
+        if (it == group_of.end()) {
+            group_of.emplace(sr, groups.size());
+            groups.push_back({sr, {&m}});
+        } else {
+            groups[it->second].ms.push_back(&m);
+        }
+    }
+
+    auto &s = scratch_;
+    if (llm_last_file_ != file) {
+        llm_last_file_ = file;
+        s.clear();
+        s.append(file);
+        s += '\n';
+        write_out(s);
+    }
+
+    for (const auto &g : groups) {
+        s.clear();
+        s += "  ";
+        if (g.sr) {
+            append_uint32(s, g.sr->line_start);
+            s += '-';
+            append_uint32(s, g.sr->line_end);
+            s += ' ';
+            s += g.sr->kind;
+            s += ' ';
+            s += g.sr->name;
+        } else {
+            s += "(top level)";
+        }
+        s += " \xE2\x80\x94 "; // em dash
+        append_uint(s, g.ms.size());
+        s += g.ms.size() == 1 ? " hit" : " hits";
+
+        // Per-pattern breakdown, count-descending — only worth the tokens
+        // when more than one pattern is in play.
+        if (opts_.pattern_count > 1 && opts_.patterns) {
+            std::vector<std::pair<uint32_t, uint64_t>> counts; // (pat, n)
+            for (const Match *m : g.ms) {
+                bool found = false;
+                for (auto &c : counts)
+                    if (c.first == m->pattern_index) {
+                        ++c.second;
+                        found = true;
+                        break;
+                    }
+                if (!found) counts.push_back({m->pattern_index, 1});
+            }
+            std::stable_sort(counts.begin(), counts.end(),
+                             [](const auto &a, const auto &b) {
+                                 return a.second > b.second;
+                             });
+            s += " (";
+            for (size_t i = 0; i < counts.size(); ++i) {
+                if (i) s += ", ";
+                s += (*opts_.patterns)[counts[i].first].id;
+                s += "\xC3\x97"; // ×
+                append_uint(s, counts[i].second);
+            }
+            s += ')';
+        }
+        s += '\n';
+
+        // One representative: the group's first match line.
+        uint32_t line = idx.line_of(g.ms.front()->from);
+        std::string_view text = idx.line_text(line);
+        text = truncate_safe(text, opts_.max_context_bytes, nullptr);
+        if (!text.empty() && text.back() == '\n') text.remove_suffix(1);
+        s += "    ";
+        append_uint32(s, line);
+        s += ": ";
+        s.append(text.data(), text.size());
+        s += '\n';
+        write_out(s);
+    }
+}
+
 void Formatter::on_match(const std::string &file, const Pattern &pattern,
                          const Match &m, std::string_view buf,
                          const LineIndex &idx, const ScopeIndex *scope,
@@ -791,9 +891,11 @@ void Formatter::on_match(const std::string &file, const Pattern &pattern,
         case OutputMode::Custom:      emit_custom(file, pattern, m, buf, idx, scope, roles); break;
         case OutputMode::Llm:         emit_llm(file, pattern, m, buf, idx, scope, roles); break;
         case OutputMode::Elide:
-            // Elide renders a whole file's matches at once via
-            // on_file_elide(); it never streams through on_match(). Undo
-            // the ++emitted_ above so callers can't double-count by mistake.
+        case OutputMode::Rollup:
+            // Elide/Rollup render a whole file's matches at once via
+            // on_file_elide()/on_file_rollup(); they never stream through
+            // on_match(). Undo the ++emitted_ above so callers can't
+            // double-count by mistake.
             --emitted_;
             break;
         case OutputMode::Absent:
@@ -826,8 +928,15 @@ void Formatter::on_file_end(const std::string &file, bool had_match) {
 }
 
 void Formatter::on_complete() {
-    if (opts_.mode == OutputMode::Llm || opts_.mode == OutputMode::Elide) {
+    if (opts_.mode == OutputMode::Llm || opts_.mode == OutputMode::Elide ||
+        opts_.mode == OutputMode::Rollup) {
         char buf[160];
+        if (!cooccurrence_footer_.empty()) {
+            emit_header();
+            std::string s = cooccurrence_footer_;
+            s += '\n';
+            std::fwrite(s.data(), 1, s.size(), out_);
+        }
         if (!zero_match_ids_.empty()) {
             // A batched pattern that matched nothing must be stated, not
             // inferred from its absence in the output. When the scan stopped

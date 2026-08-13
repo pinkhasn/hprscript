@@ -33,6 +33,7 @@ enum class OutputMode {
     Absent,       // grep -L: files where pattern is NOT present
     Llm,          // -llm: token-efficient text for LLM consumption
     Elide,        // -elide: scope-aware chunk rendering, whole file at once
+    Rollup,       // -rollup: one line per enclosing scope with match counts
 };
 
 // True iff the given output mode reads line/col/context from a LineIndex.
@@ -43,6 +44,7 @@ inline bool needs_line_index(OutputMode m) {
         case OutputMode::Custom:
         case OutputMode::Llm:
         case OutputMode::Elide:
+        case OutputMode::Rollup:
             return true;
         case OutputMode::FilesOnly:
         case OutputMode::Counts:
@@ -77,6 +79,10 @@ struct OutputOptions {
     // When non-null, capture groups for matched patterns are re-extracted
     // and surfaced in JSON / format-template output. Pointer is borrowed.
     const ExtractTable *extract_table = nullptr;
+
+    // Full pattern list (borrowed) — Rollup mode needs it to render
+    // per-pattern counts by id. nullptr disables the breakdown.
+    const std::vector<Pattern> *patterns = nullptr;
 
     // LLM mode only: total pattern count (so the formatter can decide whether
     // to prefix records with the pattern id) and the effective global limit
@@ -124,6 +130,16 @@ public:
                        const ScopeIndex *scope, const SeenStore *seen = nullptr,
                        std::vector<SeenMark> *marks_out = nullptr);
 
+    // -rollup mode: render one file's kept-match set as one line per
+    // innermost enclosing scope — `<lines> <kind> <name> — N hits
+    // (<pat>×<n>, …)` plus the first matched line as a representative.
+    // Matches outside any scope group under a single "(top level)" row, so
+    // files without scope detection collapse to a per-file summary. `kept`
+    // must be sorted by `from` (the collector's normal emission order).
+    void on_file_rollup(const std::string &file, const std::vector<Match> &kept,
+                        std::string_view buf, const LineIndex &idx,
+                        const ScopeIndex *scope);
+
     // Record-level absence (-records line with -absent): emit one JSON line
     // for a record (line) of `file` that lacks `pattern`. Only meaningful in
     // Absent mode; `text` is the record's content (truncated to
@@ -166,6 +182,13 @@ public:
         patterns_total_ = total;
     }
 
+    // Pre-rendered cross-pattern co-occurrence footer (no trailing newline),
+    // built by the runner from whole-scan per-file pattern sets. Printed by
+    // on_complete() in the LLM-facing modes; empty = none.
+    void set_cooccurrence_footer(std::string line) {
+        cooccurrence_footer_ = std::move(line);
+    }
+
 private:
     void emit_json(const std::string &file, const Pattern &pattern,
                    const Match &m, std::string_view buf, const LineIndex &idx,
@@ -202,6 +225,7 @@ private:
     bool header_done_ = false;   // query header printed (emit_header dedupe)
     std::vector<std::string> zero_match_ids_; // patterns with 0 kept matches
     size_t patterns_total_ = 0;  // denominator for the "no matches" footer
+    std::string cooccurrence_footer_; // set_cooccurrence_footer()
     std::string llm_last_file_;  // last file printed as a header (-llm/-elide dedupe)
     std::unordered_map<std::string, uint64_t> per_file_counts_;
 

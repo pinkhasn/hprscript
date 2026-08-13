@@ -1329,6 +1329,74 @@ expect_not_contains "unknown extension: no tags" "[comment]" "$OUT"
 rm -rf "$RT_FIX"
 
 # ---------------------------------------------------------------------------
+section "scope rollup (-rollup) and co-occurrence footer"
+RU_FIX="$HERE/_tmp_rollup"
+mkdir -p "$RU_FIX"
+cat > "$RU_FIX/m.go" <<'EOF'
+package main
+
+func Alpha() {
+	work()
+	work()
+	other()
+}
+
+func Beta() {
+	work()
+}
+EOF
+
+OUT=$("$BIN" -p 'work\(\)' -name w -p 'other\(\)' -name o -rollup "$RU_FIX/m.go")
+expect_contains "rollup line with counts" "3-7 func Alpha — 3 hits (w×2, o×1)" "$OUT"
+expect_contains "rollup second scope" "9-11 func Beta — 1 hit (w×1)" "$OUT"
+expect_contains "rollup representative line" "    4: 	work()" "$OUT"
+expect_contains "rollup file header" "$RU_FIX/m.go" "$OUT"
+
+OUT=$("$BIN" -p 'work\(\)' -rollup "$RU_FIX/m.go")
+expect_contains "single pattern: no breakdown" "3-7 func Alpha — 2 hits" "$OUT"
+expect_not_contains "single pattern: no ×" "×" "$OUT"
+
+printf 'TODO one\nx\nTODO two\n' > "$RU_FIX/notes.txt"
+OUT=$("$BIN" -p TODO -rollup "$RU_FIX/notes.txt")
+expect_contains "scopeless matches roll up as top level" "(top level) — 2 hits" "$OUT"
+
+OUT=$("$BIN" -p 'zz_nope' -rollup "$RU_FIX/m.go" ; echo "rc=$?")
+expect_contains "rollup no matches exit 1" "rc=1" "$OUT"
+expect_contains "rollup zero-match footer" "--- no matches: p0 (1 of 1 pattern) ---" "$OUT"
+
+OUT=$("$BIN" -p x -rollup -llm 2>&1) ; RC=$?
+expect_contains "-rollup is an exclusive output mode" "mutually exclusive" "$OUT"
+[[ "$RC" == "2" ]] && report ok "-rollup + -llm exit 2" || report fail "-rollup + -llm exit (got $RC)"
+OUT=$("$BIN" -p x -rollup -sample 3 "$RU_FIX/m.go" 2>&1) ; RC=$?
+expect_contains "-rollup + -sample rejected" "don't compose with -sample" "$OUT"
+
+# --- co-occurrence footer
+cat > "$RU_FIX/a.log" <<'EOF'
+WARN x
+ERROR y
+EOF
+printf 'WARN only\n' > "$RU_FIX/b.log"
+printf 'ERROR only\n' > "$RU_FIX/c.log"
+OUT=$("$BIN" -p WARN -name warn -p ERROR -name err -llm "$RU_FIX/a.log" "$RU_FIX/b.log" "$RU_FIX/c.log")
+expect_contains "co-occurrence crosstab" "--- files: warn 2, err 2; both: 1 ($RU_FIX/a.log) ---" "$OUT"
+
+OUT=$("$BIN" -p WARN -name warn -p ERROR -name err -llm "$RU_FIX/b.log" "$RU_FIX/c.log")
+expect_contains "zero overlap stated explicitly" "both: 0" "$OUT"
+
+OUT=$("$BIN" -p WARN -p 'zz_nope' -llm "$RU_FIX/b.log")
+expect_not_contains "one active pattern: no co-occurrence footer" "--- files:" "$OUT"
+
+OUT=$("$BIN" -p WARN -name warn -p ERROR -name err -p 'x$' -name xx -llm "$RU_FIX/a.log" "$RU_FIX/b.log" "$RU_FIX/c.log")
+expect_contains ">2 patterns: multi-pattern form with sets" "multi-pattern: 1 ($RU_FIX/a.log warn+err+xx)" "$OUT"
+
+OUT=$("$BIN" -p WARN -name warn -p ERROR -name err "$RU_FIX/a.log")
+expect_not_contains "JSONL mode: no co-occurrence footer" "--- files:" "$OUT"
+
+OUT=$("$BIN" -p 'work\(\)' -name w -p 'other\(\)' -name o -rollup "$RU_FIX/m.go")
+expect_contains "rollup gets the co-occurrence footer" "--- files: w 1, o 1; both: 1" "$OUT"
+rm -rf "$RU_FIX"
+
+# ---------------------------------------------------------------------------
 section "fixed strings (-F / -Fi / -patterns-from)"
 FS_FIX="$HERE/_tmp_fixed"
 mkdir -p "$FS_FIX"
@@ -2083,7 +2151,7 @@ OUT=$("$BIN" -p x -elide -llm 2>&1) ; RC=$?
 expect_contains "-elide output-mode conflict" "mutually exclusive" "$OUT"
 [[ "$RC" == "2" ]] && report ok "-elide output-mode conflict exit 2" || report fail "-elide output-mode conflict exit (got $RC)"
 OUT=$("$BIN" -p x -elide -sample 5 2>&1) ; RC=$?
-expect_contains "-elide + -sample rejected" "doesn't compose with -sample" "$OUT"
+expect_contains "-elide + -sample rejected" "don't compose with -sample" "$OUT"
 [[ "$RC" == "2" ]] && report ok "-elide + -sample exit 2" || report fail "-elide + -sample exit (got $RC)"
 
 # --- -m caps how many matches participate in the render (pattern excludes

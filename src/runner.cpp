@@ -274,13 +274,20 @@ int run_search(const Cli &cli) {
     oo.extract_table = extract_table.any() ? &extract_table : nullptr;
     oo.pattern_count = patterns.size();
     oo.global_limit = cli.limit;
+    oo.patterns = &patterns; // outlives the Formatter (borrowed)
+
+    // The three LLM-facing modes share the query header and the trailing
+    // co-occurrence / no-matches footers.
+    const bool llm_facing = oo.mode == OutputMode::Llm ||
+                            oo.mode == OutputMode::Elide ||
+                            oo.mode == OutputMode::Rollup;
 
     // Query header: when any pattern carries a description, LLM-facing
     // output opens with an echo of the interpreted query plus a one-line
     // legend per pattern. Pre-rendered here so the Formatter stays ignorant
     // of Cli; patterns without a description fall back to their regexp so
     // the legend is complete on its own.
-    if (oo.mode == OutputMode::Llm || oo.mode == OutputMode::Elide) {
+    if (llm_facing) {
         bool any_desc = false;
         for (const auto &p : patterns)
             if (!p.desc.empty()) { any_desc = true; break; }
@@ -368,7 +375,7 @@ int run_search(const Cli &cli) {
     // context anyway.
     std::string eff_scope_lang = cli.scope_lang;
     if ((tf.scope_needed() || oo.mode == OutputMode::Elide ||
-         cli.budget_bytes > 0) &&
+         oo.mode == OutputMode::Rollup || cli.budget_bytes > 0) &&
         eff_scope_lang.empty() && cli.scope_pattern.empty())
         eff_scope_lang = "auto";
     bool scope_enabled = !eff_scope_lang.empty() ||
@@ -426,11 +433,13 @@ int run_search(const Cli &cli) {
         // Sample is incompatible with output modes that don't emit per-match
         // data — let the user know rather than silently doing nothing.
         if (oo.mode == OutputMode::FilesOnly || oo.mode == OutputMode::Counts ||
-            oo.mode == OutputMode::Absent || oo.mode == OutputMode::Elide) {
+            oo.mode == OutputMode::Absent || oo.mode == OutputMode::Elide ||
+            oo.mode == OutputMode::Rollup) {
             std::fprintf(stderr,
                          "hprscript: -sample requires a per-match output mode "
-                         "(default JSONL, -o, -format, -llm) — -elide renders "
-                         "whole-file batches and doesn't compose with -sample\n");
+                         "(default JSONL, -o, -format, -llm) — -elide/-rollup "
+                         "render whole-file batches and don't compose with "
+                         "-sample\n");
             return 2;
         }
     }
@@ -573,6 +582,19 @@ int run_search(const Cli &cli) {
     // depend on what happened to be displayed.
     std::vector<uint64_t> pattern_hits(patterns.size(), 0);
 
+    // Cross-pattern co-occurrence, per file: distinct-file counts per
+    // pattern, plus which files matched more than one pattern. Feeds the
+    // trailing co-occurrence footer in the LLM-facing modes.
+    std::vector<uint64_t> pattern_file_counts(patterns.size(), 0);
+    uint64_t multi_pattern_files = 0;
+    struct MultiFile {
+        std::string file;
+        std::vector<uint32_t> pats;
+    };
+    std::vector<MultiFile> multi_sample; // first few, for the footer's list
+    static constexpr size_t MULTI_SAMPLE_CAP = 5;
+    std::vector<char> file_pats(patterns.size()); // per-file scratch
+
     auto scan_buf = [&](const std::string &display_name,
                         std::string_view content) -> bool {
         LineIndex idx;
@@ -606,6 +628,28 @@ int run_search(const Cli &cli) {
         }
 
         for (const auto &m : kept) ++pattern_hits[m.pattern_index];
+
+        if (!kept.empty()) {
+            std::fill(file_pats.begin(), file_pats.end(), 0);
+            for (const auto &m : kept) file_pats[m.pattern_index] = 1;
+            uint32_t distinct = 0;
+            for (size_t pi = 0; pi < file_pats.size(); ++pi) {
+                if (!file_pats[pi]) continue;
+                ++pattern_file_counts[pi];
+                ++distinct;
+            }
+            if (distinct >= 2) {
+                ++multi_pattern_files;
+                if (multi_sample.size() < MULTI_SAMPLE_CAP) {
+                    MultiFile mf;
+                    mf.file = display_name;
+                    for (size_t pi = 0; pi < file_pats.size(); ++pi)
+                        if (file_pats[pi])
+                            mf.pats.push_back(static_cast<uint32_t>(pi));
+                    multi_sample.push_back(std::move(mf));
+                }
+            }
+        }
 
         // -records line (with -absent): emit one record per non-empty line
         // lacking each pattern, then skip the per-file emission path (and the
@@ -731,6 +775,16 @@ int run_search(const Cli &cli) {
                 // -elide's render is the final output — nothing measured
                 // and discarded like -budget — so every mark commits.
                 if (seen_active) for (const auto &m : marks) seen_store.mark(m);
+            }
+        } else if (oo.mode == OutputMode::Rollup) {
+            std::vector<Match> capped = kept;
+            if (cli.per_file_limit > 0 &&
+                capped.size() > static_cast<size_t>(cli.per_file_limit))
+                capped.resize(static_cast<size_t>(cli.per_file_limit));
+            if (!capped.empty()) {
+                had_match = true;
+                fmt.on_file_rollup(display_name, capped, content, idx,
+                                   scope_ptr);
             }
         } else {
             RoleIndex role_idx;
@@ -1084,11 +1138,61 @@ int run_search(const Cli &cli) {
         }
     }
 
-    if (oo.mode == OutputMode::Llm || oo.mode == OutputMode::Elide) {
+    if (llm_facing) {
         std::vector<std::string> zero;
         for (size_t i = 0; i < patterns.size(); ++i)
             if (pattern_hits[i] == 0) zero.push_back(patterns[i].id);
         fmt.set_zero_match_patterns(std::move(zero), patterns.size());
+
+        // Co-occurrence footer: batched patterns are usually batched to be
+        // correlated — hand over the per-file join instead of leaving it to
+        // the reader. Only meaningful when at least two patterns matched
+        // somewhere; `both: 0` is stated explicitly (absence of overlap is
+        // a finding). Counts are whole-scan, qualified on early stops.
+        size_t active = 0;
+        for (uint64_t c : pattern_file_counts)
+            if (c > 0) ++active;
+        if (patterns.size() >= 2 && active >= 2) {
+            const bool stopped = stats.stop_reason == "limit" ||
+                                 stats.stop_reason == "output_budget";
+            std::string f = stopped ? "--- files (scan stopped early): "
+                                    : "--- files: ";
+            bool first = true;
+            for (size_t i = 0; i < patterns.size(); ++i) {
+                if (pattern_file_counts[i] == 0) continue;
+                if (!first) f += ", ";
+                first = false;
+                f += patterns[i].id;
+                f += ' ';
+                f += std::to_string(pattern_file_counts[i]);
+            }
+            f += "; ";
+            f += (patterns.size() == 2) ? "both: " : "multi-pattern: ";
+            f += std::to_string(multi_pattern_files);
+            if (multi_pattern_files > 0) {
+                f += " (";
+                for (size_t i = 0; i < multi_sample.size(); ++i) {
+                    if (i) f += ", ";
+                    f += multi_sample[i].file;
+                    if (patterns.size() > 2) {
+                        f += ' ';
+                        for (size_t k = 0; k < multi_sample[i].pats.size(); ++k) {
+                            if (k) f += '+';
+                            f += patterns[multi_sample[i].pats[k]].id;
+                        }
+                    }
+                }
+                if (multi_pattern_files > multi_sample.size()) {
+                    f += ", +";
+                    f += std::to_string(multi_pattern_files -
+                                        multi_sample.size());
+                    f += " more";
+                }
+                f += ')';
+            }
+            f += " ---";
+            fmt.set_cooccurrence_footer(std::move(f));
+        }
     }
     fmt.on_complete();
 

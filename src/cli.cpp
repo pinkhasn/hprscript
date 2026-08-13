@@ -63,7 +63,7 @@ bool parse_nonneg(const char *s, int64_t &out) {
 bool set_output_mode(Cli &cli, OutputMode mode) {
     if (cli.out_mode_set) {
         cli.error = true;
-        cli.error_message = "output modes -j/-f/-c/-o/-format/-absent/-llm/-elide are mutually exclusive";
+        cli.error_message = "output modes -j/-f/-c/-o/-format/-absent/-llm/-elide/-rollup are mutually exclusive";
         return false;
     }
     cli.out_mode = mode;
@@ -245,6 +245,10 @@ void print_help(FILE *out) {
 "  -elide           Scope-aware chunks: signature + matched lines with -A/-B\n"
 "                   context; untouched interior lines fold as \"… (+N lines)\"\n"
 "                   (implies -scope auto when no -scope config is given)\n"
+"  -rollup          One line per enclosing scope: line range, name, match\n"
+"                   count with per-pattern breakdown, and one representative\n"
+"                   line; scopeless matches group as \"(top level)\" (implies\n"
+"                   -scope auto when no -scope config is given)\n"
 "\n"
 "Block extraction (with -p):\n"
 "  -block-open <s>   Opening delimiter (e.g. \"{\")\n"
@@ -761,6 +765,7 @@ Cli parse_cli(int argc, char **argv) {
         if (eq(a, "-absent")) { if (!set_output_mode(cli, OutputMode::Absent)) return cli; continue; }
         if (eq(a, "-llm"))    { if (!set_output_mode(cli, OutputMode::Llm))    return cli; continue; }
         if (eq(a, "-elide"))  { if (!set_output_mode(cli, OutputMode::Elide))  return cli; continue; }
+        if (eq(a, "-rollup")) { if (!set_output_mode(cli, OutputMode::Rollup)) return cli; continue; }
         if (eq(a, "-format")) {
             const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
             if (!set_output_mode(cli, OutputMode::Custom)) return cli;

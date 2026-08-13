@@ -102,7 +102,7 @@ simultaneous.
 | `-pi <pattern>` | Case-insensitive search pattern (HS `CASELESS`; folds Unicode by default; repeatable, mixable with `-p`) |
 | `-F <string>` / `-Fi <string>` | Fixed-string pattern (case-sensitive / -insensitive) — matched literally, no regex interpretation. Repeatable, mixable with `-p`/`-pi`. |
 | `-name <id>` | Name the preceding `-p`/`-pi`/`-F`/`-Fi`/`-ident`: the id (`[A-Za-z_]\w*`) replaces the auto `p<i>`/`ident<i>` in `pat`, `$PAT_ID`, `-llm` tags, relations, and `-file-where`. |
-| `-desc <text>` | Describe the preceding pattern in free text. When any pattern has one, `-llm`/`-elide` output opens with a [query legend](#query-header-and-no-matches-footer) so each result block is self-describing. |
+| `-desc <text>` | Describe the preceding pattern in free text. When any pattern has one, `-llm`/`-elide`/`-rollup` output opens with a [query legend](#query-header-and-result-footers) so each result block is self-describing. |
 | `-patterns-from <f>` | Load additional patterns from a JSONL rule file — one `{"id","regexp"\|"literal","description","case_insensitive","word_boundary","utf8","ref"}` object per line, `#` comments allowed. Repeatable. See [Fixed strings & pattern files](#fixed-strings--pattern-files--f--fi--patterns-from). |
 | `-ident '<terms>'` | Match identifiers whose subtokens include ALL given space-separated terms, regardless of casing/separator (`parseConfig` ~ `parse_config`). Repeatable = OR. See [Identifier matching](#identifier-matching--ident). |
 | `-file-where <expr>` | Per-file predicate: pattern ids, plus `count(pat) > n` / `churn(days) > n` / `lang == name` conditions (`'err AND NOT recovery'`, `'churn(30) > 2'`). See [Per-file conditions](#per-file-conditions--file-where). |
@@ -159,6 +159,7 @@ simultaneous.
 | `-absent` | Files where the pattern is **not** found (like `grep -L`) |
 | `-llm` | Token-efficient plain text grouped by file (LLM-friendly). See [LLM output mode](#llm-output-mode). |
 | `-elide` | Scope-aware chunks with unmatched interior lines folded away. See [Elided scope output](#elided-scope-output--elide). |
+| `-rollup` | One line per enclosing scope: line range, name, per-pattern match counts, one representative line. See [Scope rollup](#scope-rollup--rollup). |
 
 `-format` template tokens (substituted per match):
 
@@ -372,7 +373,7 @@ rejected at startup.
 `-desc <text>` is the same kind of postfix modifier, but for meaning instead
 of identity: free text explaining what the pattern is *for*. It surfaces as a
 one-time query legend at the top of `-llm`/`-elide` output (see
-[Query header and no-matches footer](#query-header-and-no-matches-footer)),
+[Query header and result footers](#query-header-and-result-footers)),
 so a reader of the results — human or LLM — doesn't have to reverse-engineer
 intent from the regex:
 
@@ -2316,9 +2317,9 @@ Line-shape matches also carry [role tags](#per-match-role-tags) — `[comment]`,
 
 When `-limit` or `-max-output-bytes` truncates the output, a final `--- limit reached: ... ---` (or `--- output-byte budget reached ... ---`) footer line is emitted so the reader knows the result was cut, not finished.
 
-### Query header and no-matches footer
+### Query header and result footers
 
-Two additions make each `-llm`/`-elide` result block self-describing — useful when the output is read later (or by a different agent) than the command that produced it:
+Three additions make each `-llm`/`-elide`/`-rollup` result block self-describing — useful when the output is read later (or by a different agent) than the command that produced it:
 
 **Query header.** When any pattern carries a description (`-desc`, or `description` in a `-patterns-from` rule file), the output opens with an echo of the interpreted query and a one-line legend per pattern — described patterns show their description, the rest fall back to their regexp so the legend is complete on its own:
 
@@ -2337,6 +2338,20 @@ No `-desc` anywhere → no header, so existing output is unchanged unless you op
 ```
 
 The counts cover the whole scan, not just the displayed subset, so the footer stays truthful under `-sample`/`-hotspots`. When `-limit` or `-max-output-bytes` stopped the scan early the claim only holds for the scanned prefix, and the footer says so: `--- no matches (scan stopped early): … ---`. Exit codes are unaffected (still 1 when nothing matched at all).
+
+**Co-occurrence footer.** Batched patterns are usually batched to be *correlated* — so the per-file join is handed over instead of left to the reader. When at least two patterns matched somewhere, a trailing footer gives each pattern's distinct-file count and the overlap. Two patterns get an exact crosstab:
+
+```
+--- files: warn 12, err 41; both: 3 (a.go, b.go, c.go) ---
+```
+
+Three or more report the multi-pattern files with their pattern sets:
+
+```
+--- files: warn 12, err 41, todo 7; multi-pattern: 2 (a.go warn+err, b.go warn+err+todo) ---
+```
+
+`both: 0` is stated explicitly — absence of overlap is a finding. At most 5 files are named (`+N more` covers the rest); counts are whole-scan and post-filter, qualified with `(scan stopped early)` like the no-matches footer when a limit cut the scan.
 
 ### Examples
 
@@ -2420,6 +2435,29 @@ hprscript -p 'cli\.limit' -elide -scope cpp src/runner.cpp
 - Renders a whole file's kept matches in one call rather than streaming per match, so it's mutually exclusive with `-sample` (see [Sample mode](#sample-mode--sample-n)).
 - `-m` caps how many of a file's matches participate in the render; there's no mid-file stopping point the way per-match modes have one.
 - No per-match pattern-id tagging inside a rendered window (unlike `-llm`'s `[<pat>]` tags) — use `-llm` or the default JSON mode when you need to attribute a specific line to a specific pattern.
+
+---
+
+## Scope rollup (`-rollup`)
+
+Between per-match lines (`-llm`) and ranked files (`-hotspots`) there's a missing altitude: *which functions* are involved, and how heavily. Ten hits inside one function is one fact, not ten. `-rollup` renders one line per innermost enclosing scope — line range, kind and name, match count with a per-pattern breakdown (count-descending), plus the scope's first matched line as a representative:
+
+```bash
+hprscript -p 'work\(\)' -name w -p 'other\(\)' -name o -rollup pkg/
+# →
+# pkg/m.go
+#   3-7 func Alpha — 3 hits (w×2, o×1)
+#     4: 	work()
+#   9-11 func Beta — 1 hit (w×1)
+#     10: 	work()
+# --- files: w 1, o 1; both: 1 (pkg/m.go) ---
+```
+
+Implies `-scope auto` when no `-scope` config is given (same convention as `-elide`). Matches outside any detected scope — including whole files in languages without a scope pack — group under a single `(top level)` row, so a config file or log collapses to a one-row-per-file summary. The per-pattern breakdown is omitted when only one pattern is active.
+
+`-rollup` is an output mode, mutually exclusive with `-j`/`-f`/`-c`/`-o`/`-format`/`-absent`/`-llm`/`-elide` and with `-sample` (it renders whole-file batches). It participates in the [query header and result footers](#query-header-and-result-footers) like `-llm` and `-elide`. `-m` caps how many of a file's matches participate.
+
+Use it as the first call of an investigation — it answers "where is this concentrated?" in a handful of tokens — then drill into specific scopes with `-in-scope` or `-elide`.
 
 ---
 
