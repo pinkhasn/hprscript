@@ -13,7 +13,7 @@ Invoke the binary through Bash as `hprscript`. Use one call per reasoning stage 
 
 - Put distinguishable terms in separate `-p` or `-pi` flags so every hit retains its pattern ID.
 - Prefer `-llm` when reading results, `-f` for paths, `-c` for counts, and `-limit N` for existence checks. In `-llm`/`-elide`/`-rollup` output, patterns with zero matches are named in a trailing `--- no matches: … ---` footer — treat that as explicit evidence of absence, qualified with "scan stopped early" when a limit cut the scan. With ≥2 matching patterns a `--- files: … ---` footer gives per-pattern file counts and the overlap (`both:`/`multi-pattern:`) — read the correlation from there instead of joining by hand.
-- Trust per-match role tags instead of re-deriving them: `[comment]`/`[string]`/`[import]` in `-llm` (a `role` field in JSONL, `$ROLE` in `-format`) classify each hit lexically, and with `-scope` active a hit on a signature line reads `[def func X]` while body hits read `[in func X]`. Untagged hits in a recognized language are plain code.
+- Trust per-match role tags instead of re-deriving them: `[comment]`/`[string]`/`[import]` in `-llm` (a `role` field in JSONL, `$ROLE` in `-format`) classify each hit lexically, and with `-scope` active a hit on a signature line reads `[def func X]` while body hits read `[in func X]`. Untagged hits in a recognized language are plain code; `-no-roles` disables tagging.
 - Use an absolute path or glob when the effective cwd is uncertain. Inspect the first emitted path and stop if it escapes the intended tree.
 - Add `-summary -require-complete` when a broad sweep must be exhaustive. Do not present a partial scan as complete.
 - Restructure unsupported lookarounds or backreferences, or express the relationship with `query` or script phases. Do not fall back to grep or rg.
@@ -38,7 +38,7 @@ Invoke the binary through Bash as `hprscript`. Use one call per reasoning stage 
 | Compact scope excerpts | `-elide` |
 | Cross-run chunk deduplication | `-elide` or `-budget` with `-seen <path>` |
 
-Cheapness ladder: `-f` / `-absent` / `-c` are cheaper than `-o` / `-llm`, which are cheaper than default JSONL.
+Cheapness ladder: `-f` / `-absent` / `-c` are cheaper than `-rollup`, which is cheaper than `-o` / `-llm`, which are cheaper than default JSONL.
 
 ## Quick search
 
@@ -52,7 +52,7 @@ hprscript -ident 'parse config' -glob '**/*.go'
 - `-p` / `-pi`: case-sensitive / case-insensitive regex, repeatable.
 - `-F` / `-Fi`: literal fixed strings.
 - `-name <id>`: name the preceding pattern for output, relations, and `-file-where`.
-- `-desc <text>`: describe the preceding pattern; `-llm`/`-elide` output then opens with a query legend, keeping the result block self-describing for later readers.
+- `-desc <text>`: describe the preceding pattern; `-llm`/`-elide`/`-rollup` output then opens with a query legend, keeping the result block self-describing for later readers.
 - `-patterns-from <file>`: load a JSONL rule pack (entries may carry a `description`).
 - `-ident '<terms>'`: find identifier variants such as `parseConfig`, `parse_config`, and `ConfigParser`.
 - `-w`: wrap all patterns in word boundaries; use inline `\b` for per-pattern control.
@@ -95,14 +95,17 @@ hprscript -p '\bLock\(\)' -name lock -p '\bUnlock\(\)' -name unlock \
 
 Use `-near A:B:K`, `-far A:B:K`, `-same-scope A:B`, and `-not-same-scope A:B`. Multiple relations combine with AND.
 
-## Rank and pack context
+## Survey, rank, and pack context
 
 ```bash
+hprscript -p 'AuthMiddleware' -p 'validateToken' -rollup -glob '**/*.go'
 hprscript -p 'AuthMiddleware' -p 'validateToken' -hotspots 5 -llm -glob '**/*.go'
 hprscript -p 'AuthMiddleware' -p 'validateToken' -budget 8000 -glob '**/*.go'
 hprscript -p 'AuthMiddleware' -elide -seen /tmp/auth-review.seen -glob '**/*.go'
 ```
 
+- `-rollup`: one line per innermost enclosing scope — line range, kind, name, hit count with a per-pattern breakdown, and the scope's first matched line; matches outside any scope group under `(top level)`. Use it as the first call of an investigation, then drill into specific scopes with `expand`, `-in-scope`, or `-elide`.
+- `-refs`: stamp `-llm`/`-rollup` line numbers as `line@hash` so a later `expand` verifies content before rendering.
 - `-hotspots N`: rank files and expose dense match windows.
 - `-budget N`: rank and render full or compact chunks, with an explicit dropped-items footer.
 - `-elide`: show scope signatures and matched lines while folding untouched interiors.

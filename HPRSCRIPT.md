@@ -2396,7 +2396,7 @@ hprscript -p 'TODO' -llm -limit 1 -glob '**/*.go'
 - **Quick human eyeballing.** The grouped layout reads like `grep -n` output rather than JSON Lines — easier to skim.
 - **You don't need byte offsets / capture groups.** Pattern IDs still show up (as `[<pat>]` tags when multiple patterns are active), but if a downstream tool needs `from`/`to` offsets or the `extracted` map, stick with `-j`.
 
-`-llm` is mutually exclusive with the other output modes (`-j`, `-f`, `-c`, `-o`, `-format`, `-absent`, `-elide`).
+`-llm` is mutually exclusive with the other output modes (`-j`, `-f`, `-c`, `-o`, `-format`, `-absent`, `-elide`, `-rollup`).
 
 ---
 

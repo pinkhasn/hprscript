@@ -31,6 +31,8 @@ The plan binds review to exact paths, file identities and hashes, byte ranges, o
 - Narrow with `-glob`, `-exclude`, `-git-changed`, `-git-staged`, `-git-range`, `-git-added-lines`, `-lines`, `-in-scope`, `-near`, `-far`, `-same-scope`, `-not-same-scope`, or `-file-where`.
 - Prefer a stable scope name over line numbers when code may move.
 - Run `hprscript -list-scopes -llm <file>` before a scope or function-body replacement.
+- Read the exact current body with `hprscript expand <file>:<line>` before replacing a scope or block; a `file:line@hash` ref from a `-refs` search is verified first and reports stale (exit 3) instead of rendering outdated code.
+- Search with `-llm` first when a pattern could hit non-code text: role tags mark `[comment]`, `[string]`, and `[import]` sites the edit would rewrite; narrow the pattern or targeting before planning.
 - Mark relation-only patterns with `-ref`; otherwise their matches also become edit sites.
 
 ## Choose the edited span
