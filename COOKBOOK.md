@@ -3498,6 +3498,104 @@ hprscript -p TODO -name t -file-where 'count(t) >= 3 AND churn(30) > 2' -llm -gl
 hprscript -p TODO -c -order-by score -glob '**/*.go'
 ```
 
+### 34.8 "Which functions are involved, and how heavily?" — scope rollup
+
+**Problem:** Per-match output answers "which lines"; `-hotspots` answers "which files". The first question of an investigation usually sits in between: which *functions*, and how many hits in each — ten hits inside one function is one fact, not ten. `-rollup` prints one line per innermost enclosing scope (range, kind, name, hit count with per-pattern breakdown) plus the scope's first matched line as a representative, then joins the patterns per file in a co-occurrence footer.
+
+**Input:** Source tree.
+
+```bash
+hprscript -p 'sha1' -name weak_hash -p 'rand\.Intn' -name weak_rand -rollup -glob '**/*.go'
+# → crypto/sign.go
+# →   (top level) — 2 hits (weak_hash×2)
+# →     3: import "crypto/sha1"
+# →   6-11 func SignToken — 2 hits (weak_hash×2)
+# →     7: 	h := sha1.New()
+# → crypto/token.go
+# →   5-8 func Nonce — 1 hit (weak_rand×1)
+# →     6: 	n := rand.Intn(1 << 20)
+# → --- files: weak_hash 1, weak_rand 1; both: 0 ---
+```
+
+Matches outside any detected scope — including whole files in languages without a scope pack — group under `(top level)`, so a config file or log collapses to one row per file. Drill into a specific function afterwards with `hprscript expand` ([recipe 34.11](#3411-the-search--expand-loop--verified-refs-that-survive-edits)), `-in-scope`, or `-elide`.
+
+### 34.9 Result blocks that explain themselves — query legend, absence, and correlation
+
+**Problem:** An agent (or teammate) reading a saved result block hours later sees matches for patterns named `p0`/`p1` with no record of what was asked, and a pattern that matched *nothing* simply vanishes — even when "no hits" was the finding. `-desc` attaches a human meaning to each pattern and turns on a query-legend header; the `-llm`/`-elide`/`-rollup` modes always name zero-match patterns in a footer and report the per-file pattern overlap.
+
+**Input:** Source tree; output destined to be read out of context.
+
+```bash
+hprscript -p 'sha1' -name weak_hash -desc 'weak hash algorithm usage' \
+  -p 'rc4|des\.' -name weak_cipher -desc 'legacy cipher usage' -llm crypto/sign.go
+# → query: 2 patterns over crypto/sign.go
+# →   weak_hash — weak hash algorithm usage
+# →   weak_cipher — legacy cipher usage
+# → crypto/sign.go
+# →   3: [weak_hash] import "crypto/sha1"  [string]
+# →   5: [weak_hash] // SignToken still uses sha1 — TODO migrate  [comment]
+# →   7: [weak_hash] 	h := sha1.New()
+# →   9: [weak_hash] 	s := "sha1 legacy"  [string]
+# → --- no matches: weak_cipher (1 of 2 patterns) ---
+```
+
+The zero-match and co-occurrence counts cover the whole scan (post-filter), not just displayed lines, so they stay truthful under `-sample`/`-hotspots`; when `-limit` or `-max-output-bytes` stopped the scan early the footer says `(scan stopped early)`. Absence of overlap is stated too: `both: 0` is a finding, not silence.
+
+### 34.10 Is that hit code, or a comment, string, or import? — role tags
+
+**Problem:** Half the triage effort after a search is discarding hits that only *mention* the term — in a comment, inside a string literal, on an import line. hprscript classifies every hit lexically by default: `-llm` appends bracket tags, JSONL grows a `"role"` field (omitted for plain code), `-format` gets `$ROLE`, and with `-scope` active a hit on the signature line itself reads `[def …]` rather than `[in …]`.
+
+**Input:** Source tree in a recognized language (scope-pack languages plus Python, shell, Ruby, YAML, TOML).
+
+```bash
+hprscript -p 'sha1' -p 'import' -p 'func Sign\w+' -llm -scope auto crypto/sign.go
+# → crypto/sign.go
+# →   3: [p1] import "crypto/sha1"  [import]
+# →   3: [p0] import "crypto/sha1"  [string]
+# →   5: [p0] // SignToken still uses sha1 — TODO migrate  [comment]
+# →   6: [p2] func SignToken(b []byte) string {  [def func SignToken]
+# →   7: [p0] 	h := sha1.New()  [in func SignToken]
+# →   9: [p0] 	s := "sha1 legacy"  [string]  [in func SignToken]
+
+# JSONL: filter comment-only mentions out mechanically
+hprscript -p 'TODO' -glob '**/*.go' | jq -c 'select(.role != "comment")'
+```
+
+Precedence is position-accurate: the `sha1` inside the quoted import path is `[string]`, while the `import` keyword on the same line is `[import]`. Classification is lexical, computed lazily only for files that produce output; `-no-roles` turns it off.
+
+### 34.11 The search → expand loop — verified refs that survive edits
+
+**Problem:** An agent finds a hit, works on something else, then needs the surrounding function — but the file may have changed since, and a saved `file:line` silently points at the wrong code. `-refs` stamps each hit's line number with a hash of the line's content; `hprscript expand` turns any `file:line[@hash]` ref into the full enclosing scope, verifying the hash first.
+
+**Input:** Source tree, across multiple agent turns with edits in between.
+
+```bash
+# 1. Search once with -refs — every hit line carries a content hash.
+hprscript -p 'sha1\.New' -llm -refs crypto/sign.go
+# → crypto/sign.go
+# →   7@9679f2: 	h := sha1.New()
+
+# 2. Any time later: expand refs (batch several in one call) into full scopes.
+hprscript expand crypto/sign.go:7@9679f2
+# → crypto/sign.go:6-11 func SignToken
+# → func SignToken(b []byte) string {
+# → 	h := sha1.New()
+# → 	h.Write(b)
+# → 	s := "sha1 legacy"
+# → 	return s
+# → }
+
+# 3. A line was inserted above in the meantime? The hash no longer matches
+#    line 7, so expand recovers the line by content and says so:
+# → crypto/sign.go:7-12 func SignToken (ref line moved: 7 → 8)
+
+# 4. The line is gone entirely? Stale is reported in-band, exit code 3 —
+#    expand never silently renders the wrong code:
+# → crypto/sign.go:7@9679f2: stale — line 7 changed and no line with this hash exists
+```
+
+A ref without `@hash` still works (no verification, plain line lookup), and a ref outside any detected scope falls back to a numbered `-C`-sized context window with the ref line marked `>`. Exit codes: 0 all refs expanded, 3 at least one stale, 2 bad ref syntax or unreadable file.
+
 ---
 
 ## See also

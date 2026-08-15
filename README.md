@@ -19,6 +19,7 @@ It is a single self-contained binary with no runtime dependencies beyond the pla
 | Multi-pass workflows in one process (collect → resolve) | ❌ | ✅ via [phases](HPRSCRIPT.md#phases) |
 | Per-file aggregation (counts, ranking, grouping) in one process | ❌ | ✅ via [scripts](HPRSCRIPT.md#script-mode--s---script) |
 | Files **missing** a pattern | `grep -L` | `-absent` (also works inside scripts) |
+| Output an agent can interpret cold (role tags, query legend, absence/overlap footers) | ❌ | ✅ [LLM-facing modes](HPRSCRIPT.md#llm-output-mode) |
 | Pattern compile cost scales with N patterns | linear | constant — patterns share one DFA |
 
 If you find yourself piping `grep` into `grep`, running ripgrep in a loop over a list of patterns, or writing throwaway Python to aggregate match counts per file, those are the workloads `hprscript` is designed for.
@@ -66,6 +67,9 @@ Default per-match record:
 - **Script mode (JSON DSL).** Variables, lifecycle hooks, sub-pattern matching, conditionals, grouping, ranking, and multi-phase scans — all in one invocation. See [Script mode](HPRSCRIPT.md#script-mode--s---script).
 - **`-pi` per-pattern case-insensitivity.** Mix case-sensitive and case-insensitive patterns in the same scan.
 - **`-absent` mode.** Find files where a pattern is *not* found (like `grep -L`, but also works inside scripts).
+- **LLM-facing output modes.** `-llm` compact per-match text, `-elide` folded scope excerpts, `-rollup` one line per function with per-pattern counts — framed by an optional query legend (`-desc`) and automatic no-match / co-occurrence footers. See [below](#self-describing-output-for-llm-agents).
+- **Per-match role tags.** Every hit self-classifies as definition, comment, string, or import — `[def func X]`/`[comment]`/`[string]`/`[import]` in `-llm`, a `"role"` field in JSONL, `$ROLE` in `-format`. See [Per-match role tags](HPRSCRIPT.md#per-match-role-tags).
+- **Search → expand loop.** `-refs` stamps each hit as `file:line@hash`; `hprscript expand` later renders the full enclosing function — recovering moved lines by content and refusing stale ones instead of showing the wrong code. See [Stable refs & expand](HPRSCRIPT.md#stable-refs--expand--refs--hprscript-expand).
 - **Unicode by default.** UTF-8 mode is on; `-pi` folds across scripts (`CAFÉ` ↔ `café`, `ПРИВЕТ` ↔ `привет`). See [UTF-8 / Unicode](HPRSCRIPT.md#utf-8--unicode-support).
 - **grep-compatible output modes:** `-f` (file list), `-c` (per-file counts), `-o` (matched text only), `-format` (custom template), `-A`/`-B`/`-C` (context lines).
 - **Single static binary** — no runtime dependencies beyond `libc`/`libm`/`libpthread`.
@@ -147,6 +151,39 @@ grouping/aggregation, ordering, strict resource limits, and adaptive
 derived-pattern stages. Compatible sets share one matcher/traversal; equality
 joins use hash indexes. See [Declarative query mode](HPRSCRIPT.md#declarative-query-mode-hprscript-query).
 
+## Self-describing output for LLM agents
+
+Search results are often read far from the command that produced them — by an
+agent several turns later, or by a different agent entirely. The LLM-facing
+modes (`-llm`, `-elide`, `-rollup`) make each result block carry its own
+interpretation: a query legend says what each pattern means, role tags classify
+every hit, and footers state absence and correlation explicitly.
+
+```bash
+hprscript -p 'sha1' -name weak_hash -desc 'weak hash algorithm usage' \
+    -p 'rand\.Intn' -name weak_rand -rollup -refs -glob '**/*.go'
+# query: 2 patterns over **/*.go
+#   weak_hash — weak hash algorithm usage
+#   weak_rand — /rand\.Intn/
+# crypto/sign.go
+#   (top level) — 2 hits (weak_hash×2)
+#     3@6db2fd: import "crypto/sha1"
+#   6-11 func SignToken — 2 hits (weak_hash×2)
+#     7@9679f2: 	h := sha1.New()
+# crypto/token.go
+#   5-8 func Nonce — 1 hit (weak_rand×1)
+#     6@bc19e4: 	n := rand.Intn(1 << 20)
+# --- files: weak_hash 1, weak_rand 1; both: 0 ---
+
+# Later — possibly after edits — turn any ref into the full function, verified:
+hprscript expand crypto/sign.go:7@9679f2
+```
+
+- **Role tags** classify every hit lexically (`def` / `comment` / `string` / `import`) in `-llm`, JSONL (`"role"`), and `-format` (`$ROLE`) — [reference](HPRSCRIPT.md#per-match-role-tags).
+- **`-rollup`** prints one line per enclosing function with per-pattern hit counts — "where is this concentrated?" answered in a handful of tokens — [reference](HPRSCRIPT.md#scope-rollup--rollup).
+- **Query legend and footers.** `-desc` opens the block with each pattern's meaning; patterns that matched nothing are named explicitly (absence is evidence: `--- no matches: weak_cipher (1 of 2 patterns) ---`), and a co-occurrence footer reports per-pattern file counts plus their overlap — [reference](HPRSCRIPT.md#query-header-and-result-footers).
+- **Stable refs.** `hprscript expand file:line@hash` recovers moved lines by content and reports vanished ones as stale (exit 3) rather than rendering the wrong code — [reference](HPRSCRIPT.md#stable-refs--expand--refs--hprscript-expand).
+
 ---
 
 ## Install
@@ -227,7 +264,7 @@ make test
 
 `hprscript` ships two portable agent skills:
 
-- [`skills/hprscript-search/SKILL.md`](skills/hprscript-search/SKILL.md) teaches read-only quick search, investigation, query, ranking, and context packing.
+- [`skills/hprscript-search/SKILL.md`](skills/hprscript-search/SKILL.md) teaches read-only quick search, investigation, query, ranking, context packing, scope surveys (`-rollup`), and the search → expand loop.
 - [`skills/hprscript-edit/SKILL.md`](skills/hprscript-edit/SKILL.md) teaches persistent edit plans, guarded application, and the boundary with localized semantic patching.
 
 Each is a single Markdown file with YAML frontmatter and focused instructions. Install either skill independently or install both for the complete workflow. They drive the CLI binary directly, carry inline cheat sheets, and point at [`HPRSCRIPT.md`](HPRSCRIPT.md) / [`COOKBOOK.md`](COOKBOOK.md) for depth.
