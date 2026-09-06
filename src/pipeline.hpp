@@ -36,7 +36,8 @@ bool looks_binary(std::string_view content);
 // diagnostics records) and are counted in `stats`. Returns false on a hard
 // error (the caller should exit 2).
 bool add_walker_inputs(const Cli &cli, Walker &walker, ScanStats &stats,
-                       std::unordered_map<std::string, AddedLines> &added);
+                       std::unordered_map<std::string, AddedLines> &added,
+                       const std::function<void(const char *, const std::string &)> &diagnostic = {});
 
 // Build the final Pattern list from CLI state: auto `p<i>` ids, per-pattern
 // name/word_boundary/utf8 overrides (-name / -patterns-from entries), global

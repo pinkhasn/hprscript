@@ -33,5 +33,6 @@ struct ExecutionPlan {
 
 // Emit one deterministic JSONL execution-plan record to stdout.
 void emit_execution_plan(const ExecutionPlan &plan);
+std::string execution_plan_record(const ExecutionPlan &plan);
 
 } // namespace hpr

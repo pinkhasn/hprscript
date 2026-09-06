@@ -37,7 +37,10 @@ public:
 
     // Walk all scan items; visit each candidate file after exclude rules and
     // hidden-dir skipping. Visitor returns false to stop.
-    void walk(const std::function<bool(const WalkItem &)> &visit);
+    // Optional read-only diagnostics for callers that promise complete
+    // traversal accounting. Existing streaming callers retain their behavior.
+    void walk(const std::function<bool(const WalkItem &)> &visit,
+              const std::function<void(const std::string &)> &error = {});
 
 private:
     bool is_excluded(std::string_view path, bool is_dir) const;

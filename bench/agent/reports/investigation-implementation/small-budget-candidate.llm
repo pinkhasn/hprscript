@@ -1,0 +1,42 @@
+INVESTIGATION profile=symbol seeds=["validateToken"] scans=2 complete=no
+
+SUMMARY
+1 seed matches in 1 files; 1 probable definitions/declarations; 0 seed-containing test files; 1 helper-associated test files.
+inputs=["/home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation"] exclusions=[] followup=searched
+scan_complete=true expansion_complete=true output_complete=false
+coverage: seed_implementation=found related_helper=found caller=no_match_in_selected_inputs associated_test=found configuration=no_match_in_selected_inputs documentation=no_match_in_selected_inputs other=found
+
+PROBABLE DEFINITIONS / DECLARATIONS AND REPRESENTATIVE EVIDENCE
+/home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/auth.go:3 [seed_implementation; probable_definition, confidence=medium, method=lexical-go-pack] row=1 source=chunk-1
+  association: seed_definition via /home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/auth.go:3 (seed-row=1)
+SOURCE chunk-1 /home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/auth.go:3-5 [full_body; signature_complete=yes]
+  3: func validateToken(token string) bool {
+  4:     return verifySignature(token)
+  5: }
+/home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/crypto.go:3 [related_helper; probable_definition, confidence=medium, method=lexical-go-pack] row=6 source=chunk-3 derived=verifySignature
+  association: called_in_seed_definition via /home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/auth.go:4 (seed-row=1)
+SOURCE chunk-3 /home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/crypto.go:3-5 [full_body; signature_complete=yes]
+  3: func verifySignature(token string) bool {
+  4:     return len(token) > 12
+  5: }
+/home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/auth_test.go:6 [associated_test; probable_call_or_reference, confidence=low, method=lexical-go-pack] row=5 source=chunk-2 derived=verifySignature
+  association: called_in_seed_definition via /home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/auth.go:4 (seed-row=1)
+SOURCE chunk-2 /home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/auth_test.go:5-9 [full_body; signature_complete=yes]
+  5: func TestRejectShort(t *testing.T) {
+  6:     if verifySignature("short") {
+  7:         t.Fatal("short signature accepted")
+  8:     }
+  9: }
+/home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/auth.go:4 [other; probable_call_or_reference, confidence=low, method=lexical-go-pack] row=3 source=chunk-1 derived=verifySignature
+  association: called_in_seed_definition via /home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/auth.go:4 (seed-row=1)
+
+TOP FILES
+/home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/auth.go score=0.360674 roles=["fixture"]
+
+TOP SCOPES
+/home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/auth.go:3 func validateToken
+
+LIMITS
+Selected lexical evidence; omissions are listed below.
+candidate_patterns_omitted=0 retention_omitted=0 memory_limit_events=0 examples_omitted=4 source_excerpts=0 scope_fallbacks=0
+omission_reasons=["evidence_budget"] stop_reason=evidence_budget

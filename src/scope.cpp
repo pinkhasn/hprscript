@@ -3,8 +3,10 @@
 #include "block.hpp"
 #include "common.hpp"
 #include "matcher.hpp"
+#include "roles.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <regex>
 
 namespace hpr {
@@ -62,7 +64,9 @@ ScopeConfig resolve_scope_for_file(const std::string &lang,
                                    const std::string &path) {
     // Custom config wins outright.
     if (!custom.anchor_regex.empty() && !custom.open.empty() && !custom.close.empty()) {
-        return custom;
+        ScopeConfig cfg = custom;
+        cfg.lexical = role_config_for_path(path);
+        return cfg;
     }
     if (lang.empty()) return ScopeConfig{};
     std::string resolved = lang;
@@ -70,7 +74,9 @@ ScopeConfig resolve_scope_for_file(const std::string &lang,
     if (resolved.empty()) return ScopeConfig{};
     const ScopeConfig *pack = builtin_scope_pack(resolved);
     if (!pack) return ScopeConfig{};
-    return *pack;
+    ScopeConfig cfg = *pack;
+    cfg.lexical = role_config_for_path(path);
+    return cfg;
 }
 
 bool ScopeIndex::build(std::string_view buf, const ScopeConfig &cfg,
@@ -78,6 +84,9 @@ bool ScopeIndex::build(std::string_view buf, const ScopeConfig &cfg,
     ranges_.clear();
     if (cfg.anchor_regex.empty() || cfg.open.empty() || cfg.close.empty())
         return true;
+
+    RoleIndex roles;
+    if (cfg.lexical) roles.build(buf, *cfg.lexical, idx);
 
     // Anchor scan via Vectorscan (fast multi-pattern engine, even for one
     // pattern — gives us the same UTF-8/multiline semantics as the rest of
@@ -133,22 +142,41 @@ bool ScopeIndex::build(std::string_view buf, const ScopeConfig &cfg,
         const char *match_end = buf.data() + mm.to;
         std::cmatch cm;
         std::string name;
+        uint64_t name_from = mm.from, name_to = mm.from;
         if (std::regex_search(match_begin, match_end, cm, name_re)) {
             for (size_t g = 1; g < cm.size(); ++g) {
                 if (cm[g].matched && cm[g].length() > 0) {
                     name.assign(cm[g].first, cm[g].second);
+                    name_from = static_cast<uint64_t>(cm[g].first - buf.data());
+                    name_to = static_cast<uint64_t>(cm[g].second - buf.data());
                     break;
                 }
             }
         }
+        if (name.empty() || (cfg.lexical && roles.at(name_from) != LexRole::Code))
+            continue;
         if (std::find(cfg.skip_names.begin(), cfg.skip_names.end(), name) !=
             cfg.skip_names.end())
             continue;
         // Find the body block from the match start — the C/C++/Java anchors
         // end in `\{`, so the body's opener is part of the match itself.
         uint64_t op = 0, cp = 0;
-        if (!find_balanced_block(buf, mm.from, cfg.open, cfg.close, op, cp))
+        if (cfg.lexical && cfg.open == "{" && cfg.close == "}") {
+            op = buf.find('{', mm.from);
+            while (op < buf.size() && roles.at(op) != LexRole::Code)
+                op = buf.find('{', op + 1);
+            if (op >= buf.size()) continue;
+            int depth = 1;
+            cp = op + 1;
+            for (; cp < buf.size() && depth; ++cp) {
+                if (roles.at(cp) != LexRole::Code) continue;
+                if (buf[cp] == '{') ++depth;
+                else if (buf[cp] == '}') --depth;
+            }
+            if (depth) continue;
+        } else if (!find_balanced_block(buf, mm.from, cfg.open, cfg.close, op, cp)) {
             continue;
+        }
         ScopeRange r;
         r.start_off = mm.from;
         r.end_off = cp;
@@ -156,6 +184,47 @@ bool ScopeIndex::build(std::string_view buf, const ScopeConfig &cfg,
         r.kind = cfg.kind;
         r.line_start = idx.line_of(mm.from);
         r.line_end = idx.line_of(cp == 0 ? 0 : cp - 1);
+        r.name_from = name_from;
+        r.name_to = name_to;
+        r.signature_from = mm.from;
+        r.body_from = op;
+        r.signature_line = r.line_start;
+        r.signature_end_line = idx.line_of(op);
+        r.source_reliable = cfg.lexical && cfg.open == "{" && cfg.close == "}";
+        // C-family anchors start at the name. Include return types and
+        // modifiers on preceding lines, stopping at a lexical boundary.
+        if (!cfg.skip_names.empty()) {
+            uint32_t first = r.line_start;
+            uint64_t begin = 0, end = 0;
+            idx.line_range(mm.from, begin, end);
+            bool boundary = false;
+            for (uint64_t pos = mm.from; pos > begin; --pos) {
+                const char c = buf[pos - 1];
+                if ((c == ';' || c == '{' || c == '}') &&
+                    (!cfg.lexical || roles.at(pos - 1) == LexRole::Code)) {
+                    begin = pos; boundary = true; break;
+                }
+            }
+            while (!boundary && first > 1 && r.line_start - first < 12) {
+                auto prev = idx.line_text(first - 1);
+                const size_t nonspace = prev.find_first_not_of(" \t\r\n");
+                if (nonspace == std::string_view::npos || prev[nonspace] == '#' ||
+                    (cfg.lexical && roles.at(prev.data() - buf.data() + nonspace) != LexRole::Code))
+                    break;
+                bool delimiter = false;
+                for (size_t j = 0; j < prev.size(); ++j)
+                    if ((prev[j] == ';' || prev[j] == '{' || prev[j] == '}') &&
+                        (!cfg.lexical || roles.at(prev.data() - buf.data() + j) == LexRole::Code))
+                        delimiter = true;
+                if (delimiter) break;
+                --first;
+                begin = prev.data() - buf.data();
+            }
+            while (begin < mm.from && std::isspace(static_cast<unsigned char>(buf[begin]))) ++begin;
+            r.signature_from = begin;
+            r.signature_line = idx.line_of(begin);
+            if (r.line_start - first == 12) r.source_reliable = false;
+        }
         ranges_.push_back(std::move(r));
     }
 
@@ -168,6 +237,15 @@ bool ScopeIndex::build(std::string_view buf, const ScopeConfig &cfg,
                   return a.end_off > b.end_off; // outer-first when starts tie
               });
     return true;
+}
+
+const ScopeRange *ScopeIndex::declared_at(uint64_t from, uint64_t to) const {
+    for (const auto &r : ranges_) {
+        if (r.name_from > to) break;
+        if (r.name_to > r.name_from && from <= r.name_from && to >= r.name_to)
+            return &r;
+    }
+    return nullptr;
 }
 
 const ScopeRange *ScopeIndex::anchor_on_line(uint32_t line) const {

@@ -3543,7 +3543,7 @@ The zero-match and co-occurrence counts cover the whole scan (post-filter), not 
 
 ### 34.10 Is that hit code, or a comment, string, or import? — role tags
 
-**Problem:** Half the triage effort after a search is discarding hits that only *mention* the term — in a comment, inside a string literal, on an import line. hprscript classifies every hit lexically by default: `-llm` appends bracket tags, JSONL grows a `"role"` field (omitted for plain code), `-format` gets `$ROLE`, and with `-scope` active a hit on the signature line itself reads `[def …]` rather than `[in …]`.
+**Problem:** Search results include code, comments, strings, and imports. hprscript classifies each hit lexically: `-llm` appends bracket tags, JSONL gains a `"role"` field (omitted for plain code), and `-format` gets `$ROLE`. With `-scope` active, a match containing the declared name reads `[def …]`; parameter types elsewhere on the signature remain references.
 
 **Input:** Source tree in a recognized language (scope-pack languages plus Python, shell, Ruby, YAML, TOML).
 
@@ -3597,6 +3597,35 @@ hprscript expand crypto/sign.go:7@9679f2
 A ref without `@hash` still works (no verification, plain line lookup), and a ref outside any detected scope falls back to a numbered `-C`-sized context window with the ref line marked `>`. Exit codes: 0 all refs expanded, 3 at least one stale, 2 bad ref syntax or unreadable file.
 
 ---
+
+### 34.12 Read a seed, its helper, and an associated test in one invocation
+
+Suppose `auth.go` defines `validateToken` and calls `verifySignature`, while
+`crypto.go` defines that helper and `auth_test.go` tests it. Only `auth.go`
+contains the original seed text. Run:
+
+```bash
+hprscript investigate -F validateToken -profile symbol -llm -refs \
+  -evidence-budget 16000 -glob '**/*.go'
+```
+
+The first stage finds the seed and derives the helper identifier. One batched
+follow-up finds its implementation and test occurrence. The response includes
+selected source for all three, with `called_in_seed_definition` origins and
+helper-associated test labels. Small bodies fit whole; omitted source is marked.
+The reproducible retrieval fixture is in `bench/agent/fixtures/investigation`;
+its helper checks string length and is not a cryptographic implementation.
+
+With `-followup-scan never`, only the seed-stage files supply source. The report
+labels related-only test discovery as not searched. Use `-C 3` for wider local
+windows or `expand` on a returned ref if the selected evidence still omits a
+needed region. Scope, line, and Git filters restrict anchors in both stages;
+context can include nearby lines. `-file-where` and seed-pattern relations
+remain seed-stage predicates.
+
+`scan_complete=true` can coexist with `output_complete=false`: the input scan
+finished, but the requested response omitted evidence. The complete encoded
+stdout fits the byte cap, including the footer and optional `-summary`.
 
 ## See also
 

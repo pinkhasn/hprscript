@@ -204,6 +204,7 @@ struct Cli {
     std::string format_template;
     int context_before = 0;
     int context_after = 0;
+    bool context_set = false; // distinguish an explicit -C/-A/-B 0 from defaults
 
     // Block extraction (-block-open / -block-close). When both set, each
     // match's balanced block is extracted starting at match-end. With -o the

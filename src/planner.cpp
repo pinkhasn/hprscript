@@ -25,7 +25,7 @@ void append_strings(std::string &out, const std::vector<std::string> &values) {
 
 } // namespace
 
-void emit_execution_plan(const ExecutionPlan &plan) {
+std::string execution_plan_record(const ExecutionPlan &plan) {
     std::string out = "{\"type\":\"execution-plan\",\"mode\":";
     append_string(out, plan.mode);
     out += ",\"scan_stages\":[";
@@ -68,6 +68,11 @@ void emit_execution_plan(const ExecutionPlan &plan) {
         out += ':' + std::to_string(value);
     }
     out += "}}\n";
+    return out;
+}
+
+void emit_execution_plan(const ExecutionPlan &plan) {
+    const std::string out = execution_plan_record(plan);
     std::fwrite(out.data(), 1, out.size(), stdout);
 }
 

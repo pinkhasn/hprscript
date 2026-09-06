@@ -762,16 +762,19 @@ Cli parse_cli(int argc, char **argv) {
             const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
             int n = std::atoi(v);
             cli.context_before = cli.context_after = n;
+            cli.context_set = true;
             continue;
         }
         if (eq(a, "-A")) {
             const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
             cli.context_after = std::atoi(v);
+            cli.context_set = true;
             continue;
         }
         if (eq(a, "-B")) {
             const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
             cli.context_before = std::atoi(v);
+            cli.context_set = true;
             continue;
         }
 

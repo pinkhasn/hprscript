@@ -33,3 +33,25 @@ wall time, at least 30% fewer search calls, no more than a five percentage-point
 correctness reduction, and no more than 2x median search-output bytes unless
 correctness materially improves. These targets are evaluated outside the unit
 suite because they depend on an agent, repository snapshot, and provider.
+
+The `investigate-source-01` through `investigate-source-04` tasks exercise
+related source without the seed text, C++ definition evidence, caller noise,
+and a fixed small output budget. The `investigation-fixture` repository is a
+retrieval fixture, not a buildable application or a cryptographic example.
+Use the same pinned corpus, budgets, model, task prompts, and comparable agent
+context for baseline and candidate runs. Keep seed evidence correctness as a
+gate: additional helper output must not displace necessary seed source.
+
+For a quick local comparison of two executables on the same source snapshot:
+
+```bash
+python3 bench/agent/compare_investigation.py \
+  --baseline /path/to/baseline/hprscript --candidate ./hprscript \
+  --repository /path/to/pinned/source --output-dir /tmp/investigation-comparison
+```
+
+This records exact output bytes, source-presence checks, repeat determinism,
+and median local process time (one warmup and three measured runs by default).
+It saves the before/after reports beside `comparison.json`. These deterministic
+checks do not establish answer correctness, fewer LLM turns, or end-to-end
+agent speedups; those require the agent runner and normal result schema above.

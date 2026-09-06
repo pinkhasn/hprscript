@@ -1,0 +1,233 @@
+{
+  "kind": "local-investigation-comparison",
+  "agent_benchmark_run": false,
+  "repository_snapshot": "/tmp/hprscript-pinned.qIeiUY",
+  "results": [
+    {
+      "case": "helper-test",
+      "condition": "baseline",
+      "binary_version": "hprscript v0.6.4 (vectorscan 5.4.12 2026-05-18)",
+      "command": [
+        "/tmp/hprscript-investigation.9nI94Y/baseline",
+        "investigate",
+        "-F",
+        "validateToken",
+        "-profile",
+        "symbol",
+        "-llm",
+        "-evidence-budget",
+        "16000",
+        "/home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation"
+      ],
+      "median_local_ms": 9.443869,
+      "runs": 3,
+      "stdout_bytes": 1001,
+      "budget": 16000,
+      "within_cap": true,
+      "source_requirements": {
+        "return verifySignature(token)": false,
+        "return len(token) > 12": false,
+        "t.Fatal(\"short signature accepted\")": false
+      },
+      "required_source_present": false,
+      "deterministic_output": true
+    },
+    {
+      "case": "cpp-definition",
+      "condition": "baseline",
+      "binary_version": "hprscript v0.6.4 (vectorscan 5.4.12 2026-05-18)",
+      "command": [
+        "/tmp/hprscript-investigation.9nI94Y/baseline",
+        "investigate",
+        "-F",
+        "build_file_scope",
+        "-profile",
+        "symbol",
+        "-llm",
+        "-evidence-budget",
+        "16000",
+        "/tmp/hprscript-pinned.qIeiUY/src"
+      ],
+      "median_local_ms": 355.535825,
+      "runs": 3,
+      "stdout_bytes": 3511,
+      "budget": 16000,
+      "within_cap": true,
+      "source_requirements": {
+        "if (sc.anchor_regex.empty()) return nullptr;": false,
+        "return &scope;": false,
+        "ScopeConfig resolve_scope_for_file(": false
+      },
+      "required_source_present": false,
+      "deterministic_output": true
+    },
+    {
+      "case": "noisy-caller",
+      "condition": "baseline",
+      "binary_version": "hprscript v0.6.4 (vectorscan 5.4.12 2026-05-18)",
+      "command": [
+        "/tmp/hprscript-investigation.9nI94Y/baseline",
+        "investigate",
+        "-F",
+        "noisyTarget",
+        "-profile",
+        "symbol",
+        "-llm",
+        "-evidence-budget",
+        "16000",
+        "/home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation"
+      ],
+      "median_local_ms": 12.433865,
+      "runs": 3,
+      "stdout_bytes": 1527,
+      "budget": 16000,
+      "within_cap": true,
+      "source_requirements": {
+        "return directHelper(value)": false,
+        "return value + 1": false
+      },
+      "required_source_present": false,
+      "deterministic_output": true
+    },
+    {
+      "case": "small-budget",
+      "condition": "baseline",
+      "binary_version": "hprscript v0.6.4 (vectorscan 5.4.12 2026-05-18)",
+      "command": [
+        "/tmp/hprscript-investigation.9nI94Y/baseline",
+        "investigate",
+        "-F",
+        "validateToken",
+        "-profile",
+        "symbol",
+        "-llm",
+        "-evidence-budget",
+        "3500",
+        "/home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation"
+      ],
+      "median_local_ms": 9.383557,
+      "runs": 3,
+      "stdout_bytes": 1001,
+      "budget": 3500,
+      "within_cap": true,
+      "source_requirements": {
+        "return verifySignature(token)": false
+      },
+      "required_source_present": false,
+      "deterministic_output": true
+    },
+    {
+      "case": "helper-test",
+      "condition": "candidate",
+      "binary_version": "hprscript v0.6.4-dirty (vectorscan 5.4.12 2026-05-18)",
+      "command": [
+        "/home/pinkhasn/Pini/src/git/hprscript/hprscript/hprscript",
+        "investigate",
+        "-F",
+        "validateToken",
+        "-profile",
+        "symbol",
+        "-llm",
+        "-evidence-budget",
+        "16000",
+        "/home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation"
+      ],
+      "median_local_ms": 12.126048,
+      "runs": 3,
+      "stdout_bytes": 5120,
+      "budget": 16000,
+      "within_cap": true,
+      "source_requirements": {
+        "return verifySignature(token)": true,
+        "return len(token) > 12": true,
+        "t.Fatal(\"short signature accepted\")": true
+      },
+      "required_source_present": true,
+      "deterministic_output": true
+    },
+    {
+      "case": "cpp-definition",
+      "condition": "candidate",
+      "binary_version": "hprscript v0.6.4-dirty (vectorscan 5.4.12 2026-05-18)",
+      "command": [
+        "/home/pinkhasn/Pini/src/git/hprscript/hprscript/hprscript",
+        "investigate",
+        "-F",
+        "build_file_scope",
+        "-profile",
+        "symbol",
+        "-llm",
+        "-evidence-budget",
+        "16000",
+        "/tmp/hprscript-pinned.qIeiUY/src"
+      ],
+      "median_local_ms": 660.305454,
+      "runs": 3,
+      "stdout_bytes": 13145,
+      "budget": 16000,
+      "within_cap": true,
+      "source_requirements": {
+        "if (sc.anchor_regex.empty()) return nullptr;": true,
+        "return &scope;": true,
+        "ScopeConfig resolve_scope_for_file(": true
+      },
+      "required_source_present": true,
+      "deterministic_output": true
+    },
+    {
+      "case": "noisy-caller",
+      "condition": "candidate",
+      "binary_version": "hprscript v0.6.4-dirty (vectorscan 5.4.12 2026-05-18)",
+      "command": [
+        "/home/pinkhasn/Pini/src/git/hprscript/hprscript/hprscript",
+        "investigate",
+        "-F",
+        "noisyTarget",
+        "-profile",
+        "symbol",
+        "-llm",
+        "-evidence-budget",
+        "16000",
+        "/home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation"
+      ],
+      "median_local_ms": 13.747489,
+      "runs": 3,
+      "stdout_bytes": 6795,
+      "budget": 16000,
+      "within_cap": true,
+      "source_requirements": {
+        "return directHelper(value)": true,
+        "return value + 1": true
+      },
+      "required_source_present": true,
+      "deterministic_output": true
+    },
+    {
+      "case": "small-budget",
+      "condition": "candidate",
+      "binary_version": "hprscript v0.6.4-dirty (vectorscan 5.4.12 2026-05-18)",
+      "command": [
+        "/home/pinkhasn/Pini/src/git/hprscript/hprscript/hprscript",
+        "investigate",
+        "-F",
+        "validateToken",
+        "-profile",
+        "symbol",
+        "-llm",
+        "-evidence-budget",
+        "3500",
+        "/home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation"
+      ],
+      "median_local_ms": 12.424178,
+      "runs": 3,
+      "stdout_bytes": 3415,
+      "budget": 3500,
+      "within_cap": true,
+      "source_requirements": {
+        "return verifySignature(token)": true
+      },
+      "required_source_present": true,
+      "deterministic_output": true
+    }
+  ]
+}

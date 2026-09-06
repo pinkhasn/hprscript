@@ -518,25 +518,101 @@ flags because it owns ranking, sampling, and evidence budgeting as one report.
 | `-top-files N` | Ranked files, default 8. |
 | `-top-scopes N` | Ranked enclosing scopes, default 12. |
 | `-related N` | Related identifiers, default 20. |
-| `-examples N` | Representative evidence records, default 12. |
+| `-examples N` | Representative occurrence anchors, default 12; several anchors may share one source chunk. `0` emits no anchors. |
 | `-followup-scan auto\|always\|never` | Whether to run the one adaptive related-identifier scan. |
 | `-max-related-patterns N` | Candidate matcher cap, default 64. |
-| `-evidence-budget N` | Whole multi-section byte budget, default 65536. |
-| `-max-memory-bytes N` | Maximum retained seed-file content, default 128 MiB; `0` disables the cap. |
+| `-evidence-budget N` | Complete stdout byte cap, default 65536; `0` disables this cap. The smaller active cap of this and `-max-output-bytes` applies. |
+| `-max-memory-bytes N` | Estimated retained evidence memory, default 128 MiB; `0` disables the cap. Includes seed content/indexes, owned related excerpts, rows, ranking data, candidates and provenance. |
 
-Execution has one seed scan, local extraction from buffered seed files, and at
-most one follow-up scan containing all selected related identifiers. Related
-scores combine same-scope, nearby-window, same-file, seed-file coverage, and
-corpus rarity. Ties are deterministic. File roles use path heuristics and say
-so. Occurrence labels are `probable_*` lexical classifications with confidence
-and method fields; they do not claim compiler semantics.
+Execution has one seed scan, local candidate extraction, and at most one
+follow-up scan containing all selected identifiers. `never` skips follow-up;
+`auto` and `always` run it when candidates exist. An empty candidate set uses
+one stage. Helpers found in follow-up do not start another expansion frontier.
 
-JSONL record order is `investigation-summary`, ranked
-`investigation-file`, `investigation-scope`, probable-definition
-`investigation-evidence`, `investigation-related`, the remaining
-(representative) `investigation-evidence`, then `investigation-footer` (and an
-optional normal summary). Every omitted section count is reported. `-require-complete` fails
-when scanning or internal caps make the package incomplete.
+Candidates carry source-row identities, originating locations, and association
+kinds such as `called_in_seed_definition`, `used_in_seed_definition`, and
+`near_seed_reference`. Definition bodies and signatures contribute candidates;
+caller references use a local two-line window on either side. Relationship
+priority precedes frequency, repeated contributions per origin scope are capped,
+and selection balances seed patterns before the candidate cap. Corpus rarity
+is used only after an actual follow-up scan. Same-named lexical definitions are
+marked ambiguous, not resolved as compiler call targets.
+
+Selected small scopes (initially at most 40 lines) prefer complete signatures
+and bodies. Larger or uncertain scopes return bounded lexical excerpts; these
+are not program slices. `-A`, `-B`, and `-C` set applicable excerpt windows;
+the default is two lines on each side, clipped to a known scope. An explicit
+`-C 0` requests no extra window lines; complete small bodies may still be
+selected. Negative investigation context is rejected. Byte or memory
+limits can reduce requested source. `omitted_ranges`, per-line `omitted_bytes`,
+`body_complete`, `signature_complete`, and `context_reduced` disclose omissions.
+`-max-context-bytes` bounds retained line text and `-max-block-bytes` bounds each
+initial source excerpt. `-refs` adds existing `file:line@hash` references for
+`hprscript expand`; stdin does not receive a fabricated file reference.
+
+Source chunks own their text and are shared by overlapping occurrences in a
+scope. Only selected anchors contribute windows to the emitted chunk. Evidence
+categories are selected before the `-examples` limit; unused category capacity
+can serve others. Under pressure, source degrades from full body to excerpt to
+signature/anchor to location before lower-priority rankings consume bytes.
+The signature/anchor fallback also shortens very long individual lines to a
+UTF-8-safe prefix, with omitted-byte counts. Location-only anchors can omit
+legacy `context` text; `context_truncated` and `context_omitted_bytes` say so.
+Retention uses separate definition and other-occurrence pools, each bounded
+to `max(2, examples)` rows per seed/candidate and category, plus the shared
+memory allowance; discovery counts remain separate. Memory
+accounting includes container estimates and is **not a process RSS cap**:
+input-selection data, mapped files, transient per-file matching/indexing, and
+serialization work buffers are outside it. Full seed buffers are released
+before related-source retention.
+
+Both stages reuse the same resolved input paths and exclusions. Scope-name,
+scope-kind, line, and Git-added-line restrictions apply to occurrence anchors
+in both stages; quoted context may extend beyond eligible anchor lines.
+Pattern-dependent `-file-where` and relations apply only to seed matches and
+are not reinterpreted over related patterns. Input/filter metadata states this
+scope. Expanding to a helper never adds an excluded or unselected file.
+
+JSONL begins with `investigation-summary`, followed by selected
+`investigation-evidence` and shared `investigation-source` records, then
+`investigation-file`, `investigation-scope`, `investigation-related`, retained
+diagnostic warnings, and `investigation-footer`, with an optional normal
+`summary`. `-explain-plan` prepends its plan record. Consumers must dispatch on
+`type`: source records and provenance/coverage fields are additive, while the
+previous metadata-first record ordering intentionally changes to put source
+near its reason for inclusion. Legacy `context` remains the matched line;
+`line`/`column` still identify the occurrence, not the chunk boundary. Row and
+chunk IDs are deterministic within unchanged inputs; retained provenance also
+includes locations when an originating row is not selected for output.
+
+Coverage distinguishes:
+
+| Field | Meaning |
+|---|---|
+| `scan_complete` | Traversal and file reads finished without input failures in either stage. |
+| `expansion_complete` | Candidate extraction/selection and the configured follow-up completed without candidate/memory caps or follow-up failures. A deliberately disabled follow-up is labeled `disabled`, not a claim that helper files were searched. |
+| `output_complete` | No eligible retained evidence, source intervals, diagnostics, or metadata were omitted by memory, retention, section, or output limits. |
+| `coverage` | Per-category `found`, `omitted_by_limit`, `no_match_in_selected_inputs`, `not_searched_for_related_identifiers`, or `input_failure`. Occurrences separately carry lexical fallback/ambiguity information. |
+
+Legacy `complete` is the conjunction of these three fields. This conservative
+meaning now includes section-limit and source-excerpt omissions;
+`-require-complete` returns exit 2 when it is false. Otherwise, exit 0/1 still
+depends on seed matches. Legacy `tests`, `configs`, `seed_matches`, and
+`probable_definitions` remain seed-stage counts. `related_tests` counts files
+with code occurrences of selected related identifiers; that lexical association
+does not establish coverage of the seed. The footer exposes independent
+`omission_reasons`, counts, and follow-up read failures even when `stop_reason`
+can name only one cause. `retention_omitted` counts discarded occurrence rows;
+`memory_limit_events` counts denied retained allocations or reduced source
+excerpts, not an exact count of undiscovered matches.
+
+The byte cap covers the actual encoded stdout payload, including JSON escaping,
+line labels, source records, plan/diagnostic records, footer, and optional
+summary. Source truncation preserves UTF-8 codepoint boundaries. If a nonzero
+cap cannot fit the minimum summary/footer (and any requested plan/summary),
+investigation returns exit 2, explains the minimum-size failure on stderr, and
+writes no partial stdout. The minimum varies with seeds, input paths, options,
+and coverage; it is not a fixed byte constant.
 
 ## Declarative query mode (`hprscript query`)
 
@@ -2281,12 +2357,12 @@ The first question a reader of search results resolves for almost every hit is "
 
 | Role | Meaning | Detection |
 |---|---|---|
-| `def` | Match sits on a scope's signature line | The match's line is an anchor line in the scope index (needs an active `-scope`) |
+| `def` | Match contains a scope's declared name | The matched byte range contains the name span in the scope index (needs an active `-scope`); parameter types on the same signature are references. |
 | `comment` | Match is inside a line or block comment | Single-pass, escape-aware lexer over the file |
 | `string` | Match is inside a string literal | Same lexer (quotes, raw/backtick strings, Python triple quotes) |
 | `import` | Match's line is an import/include/use statement | Line-prefix check, only outside comments/strings |
 
-Surfaces: the default JSONL output gains a `"role":"comment"` field (omitted for plain code), `-llm` appends bracket tags, and `-format` recognises `$ROLE`. In `-llm`, a match on a signature line renders as `[def func Target]` **instead of** the misleading `[in func Target]`:
+Surfaces: the default JSONL output gains a `"role":"comment"` field (omitted for plain code), `-llm` appends bracket tags, and `-format` recognises `$ROLE`. In `-llm`, a match containing a scope's declared name renders as `[def func Target]`:
 
 ```
 a.go
@@ -2296,7 +2372,7 @@ a.go
   7: 	s := "TODO in string"  [string]  [in func Target]
 ```
 
-Precedence is position-accurate first: a trailing comment on a signature line is `comment`, not `def`. Comment/string lexing covers the scope-pack languages (Go, Rust, C, C++, Java, JS, TS) plus Python, shell, Ruby, YAML, and TOML; files with unrecognized extensions simply get no role tags. `def` additionally requires an active `-scope` config, since it reads the scope index's anchor lines.
+Precedence is position-accurate first: a trailing comment on a signature line is `comment`, not `def`. Comment/string lexing covers the scope-pack languages (Go, Rust, C, C++, Java, JS, TS) plus Python, shell, Ruby, YAML, and TOML, including C++ raw-string delimiters; files with unrecognized extensions simply get no role tags. `def` additionally requires an active `-scope` config and a match containing the scope's declared-name span. Multiline signatures are supported; parameter-type mentions are references.
 
 The classification is lexical, not syntactic — it will not distinguish a call from a reference, and block-delimiter oddities inside unrecognized constructs can skew it. It is computed lazily, only for files that produce output, so clean files cost nothing. `-no-roles` turns it off entirely.
 
@@ -2312,7 +2388,7 @@ Layout: one **file header** per file (deduped — never repeated), then each mat
 |---|---|
 | (none) | `  <line>: <match line>` — with ≥2 patterns: `  <line>: [<pat>] <match line>` |
 | `-block-open`/`-block-close` | `  <line_start>-<line_end>` then the full block content on following lines |
-| `-scope <pack>` / `-scope-pattern …` | `  <line>: <match line>  [in <kind> <name>]` — or `  [def <kind> <name>]` when the match sits on the signature line itself |
+| `-scope <pack>` / `-scope-pattern …` | `  <line>: <match line>  [in <kind> <name>]` — or `  [def <kind> <name>]` when the match contains the declared name |
 | Both block + scope | block form, with a `[in <kind> <name>]` suffix on the header |
 
 Line-shape matches also carry [role tags](#per-match-role-tags) — `[comment]`, `[string]`, `[import]` — unless `-no-roles` is given.

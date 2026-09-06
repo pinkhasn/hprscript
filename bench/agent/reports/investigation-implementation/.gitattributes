@@ -1,0 +1,2 @@
+# Preserve exact captured stdout, including spaces after blank source-line labels.
+*.llm whitespace=-blank-at-eol

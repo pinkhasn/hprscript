@@ -1,0 +1,184 @@
+INVESTIGATION profile=symbol seeds=["build_file_scope"] scans=2 complete=no
+
+SUMMARY
+7 seed matches in 6 files; 2 probable definitions/declarations; 0 seed-containing test files; 0 helper-associated test files.
+inputs=["/tmp/hprscript-pinned.qIeiUY/src"] exclusions=[] followup=searched
+scan_complete=true expansion_complete=true output_complete=false
+coverage: seed_implementation=found related_helper=found caller=found associated_test=no_match_in_selected_inputs configuration=no_match_in_selected_inputs documentation=no_match_in_selected_inputs other=found
+
+PROBABLE DEFINITIONS / DECLARATIONS AND REPRESENTATIVE EVIDENCE
+/tmp/hprscript-pinned.qIeiUY/src/pipeline.cpp:543 [seed_implementation; probable_definition, confidence=medium, method=lexical-cpp-pack] row=3 source=chunk-71
+  association: seed_definition via /tmp/hprscript-pinned.qIeiUY/src/pipeline.cpp:543 (seed-row=3)
+SOURCE chunk-71 /tmp/hprscript-pinned.qIeiUY/src/pipeline.cpp:543-558 [full_body; signature_complete=yes]
+  543: const ScopeIndex *build_file_scope(const std::string &scope_lang,
+  544:                                    const ScopeConfig &custom,
+  545:                                    const std::string &display_name,
+  546:                                    std::string_view content,
+  547:                                    const LineIndex &idx, ScopeIndex &scope,
+  548:                                    ScopeConfig *out_cfg) {
+  549:     ScopeConfig sc = resolve_scope_for_file(scope_lang, custom, display_name);
+  550:     if (out_cfg) *out_cfg = sc;
+  551:     if (sc.anchor_regex.empty()) return nullptr;
+  552:     std::string serr;
+  553:     if (!scope.build(content, sc, idx, &serr)) {
+  554:         std::fprintf(stderr, "hprscript: %s\n", serr.c_str());
+  555:         return nullptr;
+  556:     }
+  557:     return &scope;
+  558: }
+/tmp/hprscript-pinned.qIeiUY/src/scope.cpp:60 [related_helper; probable_definition, confidence=medium, method=lexical-cpp-pack] row=2811 source=chunk-84 derived=resolve_scope_for_file
+  association: called_in_seed_definition via /tmp/hprscript-pinned.qIeiUY/src/pipeline.cpp:549 (seed-row=3)
+SOURCE chunk-84 /tmp/hprscript-pinned.qIeiUY/src/scope.cpp:60-74 [full_body; signature_complete=yes]
+  60: ScopeConfig resolve_scope_for_file(const std::string &lang,
+  61:                                    const ScopeConfig &custom,
+  62:                                    const std::string &path) {
+  63:     // Custom config wins outright.
+  64:     if (!custom.anchor_regex.empty() && !custom.open.empty() && !custom.close.empty()) {
+  65:         return custom;
+  66:     }
+  67:     if (lang.empty()) return ScopeConfig{};
+  68:     std::string resolved = lang;
+  69:     if (resolved == "auto") resolved = auto_lang_for_path(path);
+  70:     if (resolved.empty()) return ScopeConfig{};
+  71:     const ScopeConfig *pack = builtin_scope_pack(resolved);
+  72:     if (!pack) return ScopeConfig{};
+  73:     return *pack;
+  74: }
+/tmp/hprscript-pinned.qIeiUY/src/edit.cpp:716 [caller; probable_call_or_reference, confidence=low, method=lexical-cpp-pack] row=1 source=chunk-26
+  association: seed_occurrence via /tmp/hprscript-pinned.qIeiUY/src/edit.cpp:716 (seed-row=1)
+SOURCE chunk-26 /tmp/hprscript-pinned.qIeiUY/src/edit.cpp:539-1222 [structural_excerpt; signature_complete=yes]
+  539: int run_edit(const Cli &cli) {
+  ... omitted lines 540-713
+  714:         const ScopeIndex *scope_ptr = nullptr;
+  715:         if (scope_enabled) {
+  716:             scope_ptr = build_file_scope(eff_scope_lang, user_scope_custom,
+  717:                                          it.path, content, idx, scope,
+  718:                                          &scope_cfg);
+  ... omitted lines 719-1222
+/tmp/hprscript-pinned.qIeiUY/src/cli.cpp:174 [other; probable_call_or_reference, confidence=low, method=lexical-cpp-pack] row=57 source=chunk-7 derived=fprintf
+  association: called_in_seed_definition via /tmp/hprscript-pinned.qIeiUY/src/pipeline.cpp:554 (seed-row=3)
+SOURCE chunk-7 /tmp/hprscript-pinned.qIeiUY/src/cli.cpp:173-398 [structural_excerpt; signature_complete=yes]
+  173: void print_help(FILE *out) {
+  174:     std::fprintf(out,
+  175: "hprscript — multi-pattern PCRE search powered by Vectorscan\n"
+  176: "\n"
+  ... omitted lines 177-398
+/tmp/hprscript-pinned.qIeiUY/src/pipeline.hpp:133 [seed_implementation; probable_declaration, confidence=medium, method=lexical-cpp-pack] row=4 source=chunk-73
+  association: seed_definition via /tmp/hprscript-pinned.qIeiUY/src/pipeline.hpp:133 (seed-row=4)
+SOURCE chunk-73 /tmp/hprscript-pinned.qIeiUY/src/pipeline.hpp:131-135 [lexical_window; signature_complete=no]
+  131: // receives the per-file resolved config (edit mode needs the pack's
+  132: // open/close delimiters for scope-body spans).
+  133: const ScopeIndex *build_file_scope(const std::string &scope_lang,
+  134:                                    const ScopeConfig &custom,
+  135:                                    const std::string &display_name,
+/tmp/hprscript-pinned.qIeiUY/src/scope.hpp:45 [related_helper; probable_definition, confidence=low, method=lexical-cpp-pack] row=2877 source=chunk-88 derived=ScopeIndex
+  association: near_seed_reference via /tmp/hprscript-pinned.qIeiUY/src/edit.cpp:714 (seed-row=1) near_seed_reference via /tmp/hprscript-pinned.qIeiUY/src/investigate.cpp:300 (seed-row=2) used_in_seed_definition via /tmp/hprscript-pinned.qIeiUY/src/pipeline.cpp:543 (seed-row=3) near_seed_reference via /tmp/hprscript-pinned.qIeiUY/src/pipeline.hpp:133 (seed-row=4) near_seed_reference via /tmp/hprscript-pinned.qIeiUY/src/query.cpp:1003 (seed-row=5) near_seed_reference via /tmp/hprscript-pinned.qIeiUY/src/runner.cpp:605 (seed-row=6) near_seed_reference via /tmp/hprscript-pinned.qIeiUY/src/runner.cpp:1286 (seed-row=7)
+SOURCE chunk-88 /tmp/hprscript-pinned.qIeiUY/src/scope.hpp:43-47 [lexical_window; signature_complete=no]
+  43: };
+  44: 
+  45: class ScopeIndex {
+  46: public:
+  47:     // Build a sorted list of scope ranges by anchor-scanning `buf`. Returns
+/tmp/hprscript-pinned.qIeiUY/src/investigate.cpp:301 [caller; probable_call_or_reference, confidence=low, method=lexical-cpp-pack] row=2 source=chunk-55
+  association: seed_occurrence via /tmp/hprscript-pinned.qIeiUY/src/investigate.cpp:301 (seed-row=2)
+SOURCE chunk-55 /tmp/hprscript-pinned.qIeiUY/src/investigate.cpp:179-850 [structural_excerpt; signature_complete=yes]
+  179: int run_investigate(const Cli &cli) {
+  ... omitted lines 180-298
+  299:         LineIndex idx; idx.build(content);
+  300:         ScopeIndex scopes;
+  301:         const ScopeIndex *scope = build_file_scope(scope_lang, custom, path,
+  302:                                                    content, idx, scopes);
+  303:         std::vector<Match> kept;
+  ... omitted lines 304-850
+/tmp/hprscript-pinned.qIeiUY/src/edit.cpp:417 [other; probable_call_or_reference, confidence=low, method=lexical-cpp-pack] row=444 source=chunk-40 derived=fprintf
+  association: called_in_seed_definition via /tmp/hprscript-pinned.qIeiUY/src/pipeline.cpp:554 (seed-row=3)
+SOURCE chunk-40 /tmp/hprscript-pinned.qIeiUY/src/edit.cpp:415-419 [lexical_window; signature_complete=no]
+  415:     // Merge groups into hunks when their 3-line contexts meet, then print.
+  416:     const uint32_t CTX = 3;
+  417:     std::fprintf(out, "--- a/%s\n+++ b/%s\n", pf.path.c_str(),
+  418:                  pf.path.c_str());
+  419:     int64_t delta = 0; // cumulative (new - old) line delta from prior hunks
+/tmp/hprscript-pinned.qIeiUY/src/scope.hpp:34 [related_helper; probable_definition, confidence=low, method=lexical-cpp-pack] row=2873 source=chunk-87 derived=ScopeConfig
+  association: used_in_seed_definition via /tmp/hprscript-pinned.qIeiUY/src/pipeline.cpp:544 (seed-row=3) near_seed_reference via /tmp/hprscript-pinned.qIeiUY/src/pipeline.hpp:134 (seed-row=4)
+SOURCE chunk-87 /tmp/hprscript-pinned.qIeiUY/src/scope.hpp:32-36 [lexical_window; signature_complete=no]
+  32: };
+  33: 
+  34: struct ScopeConfig {
+  35:     std::string anchor_regex; // PCRE; first capture group is the scope name
+  36:     std::string open;         // body opening delimiter
+/tmp/hprscript-pinned.qIeiUY/src/query.cpp:1005 [caller; probable_call_or_reference, confidence=low, method=lexical-cpp-pack] row=5 source=chunk-78
+  association: seed_occurrence via /tmp/hprscript-pinned.qIeiUY/src/query.cpp:1005 (seed-row=5)
+SOURCE chunk-78 /tmp/hprscript-pinned.qIeiUY/src/query.cpp:767-1321 [structural_excerpt; signature_complete=yes]
+  767: int run_query(const Cli &cli) {
+  ... omitted lines 768-1002
+  1003:             ScopeIndex scopes; const ScopeIndex *scope = nullptr;
+  1004:             if (!scan_spec.scope.empty())
+  1005:                 scope = build_file_scope(scan_spec.scope, custom, path, content, lines, scopes);
+  1006:             std::vector<Match> matches;
+  1007:             collector.collect(matcher, content, lines, scope, nullptr, matches);
+  ... omitted lines 1008-1321
+/tmp/hprscript-pinned.qIeiUY/src/edit.cpp:450 [other; probable_call_or_reference, confidence=low, method=lexical-cpp-pack] row=449 source=chunk-42 derived=fprintf
+  association: called_in_seed_definition via /tmp/hprscript-pinned.qIeiUY/src/pipeline.cpp:554 (seed-row=3)
+SOURCE chunk-42 /tmp/hprscript-pinned.qIeiUY/src/edit.cpp:448-452 [lexical_window; signature_complete=no]
+  448:             old_count == 0 ? (int64_t)ctx_lo - 1 + delta + 1
+  449:                            : (int64_t)ctx_lo + delta;
+  450:         std::fprintf(out, "@@ -%u,%u +%lld,%lld @@\n",
+  451:                      old_count == 0 ? ctx_lo - 1 : ctx_lo, old_count,
+  452:                      (long long)(new_count == 0 ? new_start - 1 : new_start),
+/tmp/hprscript-pinned.qIeiUY/src/line_index.hpp:14 [related_helper; probable_definition, confidence=low, method=lexical-cpp-pack] row=1330 source=chunk-62 derived=LineIndex
+  association: near_seed_reference via /tmp/hprscript-pinned.qIeiUY/src/investigate.cpp:299 (seed-row=2) used_in_seed_definition via /tmp/hprscript-pinned.qIeiUY/src/pipeline.cpp:547 (seed-row=3)
+SOURCE chunk-62 /tmp/hprscript-pinned.qIeiUY/src/line_index.hpp:12-16 [lexical_window; signature_complete=no]
+  12: namespace hpr {
+  13: 
+  14: class LineIndex {
+  15: public:
+  16:     LineIndex() = default;
+
+TOP FILES
+/tmp/hprscript-pinned.qIeiUY/src/pipeline.hpp score=0.435877 roles=["source"]
+/tmp/hprscript-pinned.qIeiUY/src/pipeline.cpp score=0.399738 roles=["source"]
+/tmp/hprscript-pinned.qIeiUY/src/investigate.cpp score=0.397920 roles=["source"]
+/tmp/hprscript-pinned.qIeiUY/src/edit.cpp score=0.390473 roles=["source"]
+/tmp/hprscript-pinned.qIeiUY/src/query.cpp score=0.388967 roles=["source"]
+/tmp/hprscript-pinned.qIeiUY/src/runner.cpp score=0.388205 roles=["source"]
+
+TOP SCOPES
+/tmp/hprscript-pinned.qIeiUY/src/block.cpp:5 func find_balanced_block
+/tmp/hprscript-pinned.qIeiUY/src/cli.cpp:77 func validate_edit_cli
+/tmp/hprscript-pinned.qIeiUY/src/cli.cpp:173 func print_help
+/tmp/hprscript-pinned.qIeiUY/src/cli.cpp:400 func parse_cli
+/tmp/hprscript-pinned.qIeiUY/src/cli.cpp:1268 func load_patterns_from
+/tmp/hprscript-pinned.qIeiUY/src/edit.cpp:86 func span_name
+/tmp/hprscript-pinned.qIeiUY/src/edit.cpp:109 func emit_guard_record
+/tmp/hprscript-pinned.qIeiUY/src/edit.cpp:125 func emit_edit_record
+/tmp/hprscript-pinned.qIeiUY/src/edit.cpp:149 func emit_edit_summary
+/tmp/hprscript-pinned.qIeiUY/src/edit.cpp:198 func token_ieq
+/tmp/hprscript-pinned.qIeiUY/src/edit.cpp:210 func expand_template
+/tmp/hprscript-pinned.qIeiUY/src/edit.cpp:276 func ends_with_nl
+
+RELATED IDENTIFIERS
+fprintf score=24.707155 same_scope=1 files=10 (corpus searched)
+resolve_scope_for_file score=21.445852 same_scope=1 files=7 (corpus searched)
+ScopeIndex score=52.152012 same_scope=1 files=15 (corpus searched)
+ScopeConfig score=32.942873 same_scope=1 files=10 (corpus searched)
+build score=28.583045 same_scope=1 files=18 (corpus searched)
+LineIndex score=25.183347 same_scope=1 files=20 (corpus searched)
+c_str score=20.274867 same_scope=1 files=17 (corpus searched)
+empty score=18.066583 same_scope=1 files=37 (corpus searched)
+content score=46.198428 same_scope=1 files=16 (corpus searched)
+display_name score=45.938059 same_scope=1 files=4 (corpus searched)
+idx score=38.653244 same_scope=1 files=19 (corpus searched)
+custom score=38.433352 same_scope=1 files=10 (corpus searched)
+scope score=36.218604 same_scope=1 files=27 (corpus searched)
+scope_lang score=35.688113 same_scope=1 files=10 (corpus searched)
+out_cfg score=24.267135 same_scope=1 files=2 (corpus searched)
+anchor_regex score=23.567281 same_scope=1 files=8 (corpus searched)
+stderr score=22.536697 same_scope=1 files=13 (corpus searched)
+sc score=21.202181 same_scope=1 files=4 (corpus searched)
+serr score=21.202181 same_scope=1 files=4 (corpus searched)
+string_view score=14.054651 same_scope=1 files=41 (corpus searched)
+
+LIMITS
+Selected lexical evidence; omissions are listed below.
+candidate_patterns_omitted=0 retention_omitted=3058 memory_limit_events=0 examples_omitted=429 source_excerpts=4 scope_fallbacks=69
+omission_reasons=["retention_cap","section_limits","source_excerpt"] stop_reason=retention_cap

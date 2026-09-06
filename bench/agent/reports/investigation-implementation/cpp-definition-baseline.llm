@@ -1,0 +1,56 @@
+INVESTIGATION profile=symbol seeds=build_file_scope scans=2 complete=no
+
+SUMMARY
+7 seed matches in 6 files; 0 probable definitions/declarations; 0 test files; 0 config files.
+
+TOP FILES
+1. /tmp/hprscript-pinned.qIeiUY/src/pipeline.hpp score=0.435877 roles=source best=133-133
+2. /tmp/hprscript-pinned.qIeiUY/src/pipeline.cpp score=0.399738 roles=source best=543-543
+3. /tmp/hprscript-pinned.qIeiUY/src/investigate.cpp score=0.397920 roles=source best=301-301
+4. /tmp/hprscript-pinned.qIeiUY/src/edit.cpp score=0.390473 roles=source best=716-716
+5. /tmp/hprscript-pinned.qIeiUY/src/query.cpp score=0.388967 roles=source best=1005-1005
+6. /tmp/hprscript-pinned.qIeiUY/src/runner.cpp score=0.388205 roles=source best=607-607
+
+TOP SCOPES
+/tmp/hprscript-pinned.qIeiUY/src/pipeline.cpp:543 func build_file_scope matches=1
+/tmp/hprscript-pinned.qIeiUY/src/investigate.cpp:179 func run_investigate matches=1
+/tmp/hprscript-pinned.qIeiUY/src/edit.cpp:539 func run_edit matches=1
+/tmp/hprscript-pinned.qIeiUY/src/query.cpp:767 func run_query matches=1
+/tmp/hprscript-pinned.qIeiUY/src/runner.cpp:152 func run_search matches=1
+/tmp/hprscript-pinned.qIeiUY/src/runner.cpp:1230 func run_list_scopes matches=1
+
+RELATED IDENTIFIERS
+cli score=2873.224482 same_scope=289 files=19
+stats score=2592.949132 same_scope=177 files=6
+size score=1554.528395 same_scope=201 files=33
+doc score=1260.117097 same_scope=80 files=5
+empty score=1147.228008 same_scope=159 files=37
+to_string score=1097.017874 same_scope=90 files=12
+row score=1000.731293 same_scope=65 files=6
+fprintf score=956.715950 same_scope=74 files=10
+kept score=910.443116 same_scope=69 files=11
+content score=905.489182 same_scope=76 files=16
+stderr score=880.183205 same_scope=74 files=13
+patterns score=876.194484 same_scope=103 files=29
+query score=844.161132 same_scope=65 files=10
+file score=828.935791 same_scope=106 files=35
+push_back score=783.233367 same_scope=86 files=25
+scope score=777.794528 same_scope=83 files=27
+hprscript score=761.119095 same_scope=70 files=16
+plan score=672.531703 same_scope=53 files=11
+stop_reason score=672.480654 same_scope=47 files=7
+uint64_t score=641.077842 same_scope=74 files=28
+
+REPRESENTATIVE EVIDENCE
+/tmp/hprscript-pinned.qIeiUY/src/pipeline.hpp:133 [probable_call_or_reference, confidence=low] const ScopeIndex *build_file_scope(const std::string &scope_lang,
+/tmp/hprscript-pinned.qIeiUY/src/pipeline.cpp:543 [probable_call_or_reference, confidence=low] const ScopeIndex *build_file_scope(const std::string &scope_lang,
+/tmp/hprscript-pinned.qIeiUY/src/investigate.cpp:301 [probable_assignment, confidence=low]         const ScopeIndex *scope = build_file_scope(scope_lang, custom, path,
+/tmp/hprscript-pinned.qIeiUY/src/edit.cpp:716 [probable_assignment, confidence=low]             scope_ptr = build_file_scope(eff_scope_lang, user_scope_custom,
+/tmp/hprscript-pinned.qIeiUY/src/query.cpp:1005 [probable_assignment, confidence=low]                 scope = build_file_scope(scan_spec.scope, custom, path, content, lines, scopes);
+/tmp/hprscript-pinned.qIeiUY/src/runner.cpp:607 [probable_assignment, confidence=low]             scope_ptr = build_file_scope(eff_scope_lang, user_scope_custom,
+/tmp/hprscript-pinned.qIeiUY/src/runner.cpp:1287 [probable_assignment, confidence=low]         const ScopeIndex *sp = build_file_scope(eff_scope_lang,
+
+LIMITS
+No sections truncated.
+candidate_patterns_omitted=1373 top_files_omitted=0 top_scopes_omitted=0 related_omitted=44 examples_omitted=0
+stop_reason=adaptive_pattern_cap

@@ -30,6 +30,7 @@ public:
     std::string_view line_text(uint32_t line_no) const;
 
     uint32_t line_count() const { return line_count_; }
+    uint64_t memory_bytes() const { return sizeof(*this) + newlines_.capacity() * sizeof(uint64_t); }
 
 private:
     std::string_view data_;

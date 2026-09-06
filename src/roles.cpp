@@ -19,7 +19,7 @@ const RoleConfig CFG_RUST{
     "//", false, "/*", "*/", true, "", "\"", false,
     {"use ", "extern crate "}};
 const RoleConfig CFG_C{
-    "//", false, "/*", "*/", false, "\"'", "", false, {"#include"}};
+    "//", false, "/*", "*/", false, "\"'", "", false, {"#include"}, true};
 const RoleConfig CFG_JAVA{
     "//", false, "/*", "*/", false, "\"'", "", false, {"import "}};
 const RoleConfig CFG_JS{
@@ -84,6 +84,21 @@ void RoleIndex::build(std::string_view buf, const RoleConfig &cfg,
         char c = buf[i];
         switch (st) {
         case St::Code:
+            if (cfg.cpp_raw_strings && starts(i, "R\"")) {
+                size_t opener = i + 2;
+                while (opener < n && opener - (i + 2) <= 16 &&
+                       buf[opener] != '(' && buf[opener] != ')' && buf[opener] != '\\' &&
+                       buf[opener] != ' ' && buf[opener] != '\t' && buf[opener] != '\r' && buf[opener] != '\n')
+                    ++opener;
+                if (opener < n && buf[opener] == '(' && opener - (i + 2) <= 16) {
+                    const std::string close = ")" + std::string(buf.substr(i + 2, opener - i - 2)) + '"';
+                    const size_t end = buf.find(close, opener + 1);
+                    const size_t to = end == std::string_view::npos ? n : end + close.size();
+                    spans_.push_back({i, to, LexRole::Str});
+                    i = to;
+                    continue;
+                }
+            }
             if (starts(i, cfg.block_open)) {
                 st = St::BlockComment;
                 span_start = i;

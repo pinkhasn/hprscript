@@ -1,0 +1,69 @@
+INVESTIGATION profile=symbol seeds=["noisyTarget"] scans=2 complete=no
+
+SUMMARY
+2 seed matches in 1 files; 1 probable definitions/declarations; 0 seed-containing test files; 0 helper-associated test files.
+inputs=["/home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation"] exclusions=[] followup=searched
+scan_complete=true expansion_complete=true output_complete=false
+coverage: seed_implementation=found related_helper=found caller=found associated_test=no_match_in_selected_inputs configuration=no_match_in_selected_inputs documentation=no_match_in_selected_inputs other=found
+
+PROBABLE DEFINITIONS / DECLARATIONS AND REPRESENTATIVE EVIDENCE
+/home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/noisy.go:3 [seed_implementation; probable_definition, confidence=medium, method=lexical-go-pack] row=1 source=chunk-2
+  association: seed_definition via /home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/noisy.go:3 (seed-row=1)
+SOURCE chunk-2 /home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/noisy.go:3-5 [full_body; signature_complete=yes]
+  3: func noisyTarget(value int) int {
+  4:     return directHelper(value)
+  5: }
+/home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/direct.go:3 [related_helper; probable_definition, confidence=medium, method=lexical-go-pack] row=3 source=chunk-1 derived=directHelper
+  association: called_in_seed_definition via /home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/noisy.go:4 (seed-row=1)
+SOURCE chunk-1 /home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/direct.go:3-5 [full_body; signature_complete=yes]
+  3: func directHelper(value int) int {
+  4:     return value + 1
+  5: }
+/home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/noisy.go:8 [caller; probable_call_or_reference, confidence=low, method=lexical-go-pack] row=2 source=chunk-3
+  association: seed_occurrence via /home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/noisy.go:8 (seed-row=2)
+SOURCE chunk-3 /home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/noisy.go:7-97 [structural_excerpt; signature_complete=yes]
+  7: func noisyCaller() {
+  8:     noisyTarget(1)
+  9:     unrelatedWork()
+  10:     unrelatedWork()
+  11:     unrelatedWork()
+  12:     unrelatedWork()
+  13:     unrelatedWork()
+  ... omitted lines 14-97
+/home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/noisy.go:4 [other; probable_call_or_reference, confidence=low, method=lexical-go-pack] row=7 source=chunk-2 derived=directHelper
+  association: called_in_seed_definition via /home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/noisy.go:4 (seed-row=1)
+/home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/noisy.go:7 [related_helper; probable_definition, confidence=medium, method=lexical-go-pack] row=9 source=chunk-3 derived=noisyCaller
+  association: near_seed_reference via /home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/noisy.go:7 (seed-row=2)
+/home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/direct.go:3 [other; probable_call_or_reference, confidence=low, method=lexical-go-pack] row=4 source=chunk-1 derived=value
+  association: used_in_seed_definition via /home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/noisy.go:3 (seed-row=1)
+/home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/direct.go:4 [other; probable_call_or_reference, confidence=low, method=lexical-go-pack] row=5 source=chunk-1 derived=value
+  association: used_in_seed_definition via /home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/noisy.go:3 (seed-row=1)
+/home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/noisy.go:3 [other; probable_call_or_reference, confidence=low, method=lexical-go-pack] row=6 source=chunk-2 derived=value
+  association: used_in_seed_definition via /home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/noisy.go:3 (seed-row=1)
+/home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/noisy.go:4 [other; probable_call_or_reference, confidence=low, method=lexical-go-pack] row=8 source=chunk-2 derived=value
+  association: used_in_seed_definition via /home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/noisy.go:3 (seed-row=1)
+/home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/noisy.go:9 [other; probable_call_or_reference, confidence=low, method=lexical-go-pack] row=10 source=chunk-3 derived=unrelatedWork
+  association: near_seed_reference via /home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/noisy.go:9 (seed-row=2)
+/home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/noisy.go:10 [other; probable_call_or_reference, confidence=low, method=lexical-go-pack] row=11 source=chunk-3 derived=unrelatedWork
+  association: near_seed_reference via /home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/noisy.go:9 (seed-row=2)
+/home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/noisy.go:11 [other; probable_call_or_reference, confidence=low, method=lexical-go-pack] row=12 source=chunk-3 derived=unrelatedWork
+  association: near_seed_reference via /home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/noisy.go:9 (seed-row=2)
+
+TOP FILES
+/home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/noisy.go score=0.213578 roles=["fixture"]
+
+TOP SCOPES
+/home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/direct.go:3 func directHelper
+/home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/noisy.go:3 func noisyTarget
+/home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/noisy.go:7 func noisyCaller
+
+RELATED IDENTIFIERS
+directHelper score=8.465736 same_scope=1 files=2 (corpus searched)
+value score=8.465736 same_scope=1 files=2 (corpus searched)
+noisyCaller score=6.295837 same_scope=0 files=1 (corpus searched)
+unrelatedWork score=6.295837 same_scope=0 files=1 (corpus searched)
+
+LIMITS
+Selected lexical evidence; omissions are listed below.
+candidate_patterns_omitted=0 retention_omitted=0 memory_limit_events=0 examples_omitted=5 source_excerpts=1 scope_fallbacks=0
+omission_reasons=["section_limits","source_excerpt"] stop_reason=section_limits

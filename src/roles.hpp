@@ -9,8 +9,8 @@
 // exactly the distinctions a lexer gets right, and they're the ones a reader
 // of search results otherwise has to re-derive per match.
 //
-// The fourth role, `def`, is not computed here: a match whose line is a
-// scope-anchor line is classified by ScopeIndex::anchor_on_line (scope.hpp).
+// The fourth role, `def`, is resolved with ScopeIndex::declared_at: the
+// match must contain the declared name, not just share its signature line.
 #pragma once
 
 #include "line_index.hpp"
@@ -36,6 +36,7 @@ struct RoleConfig {
     const char *ml_quotes = "";         // multiline delims (Go/JS "`", Rust "\"")
     bool triple_quotes = false;         // Python """ / ''' (multiline)
     std::vector<std::string> import_prefixes; // "import ", "#include", …
+    bool cpp_raw_strings = false;
 };
 
 // Language config for a path by extension, or nullptr when unknown. Covers
@@ -55,6 +56,9 @@ public:
     // True when `line` (1-based) starts — after leading whitespace, in code —
     // with one of the language's import prefixes.
     bool import_line(uint32_t line) const;
+    uint64_t memory_bytes() const {
+        return sizeof(*this) + spans_.capacity() * sizeof(Span) + import_lines_.capacity() * sizeof(uint32_t);
+    }
 
 private:
     struct Span {

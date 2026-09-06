@@ -2,6 +2,7 @@
 
 #include "block.hpp"
 #include "expand.hpp" // ref_hash6 (-refs)
+#include "language_evidence.hpp"
 #include "roles.hpp"
 #include "seen.hpp"
 
@@ -93,8 +94,8 @@ void emit_warning_record(const char *code, const std::string &path) {
     std::fwrite(s.data(), 1, s.size(), stdout);
 }
 
-void emit_summary_record(const ScanStats &st, uint64_t emitted,
-                         uint64_t elapsed_ms) {
+std::string summary_record(const ScanStats &st, uint64_t emitted,
+                           uint64_t elapsed_ms) {
     std::string s = "{\"type\":\"summary\",\"files_scanned\":";
     s += std::to_string(st.files_scanned);
     s += ",\"bytes_scanned\":";
@@ -135,6 +136,11 @@ void emit_summary_record(const ScanStats &st, uint64_t emitted,
     s += ",\"elapsed_ms\":";
     s += std::to_string(elapsed_ms);
     s += "}\n";
+    return s;
+}
+
+void emit_summary_record(const ScanStats &st, uint64_t emitted, uint64_t elapsed_ms) {
+    const std::string s = summary_record(st, emitted, elapsed_ms);
     std::fwrite(s.data(), 1, s.size(), stdout);
 }
 
@@ -168,28 +174,6 @@ std::string_view truncate_safe(std::string_view sv, uint64_t limit,
     return sv.substr(0, n);
 }
 
-// Per-match role: "comment"/"string"/"def"/"import", or nullptr for plain
-// code. Position-accurate lexer roles win over the line-based ones — a
-// trailing comment on a signature line is a comment, not a def. `def_out`
-// receives the defined scope when the result is "def".
-const char *resolve_role(const RoleIndex *roles, const ScopeIndex *scope,
-                         uint64_t offset, uint32_t line,
-                         const ScopeRange **def_out) {
-    if (def_out) *def_out = nullptr;
-    if (roles) {
-        LexRole lr = roles->at(offset);
-        if (lr == LexRole::Comment) return "comment";
-        if (lr == LexRole::Str) return "string";
-    }
-    if (scope) {
-        if (const ScopeRange *sr = scope->anchor_on_line(line)) {
-            if (def_out) *def_out = sr;
-            return "def";
-        }
-    }
-    if (roles && roles->import_line(line)) return "import";
-    return nullptr;
-}
 
 } // namespace
 
@@ -352,7 +336,7 @@ void Formatter::emit_json(const std::string &file, const Pattern &pattern,
             s += "}";
         }
     }
-    if (const char *role = resolve_role(roles, scope, m.from, line, nullptr)) {
+    if (const char *role = occurrence_role(roles, scope, m.from, m.to, line)) {
         s += ",\"role\":\"";
         s += role;
         s += '"';
@@ -424,7 +408,7 @@ void Formatter::emit_custom(const std::string &file, const Pattern &pattern,
         return true;
     };
     const ScopeRange *sr = (scope ? scope->find_innermost(m.from) : nullptr);
-    const char *role = resolve_role(roles, scope, m.from, line, nullptr);
+    const char *role = occurrence_role(roles, scope, m.from, m.to, line);
     static const char EXTRACT_PREFIX[] = "$EXTRACT_";
     static constexpr size_t EXTRACT_PREFIX_LEN = sizeof(EXTRACT_PREFIX) - 1;
     for (size_t i = 0; i < fmt.size();) {
@@ -568,9 +552,9 @@ void Formatter::emit_llm(const std::string &file, const Pattern &pattern,
         ctx_view.remove_suffix(1);
     s.append(ctx_view.data(), ctx_view.size());
     const ScopeRange *def_sr = nullptr;
-    const char *role = resolve_role(roles, scope, m.from, line, &def_sr);
+    const char *role = occurrence_role(roles, scope, m.from, m.to, line, &def_sr);
     if (def_sr) {
-        // The match sits on the signature line itself — `[def func X]`
+        // The match contains the declared name — `[def func X]`
         // rather than the misleading `[in func X]`.
         s += "  [def ";
         s.append(def_sr->kind);

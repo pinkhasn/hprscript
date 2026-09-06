@@ -62,17 +62,29 @@ done <<<"$UNBOUNDED"
 [[ -n $DEFINITION_ROW ]] || {
   printf 'not ok - unbounded investigation should contain a probable definition\n'; exit 1;
 }
-# Derive the constrained budget from emitted bytes so platform-specific temporary
-# path lengths cannot crowd out the definition. The extra byte is reserved for
-# changing complete:true to complete:false after rows are omitted.
-EVIDENCE_BUDGET=$(printf '%s\n%s\n' "$SUMMARY_ROW" "$DEFINITION_ROW" | wc -c)
-EVIDENCE_BUDGET=$((EVIDENCE_BUDGET + 1))
+# Include source and the mandatory footer in the constrained budget. Leave
+# room for longer omission statuses, but not a complete set of rankings.
+# Work from actual encoded rows so temporary-path lengths remain portable.
+EVIDENCE_BUDGET=$(printf '%s\n' "$UNBOUNDED" | python3 -c '
+import json, sys
+lines = sys.stdin.buffer.read().splitlines(keepends=True)
+rows = [json.loads(line) for line in lines]
+definition = next(i for i, row in enumerate(rows) if row.get("classification") == "probable_definition")
+chunk = next(i for i, row in enumerate(rows) if row.get("type") == "investigation-source" and row["source_chunk_id"] == rows[definition]["source_chunk_id"])
+footer = next(i for i, row in enumerate(rows) if row["type"] == "investigation-footer")
+print(sum(len(lines[i]) for i in {0, definition, chunk, footer}) + 256)
+')
 BUDGET=$($BIN investigate -F validateToken -profile symbol -followup-scan never \
   -top-files 8 -top-scopes 8 -related 8 -examples 8 \
   -evidence-budget "$EVIDENCE_BUDGET" "$TMP")
 has "$BUDGET" '"classification":"probable_definition"' \
   'evidence budget reserves probable definitions before rankings'
 has "$BUDGET" '"omitted_files":' 'budget footer discloses omitted file rows'
+ACTUAL_BYTES=$(printf '%s\n' "$BUDGET" | wc -c)
+[[ $ACTUAL_BYTES -le $EVIDENCE_BUDGET ]] || {
+  printf 'not ok - entire report exceeds evidence budget\n'; exit 1;
+}
+ok 'evidence budget includes the entire encoded report'
 [[ $BUDGET == *'"omitted_files":0'* ]] && {
   printf 'not ok - constrained budget should omit a lower-priority file row\n'; exit 1;
 }

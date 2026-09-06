@@ -1,0 +1,32 @@
+INVESTIGATION profile=symbol seeds=noisyTarget scans=2 complete=yes
+
+SUMMARY
+2 seed matches in 1 files; 1 probable definitions/declarations; 0 test files; 0 config files.
+
+TOP FILES
+1. /home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/noisy.go score=0.213578 roles=fixture best=3-8
+
+TOP SCOPES
+/home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/noisy.go:3 func noisyTarget matches=1
+/home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/noisy.go:7 func noisyCaller matches=1
+
+PROBABLE DEFINITIONS / DECLARATIONS
+/home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/noisy.go:3 [probable_definition, confidence=medium] func noisyTarget(value int) int {
+
+RELATED IDENTIFIERS
+cli score=759.697648 same_scope=80 files=1
+size score=759.697648 same_scope=80 files=1
+stats score=759.697648 same_scope=80 files=1
+unrelatedWork score=88.141716 same_scope=8 files=1
+value score=25.397208 same_scope=2 files=2
+noisyCaller score=17.838204 same_scope=1 files=1
+directHelper score=14.391751 same_scope=1 files=2
+auth score=4.500000 same_scope=0 files=5
+package score=4.500000 same_scope=0 files=5
+
+REPRESENTATIVE EVIDENCE
+/home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/noisy.go:8 [probable_call_or_reference, confidence=low]     noisyTarget(1)
+
+LIMITS
+No sections truncated.
+candidate_patterns_omitted=0 top_files_omitted=0 top_scopes_omitted=0 related_omitted=0 examples_omitted=0

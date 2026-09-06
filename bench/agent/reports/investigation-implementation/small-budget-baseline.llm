@@ -1,0 +1,23 @@
+INVESTIGATION profile=symbol seeds=validateToken scans=2 complete=yes
+
+SUMMARY
+1 seed matches in 1 files; 1 probable definitions/declarations; 0 test files; 0 config files.
+
+TOP FILES
+1. /home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/auth.go score=0.360674 roles=fixture best=3-3
+
+TOP SCOPES
+/home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/auth.go:3 func validateToken matches=1
+
+PROBABLE DEFINITIONS / DECLARATIONS
+/home/pinkhasn/Pini/src/git/hprscript/hprscript/bench/agent/fixtures/investigation/auth.go:3 [probable_definition, confidence=medium] func validateToken(token string) bool {
+
+RELATED IDENTIFIERS
+token score=25.397208 same_scope=2 files=2
+verifySignature score=11.946453 same_scope=1 files=3
+auth score=4.500000 same_scope=0 files=5
+package score=4.500000 same_scope=0 files=5
+
+LIMITS
+No sections truncated.
+candidate_patterns_omitted=0 top_files_omitted=0 top_scopes_omitted=0 related_omitted=0 examples_omitted=0

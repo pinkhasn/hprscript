@@ -83,6 +83,7 @@ test: $(BIN)
 	@HPRSCRIPT_BIN=$(abspath $(BIN)) bash tests/accounting.sh
 	@HPRSCRIPT_BIN=$(abspath $(BIN)) bash tests/edit_plan.sh
 	@HPRSCRIPT_BIN=$(abspath $(BIN)) bash tests/investigate.sh
+	@HPRSCRIPT_BIN=$(abspath $(BIN)) python3 tests/investigation_evidence.py
 	@HPRSCRIPT_BIN=$(abspath $(BIN)) bash tests/query.sh
 	@HPRSCRIPT_BIN=$(abspath $(BIN)) bash tests/golden_outputs.sh
 

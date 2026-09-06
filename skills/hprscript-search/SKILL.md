@@ -13,7 +13,7 @@ Invoke the binary through Bash as `hprscript`. Use one call per reasoning stage 
 
 - Put distinguishable terms in separate `-p` or `-pi` flags so every hit retains its pattern ID.
 - Prefer `-llm` when reading results, `-f` for paths, `-c` for counts, and `-limit N` for existence checks. In `-llm`/`-elide`/`-rollup` output, patterns with zero matches are named in a trailing `--- no matches: … ---` footer — treat that as explicit evidence of absence, qualified with "scan stopped early" when a limit cut the scan. With ≥2 matching patterns a `--- files: … ---` footer gives per-pattern file counts and the overlap (`both:`/`multi-pattern:`) — read the correlation from there instead of joining by hand.
-- Trust per-match role tags instead of re-deriving them: `[comment]`/`[string]`/`[import]` in `-llm` (a `role` field in JSONL, `$ROLE` in `-format`) classify each hit lexically, and with `-scope` active a hit on a signature line reads `[def func X]` while body hits read `[in func X]`. Untagged hits in a recognized language are plain code; `-no-roles` disables tagging.
+- Use per-match role tags as lexical evidence: `[comment]`/`[string]`/`[import]` in `-llm` (a `role` field in JSONL, `$ROLE` in `-format`) classify each hit by position. With `-scope` active, a match containing the declared name reads `[def func X]`; a parameter-type mention on that line is not a definition. `-no-roles` disables tagging.
 - Use an absolute path or glob when the effective cwd is uncertain. Inspect the first emitted path and stop if it escapes the intended tree.
 - Add `-summary -require-complete` when a broad sweep must be exhaustive. Do not present a partial scan as complete.
 - Restructure unsupported lookarounds or backreferences, or express the relationship with `query` or script phases. Do not fall back to grep or rg.
@@ -104,7 +104,7 @@ hprscript -p 'AuthMiddleware' -p 'validateToken' -budget 8000 -glob '**/*.go'
 hprscript -p 'AuthMiddleware' -elide -seen /tmp/auth-review.seen -glob '**/*.go'
 ```
 
-- `-rollup`: one line per innermost enclosing scope — line range, kind, name, hit count with a per-pattern breakdown, and the scope's first matched line; matches outside any scope group under `(top level)`. Use it as the first call of an investigation, then drill into specific scopes with `expand`, `-in-scope`, or `-elide`.
+- `-rollup`: one line per innermost enclosing scope with counts and a representative hit. Use for surveys of where matches occur; use `investigate` when the question needs implementation and related-source context.
 - `-refs`: stamp `-llm`/`-rollup` line numbers as `line@hash` so a later `expand` verifies content before rendering.
 - `-hotspots N`: rank files and expose dense match windows.
 - `-budget N`: rank and render full or compact chunks, with an explicit dropped-items footer.
@@ -114,14 +114,16 @@ hprscript -p 'AuthMiddleware' -elide -seen /tmp/auth-review.seen -glob '**/*.go'
 
 ## Investigation
 
-Use `investigate` when the seed is known but likely definitions, references, tests, config, and associated identifiers are not:
+Use `investigate` for symbol/behavior questions that need the seed implementation and its immediate helpers, callers, tests, or configuration:
 
 ```bash
 hprscript investigate -F validateToken -profile symbol -llm \
   -evidence-budget 65536 -max-memory-bytes 134217728 -glob '**/*.go'
 ```
 
-Expect the selected profile, ranked files and scopes, probable lexical roles, related identifiers with association scores, representative excerpts, scan counts, and explicit truncation metadata. Use quick search for one exact lookup. Investigation is lexical evidence, not compiler or type resolution.
+The response includes selected source from seed files and one batched follow-up scan, including helper/test files without the seed text. Small scopes can appear in full; larger or uncertain scopes have labeled excerpts and omission ranges. Evidence carries origin locations and source-row identities. Read `scan_complete`, `expansion_complete`, `output_complete`, and category coverage separately; a helper-associated test is not proof of seed coverage, and an ambiguous name is not a resolved call target.
+
+Use `-C` to request wider excerpt windows and `-refs` for references consumable by `expand`. Expand only source still needed after reading the selected chunks. Both stages honor the selected corpus and applicable anchor filters; seed-pattern predicates remain seed-stage only. `-followup-scan never` still renders available seed source but does not examine related-only files. Tight byte caps include metadata and may reject a report too small to be valid. Use quick search for one exact lookup.
 
 ## Declarative query
 

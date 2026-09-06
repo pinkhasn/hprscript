@@ -131,11 +131,18 @@ hprscript investigate -F validateToken -profile symbol -llm \
     -evidence-budget 65536 -glob '**/*.go'
 ```
 
-It returns a deterministic, budgeted package of ranked files and scopes,
-probable lexical definitions/references, path-heuristic file roles, related
-identifiers, representative evidence, and explicit scan/truncation accounting.
-It runs one seed stage and at most one internally batched related-identifier
-follow-up stage. See [Investigation mode](HPRSCRIPT.md#investigation-mode-hprscript-investigate).
+It returns selected source for the seed implementation, related helpers,
+callers, and associated tests, including files that do not contain the original
+seed. Small function bodies are included whole; larger scopes use labeled
+excerpts with explicit omissions. Related evidence records explain their origin.
+Ranked files/scopes and related identifiers follow the source evidence when space
+permits. The complete stdout payload fits the configured byte cap.
+
+Investigation runs one seed stage and at most one batched follow-up stage.
+Relationships are lexical, with confidence and ambiguity labels. Scan,
+expansion, and output completeness are reported separately; a helper-associated
+test is not proof of coverage of the seed. See
+[Investigation mode](HPRSCRIPT.md#investigation-mode-hprscript-investigate).
 
 ## Declarative relational query
 

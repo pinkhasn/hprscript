@@ -1,17 +1,26 @@
-INVESTIGATION profile=symbol seeds=target scans=1 complete=yes
+INVESTIGATION profile=symbol seeds=["target"] scans=1 complete=no
 
 SUMMARY
-1 seed matches in 1 files; 1 probable definitions/declarations; 0 test files; 0 config files.
+1 seed matches in 1 files; 1 probable definitions/declarations; 0 seed-containing test files; 0 helper-associated test files.
+inputs=["<ROOT>/src"] exclusions=[] followup=disabled
+scan_complete=true expansion_complete=true output_complete=false
+coverage: seed_implementation=found related_helper=not_searched_for_related_identifiers caller=no_match_in_selected_inputs associated_test=not_searched_for_related_identifiers configuration=not_searched_for_related_identifiers documentation=not_searched_for_related_identifiers other=no_match_in_selected_inputs
+
+PROBABLE DEFINITIONS / DECLARATIONS AND REPRESENTATIVE EVIDENCE
+<ROOT>/src/x.go:1 [seed_implementation; probable_definition, confidence=medium, method=lexical-go-pack] row=1 source=chunk-1
+  association: seed_definition via <ROOT>/src/x.go:1 (seed-row=1)
+SOURCE chunk-1 <ROOT>/src/x.go:1-3 [full_body; signature_complete=yes]
+  1: func target() {
+  2:   helper()
+  3: }
 
 TOP FILES
-1. <ROOT>/src/x.go score=0.628923 roles=source best=1-1
+<ROOT>/src/x.go score=0.628923 roles=["source"]
 
 TOP SCOPES
-<ROOT>/src/x.go:1 func target matches=1
-
-PROBABLE DEFINITIONS / DECLARATIONS
-<ROOT>/src/x.go:1 [probable_definition, confidence=medium] func target() {
+<ROOT>/src/x.go:1 func target
 
 LIMITS
-No sections truncated.
-candidate_patterns_omitted=0 top_files_omitted=0 top_scopes_omitted=0 related_omitted=1 examples_omitted=0
+Selected lexical evidence; omissions are listed below.
+candidate_patterns_omitted=0 retention_omitted=0 memory_limit_events=0 examples_omitted=0 source_excerpts=0 scope_fallbacks=0
+omission_reasons=["section_limits"] stop_reason=section_limits

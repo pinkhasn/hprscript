@@ -6,6 +6,12 @@
       "path": ".",
       "revision": "worktree",
       "notes": "Use a clean pinned revision for comparative reports."
+    },
+    {
+      "id": "investigation-fixture",
+      "path": "bench/agent/fixtures/investigation",
+      "revision": "worktree",
+      "notes": "Retrieval fixtures only; verifySignature checks length, not cryptography. Pin the same fixture revision in both conditions."
     }
   ]
 }

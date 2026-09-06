@@ -334,7 +334,8 @@ bool looks_binary(std::string_view content) {
 }
 
 bool add_walker_inputs(const Cli &cli, Walker &walker, ScanStats &stats,
-                       std::unordered_map<std::string, AddedLines> &added) {
+                       std::unordered_map<std::string, AddedLines> &added,
+                       const std::function<void(const char *, const std::string &)> &diagnostic) {
     for (const auto &g : cli.globs) walker.add_scan(g);
     for (const auto &p : cli.positional) walker.add_scan(p);
     for (const auto &e : cli.excludes) walker.add_exclude(e);
@@ -354,7 +355,8 @@ bool add_walker_inputs(const Cli &cli, Walker &walker, ScanStats &stats,
             if (!std::filesystem::exists(p, ec)) {
                 ++stats.missing_paths;
                 if (cli.diagnostics) {
-                    emit_warning_record("missing_path", p);
+                    if (diagnostic) diagnostic("missing_path", p);
+                    else emit_warning_record("missing_path", p);
                 } else {
                     std::fprintf(stderr,
                                  "hprscript: files-from: cannot access %s\n",
@@ -382,7 +384,8 @@ bool add_walker_inputs(const Cli &cli, Walker &walker, ScanStats &stats,
             if (!std::filesystem::exists(p, ec)) {
                 ++stats.missing_paths;
                 if (cli.diagnostics) {
-                    emit_warning_record("missing_path", p);
+                    if (diagnostic) diagnostic("missing_path", p);
+                    else emit_warning_record("missing_path", p);
                 } else {
                     std::fprintf(stderr, "hprscript: git: cannot access %s\n",
                                  p.c_str());

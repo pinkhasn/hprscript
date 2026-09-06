@@ -1,4 +1,8 @@
 #include "investigate.hpp"
+#include "investigation_report.hpp"
+#include "expand.hpp"
+#include "seen.hpp"
+#include <cstdlib>
 
 #include "evidence.hpp"
 #include "extract.hpp"
@@ -41,26 +45,11 @@ struct InvestigationFile {
     LineIndex lines;
     ScopeIndex scopes;
     bool scope_built = false;
-    std::vector<Match> matches;
-    std::vector<MatchRow> rows;
+    RoleIndex lexical;
+    bool lexical_built = false;
+    uint64_t retained_bytes = 0;
+    std::vector<size_t> rows;
     FileRoleResult roles;
-};
-
-struct Related {
-    std::string id;
-    uint64_t same_scope_hits = 0;
-    uint64_t same_window_hits = 0;
-    uint64_t same_file_hits = 0;
-    std::set<std::string> seed_files;
-    std::set<std::string> corpus_files;
-    double score = 0.0;
-};
-
-struct ScopeEvidence {
-    std::string file;
-    ScopeRef scope;
-    uint64_t matches = 0;
-    double score = 0.0;
 };
 
 std::string lower(std::string s) {
@@ -130,18 +119,6 @@ const std::unordered_set<std::string> &stop_words() {
     return words;
 }
 
-void tokens(std::string_view text, std::vector<std::string> &out) {
-    std::vector<IdentifierToken> spans;
-    scan_identifier_tokens(text, spans);
-    for (const auto &span : spans) {
-        size_t n = span.to - span.from;
-        if (n < 3 || n > 80) continue;
-        std::string value(text.substr(span.from, n));
-        if (stop_words().count(lower(value))) continue;
-        out.push_back(std::move(value));
-    }
-}
-
 std::string regex_escape(const std::string &s) {
     static const char *special = "\\^$.[]|()?*+{}";
     std::string out;
@@ -160,75 +137,124 @@ void truncate_utf8(std::string &value, uint64_t limit) {
     value.resize(end);
 }
 
-std::string json_array(const std::vector<std::string> &v) {
-    std::string out = "[";
-    for (size_t i = 0; i < v.size(); ++i) {
-        if (i) out += ',';
-        out += '"'; json_escape_to(out, v[i]); out += '"';
-    }
-    out += ']';
-    return out;
-}
-
 bool has_role(const FileRoleResult &r, const std::string &role) {
     return std::find(r.roles.begin(), r.roles.end(), role) != r.roles.end();
 }
 
 } // namespace
 
+
+namespace {
+
+bool definition(const OccurrenceClassification &c) {
+    return c.classification == "probable_definition" || c.classification == "probable_declaration";
+}
+
+const ScopeRange *source_scope(const ScopeIndex &scopes, uint64_t offset) {
+    // Source ownership includes a return type/modifier preceding the name.
+    // Keep the historical anchor offsets used by query/edit unchanged.
+    const ScopeRange *best = nullptr;
+    for (const auto &scope : scopes.all())
+        if (scope.signature_from <= offset && offset < scope.end_off &&
+            (!best || scope.end_off - scope.signature_from < best->end_off - best->signature_from)) best = &scope;
+    return best;
+}
+
+EvidenceCategory category_for(const OccurrenceClassification &c, const FileRoleResult &roles, bool derived) {
+    if (has_role(roles, "test") && c.classification != "comment" && c.classification != "string") return Test;
+    if (has_role(roles, "config")) return Config;
+    if (has_role(roles, "documentation")) return Documentation;
+    if (definition(c)) return derived ? Dependency : SeedDefinition;
+    if (!derived && c.classification == "probable_call_or_reference") return Caller;
+    return Other;
+}
+
+uint64_t origin_bytes(const EvidenceOrigin &o) {
+    return sizeof(o) + o.file.size() + o.kind.size() + 64;
+}
+
+uint64_t row_bytes(const InvestigationEvidence &e) {
+    const auto &r = e.row;
+    uint64_t bytes = sizeof(e) + 256 + r.file.size() + r.language.size() + r.match.size() +
+        r.context.size() + r.set_id.size() + r.pattern_id.size() + r.derived_value.size() +
+        r.derived_source_rows.size() * sizeof(uint64_t) + e.chunk_key.size() + e.ref.size();
+    if (r.enclosing) bytes += sizeof(ScopeRef) + r.enclosing->name.size() + r.enclosing->kind.size();
+    for (const auto &o : e.origins) bytes += origin_bytes(o);
+    for (const auto &role : e.file_roles) bytes += sizeof(std::string) + role.size();
+    for (const auto &[key, value] : r.captures) bytes += 128 + key.size() + value.to_str().size();
+    return bytes;
+}
+
+} // namespace
+
 int run_investigate(const Cli &cli) {
+    if (cli.context_before < 0 || cli.context_after < 0) {
+        std::fprintf(stderr, "hprscript: investigation context must be nonnegative\n");
+        return 2;
+    }
     const auto started = std::chrono::steady_clock::now();
-    ScanStats stats;
+    InvestigationReport report;
+    report.profile = profile_for(cli);
+    report.seeds = seed_labels(cli);
+    report.followup_requested = cli.investigate.followup != InvestigateOptions::Followup::Never;
+    auto &stats = report.stats;
+    EvidenceMemory memory{cli.investigate.max_memory_bytes};
     std::vector<Pattern> patterns = build_patterns(cli);
-    const std::string profile = profile_for(cli);
-    const std::vector<std::string> seeds = seed_labels(cli);
+    const std::string scope_lang = cli.scope_lang.empty() && cli.scope_pattern.empty() ? "auto" : cli.scope_lang;
+    ScopeConfig custom{cli.scope_pattern, cli.scope_open, cli.scope_close, cli.scope_kind, {}};
+    if (!scope_lang.empty() && scope_lang != "auto" && !builtin_scope_pack(scope_lang)) {
+        std::fprintf(stderr, "hprscript: unknown -scope pack '%s'\n", scope_lang.c_str());
+        return 2;
+    }
     uint64_t evidence_budget = cli.investigate.evidence_budget;
-    if (cli.max_output_bytes &&
-        (!evidence_budget || cli.max_output_bytes < evidence_budget))
+    if (cli.max_output_bytes && (!evidence_budget || cli.max_output_bytes < evidence_budget))
         evidence_budget = cli.max_output_bytes;
-
-    std::vector<IdentGroup> ident_groups;
-    for (const auto &cp : cli.patterns)
-        if (!cp.ident_terms.empty()) ident_groups.push_back({cp.ident_terms});
-    const size_t regex_count = patterns.size() - ident_groups.size();
-
     if (cli.explain_plan) {
         ExecutionPlan plan;
         plan.mode = "investigate";
         PlanStage seed;
-        seed.id = "seed-scan";
-        seed.sets = {"seeds"};
-        seed.patterns = patterns.size();
+        seed.id = "seed-scan"; seed.sets = {"seeds"}; seed.patterns = patterns.size();
+        seed.inputs = cli.positional;
         seed.inputs.insert(seed.inputs.end(), cli.globs.begin(), cli.globs.end());
-        seed.inputs.insert(seed.inputs.end(), cli.positional.begin(), cli.positional.end());
+        for (const auto &list : cli.file_lists) seed.inputs.push_back("file-list:" + list.path);
+        if (cli.git_changed || cli.git_staged || cli.git_untracked || !cli.git_ranges.empty())
+            seed.inputs.push_back("git-selection");
         if (seed.inputs.empty()) seed.inputs.push_back("<stdin>");
-        seed.scope = !cli.scope_lang.empty() ? cli.scope_lang
-                     : (!cli.scope_pattern.empty() ? "custom" : "auto");
+        seed.scope = scope_lang.empty() ? "custom" : scope_lang;
         plan.scan_stages.push_back(seed);
-        if (cli.investigate.followup != InvestigateOptions::Followup::Never) {
-            PlanStage follow;
-            follow.id = "related-followup";
-            follow.sets = {"derived-related-identifiers"};
-            follow.patterns = static_cast<uint64_t>(cli.investigate.max_related_patterns);
-            follow.inputs = seed.inputs;
-            follow.adaptive = true;
-            plan.scan_stages.push_back(std::move(follow));
+        if (report.followup_requested) {
+            PlanStage follow = seed;
+            follow.id = "related-followup"; follow.sets = {"derived-related-identifiers"};
+            follow.patterns = cli.investigate.max_related_patterns; follow.adaptive = true;
+            plan.scan_stages.push_back(follow);
         }
-        plan.postprocess.push_back({"local-evidence", {}});
-        plan.postprocess.push_back({"rank-files-scopes-related", {}});
-        plan.postprocess.push_back({"pack-evidence", {}});
-        plan.limits["top_files"] = cli.investigate.top_files;
-        plan.limits["top_scopes"] = cli.investigate.top_scopes;
-        plan.limits["related"] = cli.investigate.related;
-        plan.limits["examples"] = cli.investigate.examples;
-        plan.limits["evidence_bytes"] = evidence_budget;
-        plan.limits["max_memory_bytes"] = cli.investigate.max_memory_bytes;
-        emit_execution_plan(plan);
-        if (cli.plan_only) return 0;
+        plan.postprocess = {{"classify-and-derive-origins", {}}, {"retain-related-source", {}},
+                            {"select-category-evidence", {}}, {"pack-complete-payload", {}}};
+        plan.limits = {{"top_files", cli.investigate.top_files}, {"top_scopes", cli.investigate.top_scopes},
+                       {"related", cli.investigate.related}, {"examples", cli.investigate.examples},
+                       {"evidence_bytes", evidence_budget}, {"max_memory_bytes", memory.limit}};
+        report.plan_record = execution_plan_record(plan);
+        if (cli.plan_only) {
+            if (evidence_budget && report.plan_record.size() > evidence_budget) {
+                std::fprintf(stderr, "hprscript: investigation byte cap is below the minimum plan size\n");
+                return 2;
+            }
+            std::fwrite(report.plan_record.data(), 1, report.plan_record.size(), stdout);
+            return 0;
+        }
     }
-
-    std::vector<ResolvedRelation> rels;
-    if (!resolve_relations(cli.relations, patterns, rels)) return 2;
+    auto warning = [&](const char *code, const std::string &path) {
+        if (!cli.diagnostics) {
+            std::fprintf(stderr, "hprscript: %s: %s\n", code, path.c_str());
+            return;
+        }
+        std::string value = "{\"type\":\"warning\",\"code\":\"" + json_escape(code) +
+                "\",\"file\":\"" + json_escape(path) + "\"}\n";
+        if (memory.reserve(value.size() + 64)) report.warnings.push_back(std::move(value));
+        else ++report.warning_omissions;
+    };
+    std::vector<ResolvedRelation> relations;
+    if (!resolve_relations(cli.relations, patterns, relations)) return 2;
     FileWhere fw;
     if (!fw.init(cli.file_where, patterns)) return 2;
     std::map<int, std::unordered_map<std::string, uint32_t>> churn;
@@ -240,613 +266,431 @@ int run_investigate(const Cli &cli) {
     }
     TargetFilter target;
     if (!target.init(cli)) return 2;
-
+    std::vector<IdentGroup> ident_groups;
+    for (const auto &p : cli.patterns)
+        if (!p.ident_terms.empty()) ident_groups.push_back({p.ident_terms});
+    const size_t regex_count = patterns.size() - ident_groups.size();
     Matcher matcher;
     if (regex_count) {
-        CompileError ce;
+        CompileError error;
         std::vector<Pattern> regex(patterns.begin(), patterns.begin() + regex_count);
-        if (!matcher.compile(regex, &ce)) {
-            std::fprintf(stderr, "hprscript: pattern compile failed: %s\n", ce.message.c_str());
-            return 2;
+        if (!matcher.compile(regex, &error)) {
+            std::fprintf(stderr, "hprscript: pattern compile failed: %s\n", error.message.c_str()); return 2;
         }
         ++stats.matcher_compilations;
     }
     stats.patterns_compiled += patterns.size();
     ExtractTable extracts;
-    std::string xerr; int xidx = -1;
-    if (!extracts.build(patterns, &xerr, &xidx)) {
-        std::fprintf(stderr, "hprscript: %s\n", xerr.c_str()); return 2;
+    std::string extract_error; int extract_index = -1;
+    if (!extracts.build(patterns, &extract_error, &extract_index)) {
+        std::fprintf(stderr, "hprscript: %s\n", extract_error.c_str()); return 2;
     }
+    MatchCollector seed_collector(patterns, std::move(relations), cli.git_added_lines, ident_groups);
 
     Walker walker;
     std::unordered_map<std::string, AddedLines> added;
-    if (!add_walker_inputs(cli, walker, stats, added)) return 2;
-    const bool no_inputs = cli.globs.empty() && cli.positional.empty() &&
-        cli.file_lists.empty() && !cli.git_changed && !cli.git_staged &&
-        !cli.git_untracked && cli.git_ranges.empty();
+    if (!add_walker_inputs(cli, walker, stats, added, warning)) return 2;
+    const bool no_inputs = cli.globs.empty() && cli.positional.empty() && cli.file_lists.empty() &&
+        !cli.git_changed && !cli.git_staged && !cli.git_untracked && cli.git_ranges.empty();
     const bool from_stdin = no_inputs && !isatty(fileno(stdin));
     std::string stdin_content;
     if (from_stdin && !read_stdin(stdin_content)) {
         std::fprintf(stderr, "hprscript: failed to read stdin\n"); return 2;
     }
+    // Resolve once, then reuse precisely this corpus. Canonical ordering also
+    // makes bounded retention independent of argv/files-from traversal order.
+    std::set<std::string> input_paths;
+    if (!from_stdin) walker.walk([&](const WalkItem &it) { input_paths.insert(it.path); return true; },
+                                [&](const std::string &path) { ++stats.files_failed; warning("traversal_error", path); });
 
-    ScopeConfig custom{cli.scope_pattern, cli.scope_open, cli.scope_close,
-                       cli.scope_kind, {}};
-    std::string scope_lang = cli.scope_lang;
-    if (scope_lang.empty() && cli.scope_pattern.empty()) scope_lang = "auto";
-    if (!scope_lang.empty() && scope_lang != "auto" &&
-        !builtin_scope_pack(scope_lang)) {
-        std::fprintf(stderr, "hprscript: unknown -scope pack '%s'\n",
-                     scope_lang.c_str());
-        return 2;
-    }
-    MatchCollector collector(patterns, std::move(rels), cli.git_added_lines,
-                             ident_groups);
     RankInput ranking;
-    ranking.total_queried = patterns.size();
-    ranking.surprise = true;
-    ranking.rich_clusters = true;
+    ranking.total_queried = patterns.size(); ranking.surprise = true; ranking.rich_clusters = true;
     for (const auto &p : patterns) {
-        ranking.queried_ids.insert(p.id);
-        ranking.pattern_weights[p.id] = p.weight;
+        ranking.queried_ids.insert(p.id); ranking.pattern_weights[p.id] = p.weight;
     }
-
-    std::deque<InvestigationFile> files;
+    std::deque<InvestigationFile> seed_files;
+    std::map<std::tuple<std::string, uint64_t, uint64_t>, size_t> locations;
+    std::map<std::tuple<size_t, EvidenceCategory, bool>, size_t> retained_per_category;
+    const size_t representatives = std::max(2, cli.investigate.examples);
     uint64_t next_row = 1;
-    uint64_t buffered = 0;
-    ++stats.scan_stages;
-    auto scan_seed = [&](const std::string &path, std::string_view content) -> bool {
-        LineIndex idx; idx.build(content);
-        ScopeIndex scopes;
-        const ScopeIndex *scope = build_file_scope(scope_lang, custom, path,
-                                                   content, idx, scopes);
-        std::vector<Match> kept;
-        const AddedLines *lines = nullptr;
-        if (auto it = added.find(path); it != added.end()) lines = &it->second;
-        collector.collect(matcher, content, idx, scope, lines, kept);
-        target.apply(kept, idx, scope);
-        stats.matches_seen += kept.size();
-        if (fw.active() && !fw.pass(kept, patterns.size(), path, churn)) return true;
-        if (kept.empty()) return true;
-        accumulate_rank_input(ranking, path, kept, patterns, idx);
-        if (cli.investigate.max_memory_bytes &&
-            buffered + content.size() > cli.investigate.max_memory_bytes) {
-            stats.rows_truncated += kept.size();
-            if (stats.stop_reason.empty()) stats.stop_reason = "memory_cap";
-            return true;
+
+    auto retain = [&](InvestigationEvidence e, const std::string &path, const LineIndex &idx,
+                      const ScopeRange *scope, size_t bucket) -> size_t {
+        const auto location = std::make_tuple(path, e.row.from, e.row.to);
+        if (auto it = locations.find(location); it != locations.end()) {
+            auto &prior = report.evidence[it->second];
+            for (const auto &o : e.origins) {
+                auto same = [&](const EvidenceOrigin &old) {
+                    return old.seed == o.seed && old.file == o.file && old.line == o.line && old.kind == o.kind;
+                };
+                if (std::any_of(prior.origins.begin(), prior.origins.end(), same)) continue;
+                if (!memory.reserve(origin_bytes(o) + sizeof(uint64_t))) { ++report.memory_omissions; break; }
+                prior.origins.push_back(o);
+                if (e.derived) prior.row.derived_source_rows.push_back(o.source_row);
+            }
+            if (prior.row.derived_value.empty()) prior.row.derived_value = e.row.derived_value;
+            return it->second;
         }
-        stats.rows_materialized += kept.size();
-        files.emplace_back();
-        InvestigationFile &f = files.back();
-        f.path = path;
-        f.content.assign(content.data(), content.size());
-        f.lines.build(f.content);
-        f.roles = classify_file_roles(path);
-        ScopeConfig cfg = resolve_scope_for_file(scope_lang, custom, path);
-        if (!cfg.anchor_regex.empty()) {
-            std::string err;
-            f.scope_built = f.scopes.build(f.content, cfg, f.lines, &err);
+        ++report.found[e.category];
+        // Reserve a distinct pool for bodies: earlier prototypes/references
+        // cannot crowd out a definition found later in the corpus.
+        auto &count = retained_per_category[{bucket, e.category,
+                                             e.classification.classification == "probable_definition"}];
+        if (count >= representatives) { ++report.retention_omissions; return SIZE_MAX; }
+        e.chunk_key = path + (scope ? "\nS" + std::to_string(scope->signature_from)
+                                   : "\nW" + std::to_string(e.row.line));
+        if (!scope) {
+            const uint32_t before = cli.context_set ? cli.context_before : 2;
+            const uint32_t after = cli.context_set ? cli.context_after : 2;
+            const uint32_t lo = e.row.line > before ? e.row.line - before : 1;
+            const uint64_t hi = uint64_t(e.row.line) + after;
+            for (const auto &[key, chunk] : report.chunks)
+                if (chunk.file == path && !chunk.signature_first && chunk.first <= hi && chunk.last >= lo) {
+                    e.chunk_key = key; break;
+                }
         }
-        f.matches = kept;
-        for (const auto &m : kept) {
-            MatchRow row = materialize_match_row(
-                next_row++, 0, "seeds", patterns, m, path, f.content, f.lines,
-                f.scope_built ? &f.scopes : nullptr,
-                extracts.any() ? &extracts : nullptr);
-            truncate_utf8(row.match, cli.max_match_bytes);
-            truncate_utf8(row.context, cli.max_context_bytes);
-            f.rows.push_back(std::move(row));
+        const uint64_t bytes = row_bytes(e);
+        if (!memory.reserve(bytes)) { ++report.memory_omissions; return SIZE_MAX; }
+        auto old = report.chunks.find(e.chunk_key);
+        const uint64_t old_bytes = old == report.chunks.end() ? 0 : old->second.memory_bytes();
+        uint64_t available = memory.limit ? memory.remaining() + old_bytes : 0;
+        if (memory.limit && available < sizeof(SourceChunk) + path.size() + 160) {
+            memory.release(bytes); ++report.memory_omissions; return SIZE_MAX;
         }
-        buffered += content.size();
-        stats.buffered_bytes_peak = std::max(stats.buffered_bytes_peak, buffered);
-        return true;
+        SourceChunk chunk = make_source_chunk(path, idx, scope, e.row.line, cli, available);
+        if (old != report.chunks.end()) merge_source_chunk(chunk, old->second);
+        const uint64_t new_bytes = chunk.memory_bytes();
+        if (new_bytes > old_bytes && !memory.reserve(new_bytes - old_bytes)) {
+            memory.release(bytes); ++report.memory_omissions; return SIZE_MAX;
+        }
+        if (old_bytes > new_bytes) memory.release(old_bytes - new_bytes);
+        if (chunk.retention_reduced) ++report.memory_omissions;
+        if (!chunk.reliable_scope) ++report.scope_fallbacks;
+        report.chunks[e.chunk_key] = std::move(chunk);
+        ++count;
+        const size_t index = report.evidence.size();
+        locations[location] = index;
+        report.evidence.push_back(std::move(e));
+        ++stats.rows_materialized;
+        return index;
     };
 
+    auto scan_seed = [&](const std::string &path, std::string_view content) {
+        LineIndex idx; idx.build(content);
+        ScopeIndex scope_index;
+        const auto *scope = build_file_scope(scope_lang, custom, path, content, idx, scope_index);
+        RoleIndex roles;
+        const auto *role_cfg = role_config_for_path(path);
+        if (role_cfg) roles.build(content, *role_cfg, idx);
+        std::vector<Match> kept;
+        const auto added_it = added.find(path);
+        const AddedLines *lines = added_it == added.end() ? nullptr : &added_it->second;
+        seed_collector.collect(matcher, content, idx, scope, lines, kept);
+        target.apply(kept, idx, scope);
+        if (fw.active() && !fw.pass(kept, patterns.size(), path, churn)) return;
+        stats.matches_seen += kept.size();
+        if (kept.empty()) return;
+        ++report.seed_files;
+        FileRoleResult file_roles = classify_file_roles(path);
+        if (has_role(file_roles, "test")) ++report.seed_tests;
+        if (has_role(file_roles, "config")) ++report.seed_configs;
+        const uint64_t rank_bytes = path.size() + 512 + std::min<size_t>(4096, kept.size()) * 32 +
+                                    patterns.size() * 64;
+        if (memory.reserve(rank_bytes)) accumulate_rank_input(ranking, path, kept, patterns, idx);
+        else ++report.memory_omissions;
+        const uint64_t minimum_file_bytes = sizeof(InvestigationFile) + path.size() + content.size() +
+            idx.memory_bytes() + scope_index.memory_bytes() + roles.memory_bytes();
+        if (memory.limit && minimum_file_bytes > memory.remaining()) {
+            for (const auto &m : kept) {
+                auto c = classify_occurrence(path, content, m.from, m.to, idx, scope, role_cfg ? &roles : nullptr);
+                if (definition(c)) ++report.seed_definitions;
+                ++report.found[category_for(c, file_roles, false)];
+                ++report.memory_omissions;
+            }
+            return;
+        }
+        seed_files.emplace_back();
+        auto &f = seed_files.back();
+        f.path = path; f.content.assign(content);
+        f.lines.build(f.content);
+        f.scopes = std::move(scope_index); f.scope_built = scope != nullptr;
+        f.lexical = std::move(roles); f.lexical_built = role_cfg != nullptr;
+        f.roles = file_roles;
+        f.retained_bytes = sizeof(f) + f.path.size() + f.content.capacity() + f.lines.memory_bytes() +
+                           f.scopes.memory_bytes() + f.lexical.memory_bytes();
+        const bool retained_file = memory.reserve(f.retained_bytes);
+        // Definitions are counted even when their source cannot be retained.
+        for (const auto &m : kept) {
+            auto c = classify_occurrence(path, content, m.from, m.to, idx,
+                                         f.scope_built ? &f.scopes : nullptr, role_cfg ? &f.lexical : nullptr);
+            if (definition(c)) ++report.seed_definitions;
+            if (!retained_file) { ++report.found[category_for(c, file_roles, false)]; ++report.memory_omissions; continue; }
+            InvestigationEvidence e;
+            e.row = materialize_match_row(next_row++, 0, "seeds", patterns, m, path, content,
+                                          idx, f.scope_built ? &f.scopes : nullptr, extracts.any() ? &extracts : nullptr);
+            truncate_utf8(e.row.match, cli.max_match_bytes);
+            truncate_utf8(e.row.context, cli.max_context_bytes);
+            e.classification = std::move(c); e.file_roles = file_roles.roles;
+            e.category = category_for(e.classification, file_roles, false);
+            e.origins.push_back({e.row.row_id, m.pattern_index, path, e.row.line,
+                                e.row.enclosing ? e.row.enclosing->from : m.from,
+                                definition(e.classification) ? "seed_definition" : "seed_occurrence", 0});
+            if (cli.refs && path != "<stdin>") e.ref = path + ":" + std::to_string(e.row.line) + "@" + ref_hash6(idx.line_text(e.row.line));
+            const auto *enclosing = f.scope_built ? source_scope(f.scopes, m.from) : nullptr;
+            const size_t row = retain(std::move(e), path, idx, enclosing, m.pattern_index);
+            if (row != SIZE_MAX && std::find(f.rows.begin(), f.rows.end(), row) == f.rows.end()) {
+                if (memory.reserve(sizeof(size_t))) { f.rows.push_back(row); f.retained_bytes += sizeof(size_t); }
+                else ++report.memory_omissions;
+            }
+        }
+        if (!retained_file) seed_files.pop_back();
+        else if (f.rows.empty()) { memory.release(f.retained_bytes); seed_files.pop_back(); }
+    };
+    ++stats.scan_stages;
     if (from_stdin) {
         ++stats.files_scanned; stats.bytes_scanned += stdin_content.size();
         scan_seed("<stdin>", stdin_content);
     } else {
-        walker.walk([&](const WalkItem &it) {
-            MappedFile mf;
-            if (!mf.open(it.path)) {
-                ++stats.files_failed;
-                if (cli.diagnostics) emit_warning_record("read_error", it.path);
-                else std::fprintf(stderr, "hprscript: cannot read %s\n", it.path.c_str());
-                return true;
-            }
-            if (looks_binary(mf.view())) { ++stats.files_binary; return true; }
-            ++stats.files_scanned; stats.bytes_scanned += mf.view().size();
-            return scan_seed(it.path, mf.view());
-        });
+        for (const auto &path : input_paths) {
+            MappedFile file;
+            if (!file.open(path)) { ++stats.files_failed; warning("read_error", path); continue; }
+            if (looks_binary(file.view())) { ++stats.files_binary; continue; }
+            ++stats.files_scanned; stats.bytes_scanned += file.view().size();
+            scan_seed(path, file.view());
+        }
     }
 
-    std::unordered_set<std::string> normalized_seeds;
-    for (const auto &s : seeds) normalized_seeds.insert(lower(s));
-    std::map<std::string, Related> related;
-    std::map<std::string, ScopeEvidence> scopes;
-    for (const auto &f : files) {
-        std::unordered_map<std::string, uint64_t> file_counts;
-        std::vector<std::string> all;
-        tokens(f.content, all);
-        for (const auto &t : all) ++file_counts[t];
-
-        std::set<uint64_t> seen_scopes;
-        for (const auto &row : f.rows) {
-            const uint32_t lo = row.line > 2 ? row.line - 2 : 1;
-            const uint32_t hi = std::min<uint32_t>(f.lines.line_count(), row.line + 2);
-            for (uint32_t line = lo; line <= hi; ++line) {
-                std::vector<std::string> ts; tokens(f.lines.line_text(line), ts);
-                for (const auto &t : ts) {
-                    if (normalized_seeds.count(lower(t))) continue;
-                    Related &r = related[t]; r.id = t; ++r.same_window_hits;
-                    r.seed_files.insert(f.path);
+    std::set<std::string> seed_names;
+    for (const auto &seed : report.seeds) seed_names.insert(lower(seed));
+    std::map<std::string, InvestigationCandidate> candidates;
+    const std::set<std::string> generic = {"cli", "stats", "size", "empty", "doc", "data", "begin", "end", "value",
+        "build", "get", "set", "clear", "push_back", "insert", "find", "c_str", "front", "back"};
+    const std::set<std::string> keywords = {"if", "try", "catch", "throw", "sizeof", "switch", "do", "while",
+        "for", "namespace", "package", "const", "let", "var", "function", "func", "class", "struct", "enum",
+        "interface", "type", "fn", "pub", "mut", "impl", "use", "in", "of", "as"};
+    for (const auto &f : seed_files) {
+        for (size_t row_index : f.rows) {
+            const auto &e = report.evidence[row_index];
+            const auto &row = e.row;
+            const auto *scope = f.scope_built ? source_scope(f.scopes, row.from) : nullptr;
+            const bool seed_definition = e.classification.classification == "probable_definition" && scope &&
+                                         f.scopes.declared_at(row.from, row.to);
+            const bool string_profile = report.profile == "error" || report.profile == "config";
+            if (!string_profile && f.lexical_built && f.lexical.at(row.from) != LexRole::Code) continue;
+            uint64_t lo = 0, hi = 0;
+            if (seed_definition) { lo = scope->signature_from; hi = scope->end_off; }
+            else {
+                auto first = f.lines.line_text(row.line > 2 ? row.line - 2 : 1);
+                lo = first.data() - f.content.data();
+                auto last = f.lines.line_text(std::min(f.lines.line_count(), row.line + 2));
+                hi = last.data() - f.content.data() + last.size();
+            }
+            std::vector<IdentifierToken> token_spans;
+            scan_identifier_tokens(std::string_view(f.content).substr(lo, hi - lo), token_spans);
+            for (const auto &token : token_spans) {
+                const uint64_t from = lo + token.from, to = lo + token.to;
+                if (to - from > 80 || (from <= row.from && to >= row.to)) continue;
+                const std::string name = f.content.substr(from, to - from), normalized = lower(name);
+                if (seed_names.count(normalized) || stop_words().count(normalized) || keywords.count(normalized)) continue;
+                if (!string_profile && f.lexical_built && f.lexical.at(from) != LexRole::Code) continue;
+                uint64_t after = to;
+                while (after < hi && std::isspace(static_cast<unsigned char>(f.content[after]))) ++after;
+                const bool call = after < hi && f.content[after] == '(' &&
+                                  (!f.lexical_built || f.lexical.at(from) == LexRole::Code);
+                const bool named_type = !name.empty() && std::isupper(static_cast<unsigned char>(name[0]));
+                int priority = seed_definition ? (call ? (generic.count(name) ? 1 : 0) : named_type ? 1 : 2) : 3;
+                const std::string association = seed_definition ? (call ? "called_in_seed_definition" : "used_in_seed_definition")
+                                                               : "near_seed_reference";
+                auto found = candidates.find(name);
+                if (found == candidates.end()) {
+                    if (!memory.reserve(sizeof(InvestigationCandidate) + name.size() + 96)) { ++report.memory_omissions; continue; }
+                    found = candidates.emplace(name, InvestigationCandidate{}).first;
+                    found->second.identifier = name;
+                }
+                auto &c = found->second;
+                c.priority = std::min(c.priority, priority);
+                for (const auto &seed_origin : e.origins) {
+                    EvidenceOrigin origin{row.row_id, seed_origin.seed, f.path, f.lines.line_of(from),
+                                          scope ? scope->start_off : row.from, association, priority};
+                    auto same = [&](const EvidenceOrigin &o) {
+                        return o.seed == origin.seed && o.file == origin.file && o.scope_from == origin.scope_from && o.kind == origin.kind;
+                    };
+                    if (std::any_of(c.origins.begin(), c.origins.end(), same)) continue;
+                    if (!memory.reserve(origin_bytes(origin))) { ++report.memory_omissions; continue; }
+                    c.origins.push_back(std::move(origin));
+                    if (seed_definition) ++c.same_scope_hits;
+                    else ++c.same_window_hits;
                 }
             }
-            if (row.enclosing) {
-                std::string key = f.path + "\n" + std::to_string(row.enclosing->from);
-                ScopeEvidence &s = scopes[key];
-                s.file = f.path; s.scope = *row.enclosing; ++s.matches;
-                if (seen_scopes.insert(row.enclosing->from).second &&
-                    row.enclosing->to <= f.content.size()) {
-                    std::vector<std::string> ts;
-                    tokens(std::string_view(f.content).substr(
-                               row.enclosing->from,
-                               row.enclosing->to - row.enclosing->from), ts);
-                    for (const auto &t : ts) {
-                        if (normalized_seeds.count(lower(t))) continue;
-                        Related &r = related[t]; r.id = t; ++r.same_scope_hits;
-                        r.seed_files.insert(f.path);
-                    }
-                }
-            }
-        }
-        for (auto &[id, r] : related) {
-            auto it = file_counts.find(id);
-            if (it != file_counts.end()) {
-                r.same_file_hits += it->second;
-                r.seed_files.insert(f.path);
-            }
         }
     }
-
-    std::vector<Related *> candidates;
-    for (auto &[id, r] : related) candidates.push_back(&r);
-    auto prelim = [](const Related *a, const Related *b) {
-        const double sa = a->same_scope_hits * 4.0 + a->same_window_hits * 2.0 +
-                          a->same_file_hits * 0.5 + a->seed_files.size() * 2.0;
-        const double sb = b->same_scope_hits * 4.0 + b->same_window_hits * 2.0 +
-                          b->same_file_hits * 0.5 + b->seed_files.size() * 2.0;
-        if (sa != sb) return sa > sb;
-        return a->id < b->id;
-    };
-    std::sort(candidates.begin(), candidates.end(), prelim);
-    uint64_t candidate_patterns_omitted = 0;
-    if (candidates.size() > static_cast<size_t>(cli.investigate.max_related_patterns)) {
-        candidate_patterns_omitted = candidates.size() - cli.investigate.max_related_patterns;
-        candidates.resize(cli.investigate.max_related_patterns);
-        stats.rows_truncated += candidate_patterns_omitted;
-        if (stats.stop_reason.empty()) stats.stop_reason = "adaptive_pattern_cap";
+    // Discovery is complete before aggregation. No candidate misses counts
+    // just because its first origin happened to occur in a later input file.
+    for (const auto &f : seed_files) {
+        std::set<std::string> seen;
+        std::vector<IdentifierToken> spans; scan_identifier_tokens(f.content, spans);
+        for (const auto &span : spans) {
+            if (f.lexical_built && f.lexical.at(span.from) != LexRole::Code &&
+                report.profile != "error" && report.profile != "config") continue;
+            const std::string id = f.content.substr(span.from, span.to - span.from);
+            if (auto it = candidates.find(id); it != candidates.end()) {
+                ++it->second.same_file_hits;
+                seen.insert(id);
+            }
+        }
+        for (const auto &id : seen) ++candidates[id].seed_files;
     }
+    std::vector<InvestigationCandidate *> ranked;
+    for (auto &[id, c] : candidates) {
+        if (c.origins.empty()) continue;
+        c.score = c.same_scope_hits * 4.0 + c.same_window_hits * 2.0 + c.seed_files;
+        ranked.push_back(&c);
+    }
+    std::sort(ranked.begin(), ranked.end(), [](const auto *a, const auto *b) {
+        if (a->priority != b->priority) return a->priority < b->priority;
+        if (a->score != b->score) return a->score > b->score;
+        return a->identifier < b->identifier;
+    });
+    const size_t cap = cli.investigate.max_related_patterns;
+    std::set<std::string> chosen;
+    // Reserve candidates for quieter seeds as well as the most frequent seed.
+    for (size_t round = 0; chosen.size() < cap; ++round) {
+        bool progress = false;
+        for (size_t seed = 0; seed < patterns.size() && chosen.size() < cap; ++seed) {
+            for (auto *c : ranked) {
+                if (chosen.count(c->identifier)) continue;
+                if (std::none_of(c->origins.begin(), c->origins.end(), [&](const auto &o) { return o.seed == seed; })) continue;
+                chosen.insert(c->identifier); progress = true; break;
+            }
+        }
+        if (!progress) break;
+    }
+    report.candidate_omissions = ranked.size() - chosen.size();
+    for (auto *c : ranked)
+        if (chosen.count(c->identifier)) report.candidates.push_back(std::move(*c));
+    // Release full seed files after candidate extraction; chunks own every
+    // source byte needed for rendering. Follow-up retention shares this budget.
+    for (const auto &f : seed_files) memory.release(f.retained_bytes);
+    seed_files.clear();
+    for (const auto &[id, c] : candidates)
+        if (!chosen.count(id)) {
+            uint64_t bytes = sizeof(c) + id.size() + 96;
+            for (const auto &o : c.origins) bytes += origin_bytes(o);
+            memory.release(bytes);
+        }
+    candidates.clear();
 
-    bool follow = cli.investigate.followup == InvestigateOptions::Followup::Always ||
-                  (cli.investigate.followup == InvestigateOptions::Followup::Auto &&
-                   !candidates.empty());
-    uint64_t corpus_file_count = stats.files_scanned;
-    if (follow && !candidates.empty()) {
-        std::vector<Pattern> rel_patterns;
-        for (size_t i = 0; i < candidates.size(); ++i) {
-            Pattern p;
-            p.id = "related" + std::to_string(i);
-            p.regexp = regex_escape(candidates[i]->id);
-            p.word_boundary = true;
-            rel_patterns.push_back(std::move(p));
+    uint64_t corpus_files = 0;
+    if (report.followup_requested && !report.candidates.empty()) {
+        report.followup_ran = true;
+        std::vector<Pattern> derived;
+        for (size_t i = 0; i < report.candidates.size(); ++i) {
+            Pattern p; p.id = "related" + std::to_string(i);
+            p.regexp = regex_escape(report.candidates[i].identifier); p.word_boundary = true;
+            derived.push_back(std::move(p));
         }
-        Matcher rel_matcher; CompileError ce;
-        if (!rel_matcher.compile(rel_patterns, &ce)) {
-            std::fprintf(stderr, "hprscript: related matcher compile failed: %s\n", ce.message.c_str());
-            return 2;
+        Matcher related_matcher; CompileError error;
+        if (!related_matcher.compile(derived, &error)) {
+            std::fprintf(stderr, "hprscript: related matcher compile failed: %s\n", error.message.c_str()); return 2;
         }
-        ++stats.matcher_compilations;
-        stats.patterns_compiled += rel_patterns.size();
-        ++stats.scan_stages;
-        corpus_file_count = 0;
-        auto rel_scan = [&](const std::string &path, std::string_view content) {
-            std::vector<char> hit(candidates.size(), 0);
-            uint64_t found = 0;
-            rel_matcher.scan(content, [&](const Match &m) {
-                if (m.pattern_index < hit.size()) hit[m.pattern_index] = 1;
-                ++found; return true;
-            });
-            ++corpus_file_count;
-            stats.rows_materialized += found;
-            for (size_t i = 0; i < hit.size(); ++i)
-                if (hit[i]) candidates[i]->corpus_files.insert(path);
+        ++stats.matcher_compilations; stats.patterns_compiled += derived.size(); ++stats.scan_stages;
+        MatchCollector related_collector(derived, {}, cli.git_added_lines);
+        auto scan_related = [&](const std::string &path, std::string_view content) {
+            ++corpus_files;
+            LineIndex idx; idx.build(content);
+            ScopeIndex scopes;
+            const auto *scope = build_file_scope(scope_lang, custom, path, content, idx, scopes);
+            RoleIndex roles; const auto *role_cfg = role_config_for_path(path);
+            if (role_cfg) roles.build(content, *role_cfg, idx);
+            const auto file_roles = classify_file_roles(path);
+            const auto added_it = added.find(path);
+            const AddedLines *lines = added_it == added.end() ? nullptr : &added_it->second;
+            std::vector<Match> kept;
+            related_collector.collect(related_matcher, content, idx, scope, lines, kept);
+            target.apply(kept, idx, scope);
+            report.related_matches += kept.size();
+            std::vector<bool> hit(derived.size(), false);
+            bool associated_test = false;
+            for (const auto &m : kept) {
+                auto &c = report.candidates[m.pattern_index];
+                hit[m.pattern_index] = true;
+                auto classification = classify_occurrence(path, content, m.from, m.to, idx, scope, role_cfg ? &roles : nullptr);
+                if (classification.classification == "probable_definition") ++c.definitions;
+                if (has_role(file_roles, "test") && classification.classification != "comment" &&
+                    classification.classification != "string") associated_test = true;
+                InvestigationEvidence e;
+                e.row = materialize_match_row(next_row++, 1, "related", derived, m, path, content, idx, scope);
+                truncate_utf8(e.row.match, cli.max_match_bytes);
+                truncate_utf8(e.row.context, cli.max_context_bytes);
+                e.row.derived_value = c.identifier;
+                for (const auto &o : c.origins) e.row.derived_source_rows.push_back(o.source_row);
+                std::sort(e.row.derived_source_rows.begin(), e.row.derived_source_rows.end());
+                e.row.derived_source_rows.erase(std::unique(e.row.derived_source_rows.begin(), e.row.derived_source_rows.end()), e.row.derived_source_rows.end());
+                e.classification = std::move(classification); e.file_roles = file_roles.roles;
+                e.category = category_for(e.classification, file_roles, true);
+                e.origins = c.origins; e.derived = true;
+                if (cli.refs && path != "<stdin>") e.ref = path + ":" + std::to_string(e.row.line) + "@" + ref_hash6(idx.line_text(e.row.line));
+                retain(std::move(e), path, idx, scope ? source_scope(scopes, m.from) : nullptr, patterns.size() + m.pattern_index);
+            }
+            if (associated_test) ++report.related_tests;
+            for (size_t i = 0; i < hit.size(); ++i) if (hit[i]) ++report.candidates[i].corpus_files;
         };
         if (from_stdin) {
-            ++stats.files_scanned;
-            stats.bytes_scanned += stdin_content.size();
-            rel_scan("<stdin>", stdin_content);
+            ++stats.files_scanned; stats.bytes_scanned += stdin_content.size();
+            scan_related("<stdin>", stdin_content);
         } else {
-            Walker again;
-            ScanStats discovery;
-            std::unordered_map<std::string, AddedLines> unused;
-            if (!add_walker_inputs(cli, again, discovery, unused)) return 2;
-            again.walk([&](const WalkItem &it) {
-                MappedFile mf;
-                if (!mf.open(it.path) || looks_binary(mf.view())) return true;
-                ++stats.files_scanned;
-                stats.bytes_scanned += mf.view().size();
-                rel_scan(it.path, mf.view()); return true;
-            });
+            // Like edit/apply's deterministic fault fixtures, this hook is
+            // inert unless fault injection is explicitly enabled.
+            const char *enable = std::getenv("HPRSCRIPT_ENABLE_FAULT_INJECTION");
+            const char *fail_n = std::getenv("HPRSCRIPT_TEST_FAIL_FOLLOWUP_READ_N");
+            const uint64_t fail_at = enable && std::string(enable) == "1" && fail_n ? std::strtoull(fail_n, nullptr, 10) : 0;
+            uint64_t reads = 0;
+            for (const auto &path : input_paths) {
+                MappedFile file;
+                if (++reads == fail_at || !file.open(path)) {
+                    ++stats.files_failed; ++report.followup_failures; warning("followup_read_error", path); continue;
+                }
+                if (looks_binary(file.view())) { ++stats.files_binary; continue; }
+                ++stats.files_scanned; stats.bytes_scanned += file.view().size();
+                scan_related(path, file.view());
+            }
         }
-    } else {
-        for (Related *r : candidates) r->corpus_files = r->seed_files;
     }
-
-    for (Related *r : candidates) {
-        const double assoc = r->same_scope_hits * 4.0 + r->same_window_hits * 2.0 +
-                             r->same_file_hits * 0.5 + r->seed_files.size() * 2.0;
-        const double rarity = std::log((static_cast<double>(corpus_file_count) + 1.0) /
-                                       (static_cast<double>(r->corpus_files.size()) + 1.0)) + 1.0;
-        r->score = assoc * rarity;
+    for (auto &c : report.candidates) {
+        if (report.followup_ran)
+            c.score *= std::log((double(corpus_files) + 1) / (double(c.corpus_files) + 1)) + 1;
+        else c.corpus_files = c.seed_files;
     }
-    std::sort(candidates.begin(), candidates.end(), [](const Related *a, const Related *b) {
-        if (a->score != b->score) return a->score > b->score;
-        if (a->seed_files.size() != b->seed_files.size()) return a->seed_files.size() > b->seed_files.size();
-        if (a->same_scope_hits != b->same_scope_hits) return a->same_scope_hits > b->same_scope_hits;
-        if (a->corpus_files.size() != b->corpus_files.size()) return a->corpus_files.size() < b->corpus_files.size();
-        return a->id < b->id;
-    });
-    uint64_t related_limit_omitted = 0;
-    if (candidates.size() > static_cast<size_t>(cli.investigate.related)) {
-        related_limit_omitted = candidates.size() - cli.investigate.related;
-        candidates.resize(cli.investigate.related);
+    for (auto &e : report.evidence) {
+        for (const auto &c : report.candidates)
+            if (e.row.derived_value == c.identifier && c.definitions > 1) { e.ambiguous = true; break; }
     }
-
-    std::vector<RankRow> ranked_files = rank_files(ranking);
-    for (auto &row : ranked_files) {
-        FileRoleResult roles = classify_file_roles(row.file);
-        if (profile == "config") {
+    report.ranked_files = rank_files(ranking);
+    for (auto &row : report.ranked_files) {
+        const auto roles = classify_file_roles(row.file);
+        if (report.profile == "config") {
             if (has_role(roles, "config")) row.score += 1.0;
             if (has_role(roles, "documentation")) row.score += 0.25;
-        } else if (profile == "symbol") {
+        } else if (report.profile == "symbol") {
             if (has_role(roles, "source")) row.score += 0.25;
             if (has_role(roles, "test")) row.score += 0.35;
-        } else if (profile == "error") {
+        } else if (report.profile == "error") {
             if (has_role(roles, "test")) row.score += 0.4;
             if (has_role(roles, "source")) row.score += 0.2;
-        } else if (profile == "concept") {
+        } else if (report.profile == "concept") {
             if (has_role(roles, "documentation")) row.score += 0.3;
             if (has_role(roles, "test")) row.score += 0.2;
         }
     }
-    std::sort(ranked_files.begin(), ranked_files.end(), [](const RankRow &a,
-                                                            const RankRow &b) {
+    std::sort(report.ranked_files.begin(), report.ranked_files.end(), [](const auto &a, const auto &b) {
         if (a.score != b.score) return a.score > b.score;
         if (a.density != b.density) return a.density > b.density;
         return a.file < b.file;
     });
-    uint64_t top_files_limit_omitted = 0;
-    if (ranked_files.size() > static_cast<size_t>(cli.investigate.top_files)) {
-        top_files_limit_omitted = ranked_files.size() - cli.investigate.top_files;
-        ranked_files.resize(cli.investigate.top_files);
-    }
-    std::map<std::string, double> file_scores;
-    for (const auto &r : ranked_files) file_scores[r.file] = r.score;
-    std::vector<ScopeEvidence *> ranked_scopes;
-    for (auto &[key, s] : scopes) {
-        s.score = static_cast<double>(s.matches) + file_scores[s.file];
-        ranked_scopes.push_back(&s);
-    }
-    std::sort(ranked_scopes.begin(), ranked_scopes.end(), [](const auto *a, const auto *b) {
-        if (a->score != b->score) return a->score > b->score;
-        if (a->file != b->file) return a->file < b->file;
-        return a->scope.from < b->scope.from;
-    });
-    uint64_t top_scopes_limit_omitted = 0;
-    if (ranked_scopes.size() > static_cast<size_t>(cli.investigate.top_scopes)) {
-        top_scopes_limit_omitted = ranked_scopes.size() - cli.investigate.top_scopes;
-        ranked_scopes.resize(cli.investigate.top_scopes);
-    }
-
-    std::vector<const MatchRow *> evidence;
-    std::map<uint64_t, OccurrenceClassification> classes;
-    uint64_t definitions = 0, references = 0, test_files = 0, config_files = 0;
-    std::set<std::string> tests_seen, configs_seen;
-    for (const auto &f : files) {
-        if (has_role(f.roles, "test")) tests_seen.insert(f.path);
-        if (has_role(f.roles, "config")) configs_seen.insert(f.path);
-        for (const auto &row : f.rows) {
-            auto c = classify_occurrence(f.path, row.context, row.match, profile,
-                                         has_role(f.roles, "test"));
-            if (c.classification == "probable_definition" ||
-                c.classification == "probable_declaration") ++definitions;
-            else ++references;
-            classes[row.row_id] = std::move(c);
-            evidence.push_back(&row);
-        }
-    }
-    test_files = tests_seen.size(); config_files = configs_seen.size();
-    std::stable_sort(evidence.begin(), evidence.end(), [&](const MatchRow *a, const MatchRow *b) {
-        const auto is_definition = [&](const MatchRow *row) {
-            const std::string &kind = classes[row->row_id].classification;
-            return kind == "probable_definition" || kind == "probable_declaration";
-        };
-        bool ad = is_definition(a);
-        bool bd = is_definition(b);
-        if (ad != bd) return ad;
-        auto emphasis = [&](const MatchRow *row) {
-            const std::string text = lower(row->context);
-            if (profile == "error")
-                return text.find("error") != std::string::npos ||
-                       text.find("throw") != std::string::npos ||
-                       text.find("wrap") != std::string::npos ||
-                       text.find("log") != std::string::npos ||
-                       text.find("assert") != std::string::npos;
-            if (profile == "config")
-                return text.find("getenv") != std::string::npos ||
-                       text.find("config") != std::string::npos ||
-                       text.find('=') != std::string::npos;
-            return false;
-        };
-        bool ae = emphasis(a), be = emphasis(b);
-        if (ae != be) return ae;
-        double as = file_scores[a->file], bs = file_scores[b->file];
-        if (as != bs) return as > bs;
-        if (a->file != b->file) return a->file < b->file;
-        return a->from < b->from;
-    });
-    uint64_t examples_limit_omitted = 0;
-    if (evidence.size() > static_cast<size_t>(cli.investigate.examples)) {
-        examples_limit_omitted = evidence.size() - cli.investigate.examples;
-        evidence.resize(cli.investigate.examples);
-    }
-
-    if ((stats.files_failed || stats.missing_paths) && stats.stop_reason.empty())
-        stats.stop_reason = "input_failure";
-
-    const bool llm = cli.out_mode == OutputMode::Llm;
-    const uint64_t files_with_seed = ranking.file_order.size();
-    std::string summary;
-    if (llm) {
-        summary = "INVESTIGATION profile=" + profile + " seeds=";
-        for (size_t i = 0; i < seeds.size(); ++i) { if (i) summary += ','; summary += seeds[i]; }
-        summary += " scans=" + std::to_string(stats.scan_stages) +
-                   " complete=" + (stats.complete() ? "yes\n\n" : "no\n\n");
-        summary += "SUMMARY\n" + std::to_string(stats.matches_seen) +
-                   " seed matches in " + std::to_string(files_with_seed) +
-                   " files; " + std::to_string(definitions) +
-                   " probable definitions/declarations; " + std::to_string(test_files) +
-                   " test files; " + std::to_string(config_files) + " config files.\n\n";
-    } else {
-        summary = "{\"type\":\"investigation-summary\",\"profile\":\"";
-        json_escape_to(summary, profile); summary += "\",\"seeds\":" + json_array(seeds);
-        summary += ",\"files_with_seed\":" + std::to_string(files_with_seed);
-        summary += ",\"seed_matches\":" + std::to_string(stats.matches_seen);
-        summary += ",\"probable_definitions\":" + std::to_string(definitions);
-        summary += ",\"probable_references\":" + std::to_string(references);
-        summary += ",\"tests\":" + std::to_string(test_files);
-        summary += ",\"configs\":" + std::to_string(config_files);
-        summary += ",\"scan_stages\":" + std::to_string(stats.scan_stages);
-        summary += ",\"complete\":" + std::string(stats.complete() ? "true" : "false") + "}\n";
-    }
-
-    struct ReportPiece {
-        std::string text;
-        bool selected{false};
-        bool definition{false};
-    };
-    std::vector<ReportPiece> file_pieces;
-    std::vector<ReportPiece> scope_pieces;
-    std::vector<ReportPiece> related_pieces;
-    std::vector<ReportPiece> evidence_pieces;
-
-    for (size_t i = 0; i < ranked_files.size(); ++i) {
-        const auto &r = ranked_files[i];
-        FileRoleResult roles = classify_file_roles(r.file);
-        std::string s;
-        if (llm) {
-            s = std::to_string(i + 1) + ". " + r.file + " score=" + std::to_string(r.score) + " roles=";
-            for (size_t j = 0; j < roles.roles.size(); ++j) { if (j) s += ','; s += roles.roles[j]; }
-            s += " best=" + std::to_string(r.window_lo) + "-" + std::to_string(r.window_hi) + "\n";
-        } else {
-            s = "{\"type\":\"investigation-file\",\"file\":\"";
-            json_escape_to(s, r.file); s += "\",\"score\":" + std::to_string(r.score);
-            s += ",\"roles\":" + json_array(roles.roles) +
-                 ",\"role_method\":\"path-heuristic\",\"best_line_start\":" +
-                 std::to_string(r.window_lo) + ",\"best_line_end\":" +
-                 std::to_string(r.window_hi) + "}\n";
-        }
-        file_pieces.push_back({std::move(s), false, false});
-    }
-    for (const auto *r : ranked_scopes) {
-        std::string s;
-        if (llm) {
-            s = r->file + ":" + std::to_string(r->scope.line_start) + " " +
-                r->scope.kind + " " + r->scope.name + " matches=" +
-                std::to_string(r->matches) + "\n";
-        } else {
-            s = "{\"type\":\"investigation-scope\",\"file\":\"";
-            json_escape_to(s, r->file); s += "\",\"name\":\"";
-            json_escape_to(s, r->scope.name); s += "\",\"kind\":\"";
-            json_escape_to(s, r->scope.kind); s += "\",\"line_start\":" +
-                std::to_string(r->scope.line_start) + ",\"line_end\":" +
-                std::to_string(r->scope.line_end) + ",\"matches\":" +
-                std::to_string(r->matches) + "}\n";
-        }
-        scope_pieces.push_back({std::move(s), false, false});
-    }
-    for (const Related *r : candidates) {
-        std::string s;
-        if (llm) {
-            s = r->id + " score=" + std::to_string(r->score) + " same_scope=" +
-                std::to_string(r->same_scope_hits) + " files=" +
-                std::to_string(r->corpus_files.size()) + "\n";
-        } else {
-            s = "{\"type\":\"investigation-related\",\"identifier\":\"";
-            json_escape_to(s, r->id); s += "\",\"score\":" + std::to_string(r->score);
-            s += ",\"same_scope_hits\":" + std::to_string(r->same_scope_hits);
-            s += ",\"same_window_hits\":" + std::to_string(r->same_window_hits);
-            s += ",\"same_file_hits\":" + std::to_string(r->same_file_hits);
-            s += ",\"seed_files\":" + std::to_string(r->seed_files.size());
-            s += ",\"corpus_files\":" + std::to_string(r->corpus_files.size()) + "}\n";
-        }
-        related_pieces.push_back({std::move(s), false, false});
-    }
-    for (const MatchRow *r : evidence) {
-        const auto &c = classes[r->row_id];
-        std::string s;
-        if (llm) {
-            s = r->file + ":" + std::to_string(r->line) + " [" +
-                c.classification + ", confidence=" + c.confidence + "] " +
-                r->context + "\n";
-        } else {
-            s = "{\"type\":\"investigation-evidence\",\"file\":\"";
-            json_escape_to(s, r->file); s += "\",\"line\":" + std::to_string(r->line);
-            s += ",\"column\":" + std::to_string(r->column) + ",\"pattern_id\":\"";
-            json_escape_to(s, r->pattern_id); s += "\",\"classification\":\"";
-            json_escape_to(s, c.classification); s += "\",\"confidence\":\"";
-            json_escape_to(s, c.confidence); s += "\",\"method\":\"";
-            json_escape_to(s, c.method); s += "\",\"context\":\"";
-            json_escape_to(s, r->context); s += "\"}\n";
-        }
-        const bool definition = c.classification == "probable_definition" ||
-                                c.classification == "probable_declaration";
-        evidence_pieces.push_back({std::move(s), false, definition});
-    }
-
-    // Reserve the one extra byte needed if JSON complete:true becomes false
-    // after budget selection discovers omissions.
-    uint64_t used = summary.size() + (llm ? 0 : 1);
-    const auto fits = [&](uint64_t bytes) {
-        return !evidence_budget || used + bytes <= evidence_budget;
-    };
-    auto select_section = [&](std::vector<ReportPiece> &pieces,
-                              const std::string &header,
-                              const auto &include) {
-        bool header_selected = false;
-        for (auto &piece : pieces) {
-            if (!include(piece)) continue;
-            uint64_t required = piece.text.size();
-            if (llm && !header_selected) required += header.size();
-            if (!fits(required)) continue;
-            if (llm && !header_selected) {
-                used += header.size();
-                header_selected = true;
-            }
-            used += piece.text.size();
-            piece.selected = true;
-        }
-        return header_selected;
-    };
-
-    // Selection priority is deliberately independent of render order. JSONL
-    // retains its stable type ordering while scarce bytes are reserved for
-    // the evidence an agent is least able to recover from rankings alone.
-    const bool definitions_header = select_section(
-        evidence_pieces, "\nPROBABLE DEFINITIONS / DECLARATIONS\n",
-        [](const ReportPiece &piece) { return piece.definition; });
-    const bool files_header = select_section(
-        file_pieces, "TOP FILES\n",
-        [](const ReportPiece &) { return true; });
-    const bool scopes_header = select_section(
-        scope_pieces, "\nTOP SCOPES\n",
-        [](const ReportPiece &) { return true; });
-    const bool related_header = select_section(
-        related_pieces, "\nRELATED IDENTIFIERS\n",
-        [](const ReportPiece &) { return true; });
-    const bool evidence_header = select_section(
-        evidence_pieces, "\nREPRESENTATIVE EVIDENCE\n",
-        [](const ReportPiece &piece) { return !piece.definition; });
-
-    uint64_t omitted_files = 0, omitted_scopes = 0, omitted_related = 0, omitted_evidence = 0;
-    auto count_omitted = [](const std::vector<ReportPiece> &pieces) {
-        uint64_t count = 0;
-        for (const auto &piece : pieces) if (!piece.selected) ++count;
-        return count;
-    };
-    omitted_files = count_omitted(file_pieces);
-    omitted_scopes = count_omitted(scope_pieces);
-    omitted_related = count_omitted(related_pieces);
-    omitted_evidence = count_omitted(evidence_pieces);
-
-    const uint64_t omitted = omitted_files + omitted_scopes + omitted_related + omitted_evidence;
-    if (omitted) {
-        stats.rows_truncated += omitted;
-        if (stats.stop_reason.empty()) stats.stop_reason = "evidence_budget";
-    }
-    if (!stats.complete()) {
-        const std::string before = llm ? "complete=yes" : "\"complete\":true";
-        const std::string after = llm ? "complete=no" : "\"complete\":false";
-        if (size_t pos = summary.find(before); pos != std::string::npos)
-            summary.replace(pos, before.size(), after);
-    }
-
-    auto emit_selected = [&](const std::vector<ReportPiece> &pieces) {
-        for (const auto &piece : pieces) {
-            if (!piece.selected) continue;
-            std::fwrite(piece.text.data(), 1, piece.text.size(), stdout);
-            ++stats.rows_output;
-        }
-    };
-    std::fwrite(summary.data(), 1, summary.size(), stdout); ++stats.rows_output;
-    if (llm && files_header) std::fputs("TOP FILES\n", stdout);
-    emit_selected(file_pieces);
-    if (llm && scopes_header) std::fputs("\nTOP SCOPES\n", stdout);
-    emit_selected(scope_pieces);
-    if (llm && definitions_header)
-        std::fputs("\nPROBABLE DEFINITIONS / DECLARATIONS\n", stdout);
-    for (const auto &piece : evidence_pieces) {
-        if (piece.selected && piece.definition) {
-            std::fwrite(piece.text.data(), 1, piece.text.size(), stdout);
-            ++stats.rows_output;
-        }
-    }
-    if (llm && related_header) std::fputs("\nRELATED IDENTIFIERS\n", stdout);
-    emit_selected(related_pieces);
-    if (llm && evidence_header) std::fputs("\nREPRESENTATIVE EVIDENCE\n", stdout);
-    for (const auto &piece : evidence_pieces) {
-        if (piece.selected && !piece.definition) {
-            std::fwrite(piece.text.data(), 1, piece.text.size(), stdout);
-            ++stats.rows_output;
-        }
-    }
-    std::string footer;
-    if (llm) {
-        footer = "\nLIMITS\n";
-        footer += omitted ? std::to_string(omitted) + " records omitted by evidence budget.\n"
-                          : "No sections truncated.\n";
-        footer += "candidate_patterns_omitted=" + std::to_string(candidate_patterns_omitted) +
-                  " top_files_omitted=" + std::to_string(top_files_limit_omitted) +
-                  " top_scopes_omitted=" + std::to_string(top_scopes_limit_omitted) +
-                  " related_omitted=" + std::to_string(related_limit_omitted) +
-                  " examples_omitted=" + std::to_string(examples_limit_omitted) + "\n";
-        if (!stats.stop_reason.empty()) footer += "stop_reason=" + stats.stop_reason + "\n";
-    } else {
-        footer = "{\"type\":\"investigation-footer\",\"complete\":";
-        footer += stats.complete() ? "true" : "false";
-        footer += ",\"omitted_files\":" + std::to_string(omitted_files) +
-                  ",\"omitted_scopes\":" + std::to_string(omitted_scopes) +
-                  ",\"omitted_related\":" + std::to_string(omitted_related) +
-                  ",\"omitted_evidence\":" + std::to_string(omitted_evidence) +
-                  ",\"candidate_patterns_omitted\":" + std::to_string(candidate_patterns_omitted) +
-                  ",\"top_files_limit_omitted\":" + std::to_string(top_files_limit_omitted) +
-                  ",\"top_scopes_limit_omitted\":" + std::to_string(top_scopes_limit_omitted) +
-                  ",\"related_limit_omitted\":" + std::to_string(related_limit_omitted) +
-                  ",\"examples_limit_omitted\":" + std::to_string(examples_limit_omitted);
-        if (!stats.stop_reason.empty()) {
-            footer += ",\"stop_reason\":\"";
-            json_escape_to(footer, stats.stop_reason); footer += '"';
-        }
-        footer += "}\n";
-    }
-    std::fwrite(footer.data(), 1, footer.size(), stdout); ++stats.rows_output;
-
-    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+    stats.buffered_bytes_peak = memory.peak;
+    const uint64_t elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - started).count();
-    if (cli.summary) emit_summary_record(stats, stats.rows_output, elapsed);
-    if (cli.require_complete && !stats.complete()) return 2;
-    return stats.matches_seen ? 0 : 1;
+    return emit_investigation_report(cli, report, elapsed);
 }
 
 } // namespace hpr

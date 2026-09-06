@@ -22,6 +22,8 @@
 
 namespace hpr {
 
+struct RoleConfig;
+
 struct ScopeRange {
     uint64_t start_off = 0;   // byte offset of signature start (inclusive)
     uint64_t end_off = 0;     // byte offset of body's closing delim (exclusive)
@@ -29,6 +31,15 @@ struct ScopeRange {
     std::string kind;         // "func", "class", "struct", …
     uint32_t line_start = 0;  // 1-based, points at the signature line
     uint32_t line_end = 0;    // 1-based, points at the closing-brace line
+    // Additive source evidence metadata. start_off retains its historical
+    // anchor meaning for query/edit consumers.
+    uint64_t name_from = 0;
+    uint64_t name_to = 0;
+    uint64_t signature_from = 0;
+    uint64_t body_from = 0;
+    uint32_t signature_line = 0;
+    uint32_t signature_end_line = 0;
+    bool source_reliable = false; // supported lexical boundaries, not parsing
 };
 
 struct ScopeConfig {
@@ -40,6 +51,7 @@ struct ScopeConfig {
     // packs need this: `name(...) {` also fits `if (...) {` / `for (...) {`,
     // and Hyperscan has no lookahead to exclude keywords in the regex itself.
     std::vector<std::string> skip_names;
+    const RoleConfig *lexical = nullptr;
 };
 
 class ScopeIndex {
@@ -57,15 +69,22 @@ public:
     const ScopeRange *find_innermost(uint64_t offset) const;
 
     // Scope whose signature (anchor) line is `line` (1-based), or nullptr.
-    // A match on this line sits on the definition itself, not inside a body —
-    // role classification renders it as `def` rather than `in`. Signatures
-    // spanning multiple lines only register their first line.
+    // Used for scope surveys and source expansion. Occurrence classification
+    // uses declared_at instead. Multiline anchors register their first line.
     const ScopeRange *anchor_on_line(uint32_t line) const;
+
+    // A match must contain the actual declared name, not just share a line.
+    const ScopeRange *declared_at(uint64_t from, uint64_t to) const;
 
     // Full range list, sorted by start_off ascending (nested ranges are
     // interleaved). Used for ancestor-chain checks (-in-scope), anchorless
     // scope edits, and -list-scopes.
     const std::vector<ScopeRange> &all() const { return ranges_; }
+    uint64_t memory_bytes() const {
+        uint64_t bytes = sizeof(*this) + ranges_.capacity() * sizeof(ScopeRange);
+        for (const auto &r : ranges_) bytes += r.name.capacity();
+        return bytes;
+    }
 
 private:
     // Sorted by start_off ascending; nested ranges are interleaved.

@@ -281,5 +281,7 @@ void emit_warning_record(const char *code, const std::string &path);
 // only when non-empty.
 void emit_summary_record(const ScanStats &st, uint64_t emitted,
                          uint64_t elapsed_ms);
+std::string summary_record(const ScanStats &st, uint64_t emitted,
+                           uint64_t elapsed_ms);
 
 } // namespace hpr

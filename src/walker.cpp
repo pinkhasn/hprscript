@@ -63,7 +63,8 @@ bool Walker::is_excluded(std::string_view path, bool is_dir) const {
     return false;
 }
 
-void Walker::walk(const std::function<bool(const WalkItem &)> &visit) {
+void Walker::walk(const std::function<bool(const WalkItem &)> &visit,
+                  const std::function<void(const std::string &)> &error) {
     std::unordered_set<std::string> seen;
     bool stop = false;
 
@@ -78,7 +79,7 @@ void Walker::walk(const std::function<bool(const WalkItem &)> &visit) {
 
     auto walk_dir = [&](const std::string &base, const std::string &suffix) {
         std::error_code ec;
-        if (!fs::exists(base, ec)) return;
+        if (!fs::exists(base, ec)) { if (error) error(base); return; }
         if (fs::is_regular_file(base, ec)) {
             // Literal file path passed as scan item.
             if (!is_excluded(base, false)) offer(base);
@@ -92,14 +93,14 @@ void Walker::walk(const std::function<bool(const WalkItem &)> &visit) {
             [&](const std::string &dir) {
                 std::error_code dec;
                 fs::directory_iterator it(
-                    dir, fs::directory_options::skip_permission_denied, dec);
-                if (dec) return;
+                    dir, error ? fs::directory_options::none : fs::directory_options::skip_permission_denied, dec);
+                if (dec) { if (error) error(dir); return; }
                 std::vector<fs::directory_entry> entries;
                 fs::directory_iterator dend;
                 while (it != dend) {
                     entries.push_back(*it);
                     it.increment(dec);
-                    if (dec) break;
+                    if (dec) { if (error) error(dir); break; }
                 }
                 std::sort(entries.begin(), entries.end(),
                           [](const fs::directory_entry &a,
@@ -125,6 +126,7 @@ void Walker::walk(const std::function<bool(const WalkItem &)> &visit) {
                         fname != "..")
                         continue;
                     if (is_excluded(disp, is_dir)) continue;
+                    if (sec) { if (error) error(disp); continue; }
 
                     if (is_dir) {
                         walk_one(raw);
@@ -163,12 +165,18 @@ void Walker::walk(const std::function<bool(const WalkItem &)> &visit) {
             if (!is_excluded(item, false)) offer(item);
         } else if (fs::is_directory(item, ec)) {
             walk_dir(item, "");
+        } else if (error) {
+            error(item);
         }
     }
 
     for (const auto &item : scan_) {
         if (stop) break;
         std::error_code ec;
+        if (!has_glob_chars(item) && !fs::exists(item, ec)) {
+            if (error) error(item);
+            continue;
+        }
         if (fs::exists(item, ec) && !has_glob_chars(item)) {
             if (fs::is_regular_file(item, ec)) {
                 if (!is_excluded(item, false)) offer(item);
