@@ -49,7 +49,7 @@ struct ScopeConfig {
     std::string kind;         // emitted in records as `enclosing.kind`
     // Names the anchor regex can match but that are NOT scopes. The C-family
     // packs need this: `name(...) {` also fits `if (...) {` / `for (...) {`,
-    // and Hyperscan has no lookahead to exclude keywords in the regex itself.
+    // and Vectorscan has no lookahead to exclude keywords in the regex itself.
     std::vector<std::string> skip_names;
     const RoleConfig *lexical = nullptr;
 };

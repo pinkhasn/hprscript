@@ -1,6 +1,6 @@
 # hprscript Cookbook
 
-Real-world problems solved with [`hprscript`](README.md) — multi-pattern PCRE search across files, directory trees, and pipelines, all matched in a single Hyperscan pass.
+Real-world problems solved with [`hprscript`](README.md) — multi-pattern PCRE search across files, directory trees, and pipelines, all matched in a single Vectorscan pass.
 
 This cookbook is organized by problem domain, not by feature. Pick the section that matches the kind of data you're working with, copy a recipe, adapt the globs / patterns / field names. Every code block is meant to be copy-pasteable.
 
@@ -23,8 +23,8 @@ Each recipe has the same shape:
 - Globs use `**/*.ext`. Replace with whatever file shape you have. Both relative (`**/*.go`) and absolute (`/var/log/**/*.log`) bases work; absolute is handy when the target tree is not under the working directory.
 - Stdin recipes omit `-glob` and any positional file arg — content flows in from the upstream pipe.
 - `-pi` is per-pattern case-insensitive; `-p` is case-sensitive. They mix freely in one invocation.
-- Capture groups `(...)` are ignored by Hyperscan unless surfaced via `-extract <names>` (CLI) or `"extract": [...]` (script). Names map left-to-right in pattern order.
-- Hyperscan PCRE has no lookarounds, no backreferences, no `\K`. See [HPRSCRIPT.md → Regex syntax](HPRSCRIPT.md#regex-syntax-hyperscan-pcre) for what compiles.
+- Capture groups `(...)` are ignored by Vectorscan unless surfaced via `-extract <names>` (CLI) or `"extract": [...]` (script). Names map left-to-right in pattern order.
+- Vectorscan PCRE has no lookarounds, no backreferences, no `\K`. See [HPRSCRIPT.md → Regex syntax](HPRSCRIPT.md#regex-syntax-vectorscan-pcre) for what compiles.
 - `^` / `$` are line-anchored by default.
 - Inside a `-s '...'` JSON script, every backslash in a regex doubles: `\d` → `\\d`.
 
@@ -73,7 +73,7 @@ This unlocks per-pattern counts, per-pattern ranking, group-by-category, and con
 
 ### 2. One-DFA scanning of N patterns
 
-Hyperscan compiles all your patterns into a single deterministic finite automaton. Adding pattern #11 to a 10-pattern scan is virtually free. Running 100 patterns in one pass costs about the same as running 1.
+Vectorscan compiles all your patterns into a single deterministic finite automaton. Adding pattern #11 to a 10-pattern scan is virtually free. Running 100 patterns in one pass costs about the same as running 1.
 
 This is why the recipes in this cookbook routinely scan for 5–20 things simultaneously where you'd otherwise run grep in a loop or pipe greps together. **It also means you should prefer many small specific patterns over one big alternation** — you get the same scan cost plus per-pattern identification.
 
@@ -112,7 +112,7 @@ hprscript -s '{
 }'
 ```
 
-**Match a specific script via Unicode ranges.** Hyperscan accepts `\x{NNNN}` codepoint escapes — perfect for detecting Cyrillic look-alikes in Latin contexts (homograph attacks), CJK in mostly-English files, etc.
+**Match a specific script via Unicode ranges.** Vectorscan accepts `\x{NNNN}` codepoint escapes — perfect for detecting Cyrillic look-alikes in Latin contexts (homograph attacks), CJK in mostly-English files, etc.
 
 | Script | Range |
 |---|---|
@@ -327,7 +327,7 @@ kubectl logs deploy/api --tail=20000 | hprscript \
 
 ### 1.6 Extract request durations from log lines
 
-**Problem:** Pull elapsed milliseconds out of every request log line. Capture groups `(...)` exist in your regex but Hyperscan ignores them by default — `-extract` adds a regex post-pass that pulls them out by name.
+**Problem:** Pull elapsed milliseconds out of every request log line. Capture groups `(...)` exist in your regex but Vectorscan ignores them by default — `-extract` adds a regex post-pass that pulls them out by name.
 
 **Input:** Lines like `... duration=123ms ...`.
 
@@ -1031,7 +1031,7 @@ hprscript -p '^[A-Z][A-Z0-9_]+=[^\s\x23][^\s]{8,}$' \
 
 ### 8.1 Known-bad IPs from a threat feed
 
-**Problem:** Sweep logs for any IP in an IOC list. Hyperscan compiles thousands of literals into one DFA, so the whole feed runs in one pass — and `-patterns-from` takes the feed as *literals*, so there's no regex-escaping, no shell alternation-building, and no argv-length limit.
+**Problem:** Sweep logs for any IP in an IOC list. Vectorscan compiles thousands of literals into one DFA, so the whole feed runs in one pass — and `-patterns-from` takes the feed as *literals*, so there's no regex-escaping, no shell alternation-building, and no argv-length limit.
 
 **Input:** Logs; IOC list as a file of IPs.
 
@@ -1179,7 +1179,7 @@ hprscript \
 
 ### 9.6 International names with diacritics — Unicode case-fold (UTF-8 demo)
 
-**Problem:** GDPR-scope discovery in a multilingual corpus needs to match employee names regardless of case AND regardless of how diacritics are typed. `José` / `JOSÉ` / `josé` should all match a single search for `josé`. Hyperscan's UTF-8 case-fold (via `-pi`) handles this without preprocessing.
+**Problem:** GDPR-scope discovery in a multilingual corpus needs to match employee names regardless of case AND regardless of how diacritics are typed. `José` / `JOSÉ` / `josé` should all match a single search for `josé`. Vectorscan's UTF-8 case-fold (via `-pi`) handles this without preprocessing.
 
 **Input:** Documents in mixed European languages.
 
@@ -1392,7 +1392,7 @@ hprscript \
 
 ### 12.4 IDN homograph attacks — Cyrillic letters in Latin-looking domains (UTF-8 demo)
 
-**Problem:** Attackers register `pаypаl.com` where the `а` is a Cyrillic A (`U+0430`), looking identical to the Latin `a`. Plain ASCII regexes can't see this. Hyperscan's `\x{...}` codepoint escapes let you pinpoint Cyrillic letters embedded inside otherwise-Latin domain names — a strong homograph indicator.
+**Problem:** Attackers register `pаypаl.com` where the `а` is a Cyrillic A (`U+0430`), looking identical to the Latin `a`. Plain ASCII regexes can't see this. Vectorscan's `\x{...}` codepoint escapes let you pinpoint Cyrillic letters embedded inside otherwise-Latin domain names — a strong homograph indicator.
 
 **Input:** Email corpus, URL extracts, browser-history dumps.
 
@@ -1421,7 +1421,7 @@ hprscript -s '{
 # pat=han  → CJK confusable
 ```
 
-**Why hprscript:** Hyperscan accepts `\x{NNNN}` codepoint escapes natively. Pure-ASCII tools simply cannot detect these attacks without first running the data through a normalization step.
+**Why hprscript:** Vectorscan accepts `\x{NNNN}` codepoint escapes natively. Pure-ASCII tools simply cannot detect these attacks without first running the data through a normalization step.
 
 ### 12.5 Multilingual subject-line search (UTF-8 demo)
 
@@ -2517,7 +2517,7 @@ hprscript \
 
 ### 23.5 Multilingual full-text search across mbox subjects (UTF-8 demo)
 
-**Problem:** A compliance officer needs to find emails about "invoices" or "contracts" in any language. Hyperscan's case-fold works across scripts; one named pattern per language keyword.
+**Problem:** A compliance officer needs to find emails about "invoices" or "contracts" in any language. Vectorscan's case-fold works across scripts; one named pattern per language keyword.
 
 **Input:** International mbox.
 
@@ -2985,7 +2985,7 @@ hprscript -p '\[(\S+)\]\s+duration:\s+([\d.]+)s' -extract step,sec \
 
 ### 29.1 Conventional-commits compliance
 
-**Problem:** Find commits *not* prefixed with `type:` or `type(scope):`. Hyperscan doesn't support negative lookahead, so the recipe uses two patterns and `-far A:B:0` to mean "match A only when B is *not* on the same line."
+**Problem:** Find commits *not* prefixed with `type:` or `type(scope):`. Vectorscan doesn't support negative lookahead, so the recipe uses two patterns and `-far A:B:0` to mean "match A only when B is *not* on the same line."
 
 **Input:** `git log` piped in.
 

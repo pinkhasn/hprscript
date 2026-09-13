@@ -28,5 +28,5 @@ In scope:
 
 Out of scope:
 
-- Vulnerabilities in upstream dependencies (e.g. Vectorscan/Hyperscan, libc) — please report those upstream. Mention them here only if `hprscript` exposes them in a non-default way.
+- Vulnerabilities in upstream dependencies (e.g. Vectorscan, libc) — please report those upstream. Mention them here only if `hprscript` exposes them in a non-default way.
 - Resource exhaustion from intentionally pathological regexes supplied by the user running the tool (this is expected; `hprscript` runs the patterns you give it).

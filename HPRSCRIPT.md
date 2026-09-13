@@ -1,6 +1,6 @@
 # hprscript
 
-`hprscript` is a command-line multi-pattern content-search tool. Within each scan stage it matches **all patterns simultaneously** using [Vectorscan](https://github.com/VectorCamp/vectorscan), the portable open-source fork of Intel's Hyperscan regex engine. Multi-phase scripts perform sequential scan stages while preserving declared state. Patterns use **PCRE** syntax (the subset Hyperscan/Vectorscan accepts).
+`hprscript` is a command-line multi-pattern content-search tool. Within each scan stage it matches **all patterns simultaneously** using [Vectorscan](https://github.com/VectorCamp/vectorscan), a portable open-source multi-pattern regex engine. Multi-phase scripts perform sequential scan stages while preserving declared state. Patterns use **PCRE** syntax (the subset Vectorscan accepts).
 
 Because hprscript reads content from stdin when no files/globs are given, it slots naturally into bash pipelines — `curl … | hprscript`, `cat … | hprscript`, `kubectl logs … | hprscript`, etc.
 
@@ -323,7 +323,7 @@ its input from git alone (no `-glob`/positional/`-files-from` mixing).
 
 ## Case-insensitive matching (`-pi`)
 
-`-pi <pattern>` is a sibling of `-p` that compiles its pattern with Hyperscan's `CASELESS` flag. **The flag is per-pattern**, so a single invocation can mix case-sensitive and case-insensitive patterns:
+`-pi <pattern>` is a sibling of `-p` that compiles its pattern with Vectorscan's `CASELESS` flag. **The flag is per-pattern**, so a single invocation can mix case-sensitive and case-insensitive patterns:
 
 ```bash
 # Two case-insensitive patterns in one pass
@@ -337,7 +337,7 @@ hprscript -p '\bError\b' -pi 'todo|fixme' -glob '**/*.go'
 
 The match record's `pat` field tells you which pattern matched (`p0`, `p1`, …), so downstream code can route findings differently per pattern.
 
-Because of this, **prefer separate `-p` patterns over a single alternation whenever you care which branch matched.** `-p 'alpha|beta|gamma'` tags every hit `pat=p0` — the alternation is opaque, you can't tell `alpha` from `gamma`. Split it into `-p alpha -p beta -p gamma` and each hit carries its own id (`p0`/`p1`/`p2`), surfaced as `pat` in `-j`, a `[p0]` prefix in `-llm`, and `$PAT_ID` in `-format`. Adding patterns is free (all compile into one Hyperscan database and match in the same pass), so splitting costs nothing. Keep an alternation only when the branches are genuinely one signal you never need to distinguish — e.g. a single ranking weight, or one operand of a `-near`/`-far` relation. In script mode, set each pattern's `"id"` to a meaningful label (`"auth"`, `"db"`) so `$PAT_ID` reads as that label instead of `p3`. In CLI mode, [`-name`](#named-patterns--name) does the same: `-p 'auth|token' -name auth`.
+Because of this, **prefer separate `-p` patterns over a single alternation whenever you care which branch matched.** `-p 'alpha|beta|gamma'` tags every hit `pat=p0` — the alternation is opaque, you can't tell `alpha` from `gamma`. Split it into `-p alpha -p beta -p gamma` and each hit carries its own id (`p0`/`p1`/`p2`), surfaced as `pat` in `-j`, a `[p0]` prefix in `-llm`, and `$PAT_ID` in `-format`. Adding patterns is free (all compile into one Vectorscan database and match in the same pass), so splitting costs nothing. Keep an alternation only when the branches are genuinely one signal you never need to distinguish — e.g. a single ranking weight, or one operand of a `-near`/`-far` relation. In script mode, set each pattern's `"id"` to a meaningful label (`"auth"`, `"db"`) so `$PAT_ID` reads as that label instead of `p3`. In CLI mode, [`-name`](#named-patterns--name) does the same: `-p 'auth|token' -name auth`.
 
 Folding is **Unicode-aware** by default (UTF-8 mode is on), so `-pi 'café'` matches `CAFÉ`, and `-pi 'привет'` matches `ПРИВЕТ`. See [UTF-8 / Unicode](#utf-8--unicode-support) for the details.
 
@@ -346,7 +346,7 @@ Folding is **Unicode-aware** by default (UTF-8 mode is on), so `-pi 'café'` mat
 | Where | Form |
 |---|---|
 | CLI (preferred) | `-pi <pattern>` |
-| CLI (inline regex flag) | `-p '(?i)<pattern>'` — works because Hyperscan accepts `(?i)`/`(?m)`/`(?s)`/`(?x)` |
+| CLI (inline regex flag) | `-p '(?i)<pattern>'` — works because Vectorscan accepts `(?i)`/`(?m)`/`(?s)`/`(?x)` |
 | Script mode | `{"id": "x", "regexp": "...", "case_insensitive": true}` |
 
 The inline `(?i)` form is handy when you want to scope case-insensitivity to part of a larger pattern (`(?i)error|warn` folds both, `(?i:error)|warn` folds only `error`).
@@ -751,7 +751,7 @@ Traversal order is **deterministic**: each directory's entries are visited in so
 | Field | Type | Description |
 |---|---|---|
 | `id` | `string` | Pattern identifier (defaults to `p<index>`). Available as `$PAT_ID`. |
-| `regexp` | `string` | The PCRE regex compiled by Hyperscan. Required. |
+| `regexp` | `string` | The PCRE regex compiled by Vectorscan. Required. |
 | `case_insensitive` | `bool` | Match irrespective of case (folds Unicode in UTF-8 mode). Default `false`. |
 | `word_boundary` | `bool` | Wrap pattern as `\b(?:…)\b` before compile. Default `false`. |
 | `utf8` | `bool` | UTF-8 mode (`.` = codepoint, Unicode case-fold). Default `true`. Set to `false` for byte-level matching. |
@@ -1356,7 +1356,7 @@ hprscript -script find_funcs.hpr -- src/foo.go
 
 ## UTF-8 / Unicode support
 
-`hprscript` runs Hyperscan in **UTF-8 mode by default**. This affects how patterns interpret characters in your input — but not how match offsets are reported.
+`hprscript` runs Vectorscan in **UTF-8 mode by default**. This affects how patterns interpret characters in your input — but not how match offsets are reported.
 
 ### What is Unicode-aware by default
 
@@ -1397,7 +1397,7 @@ printf 'café\n' | hprscript -p '[\p{L}]+' -ucp -o
 
 ### When to use `-ucp` vs alternatives
 
-`-ucp` enables Hyperscan's **UCP** flag, which makes `\w`/`\d`/`\s` (and explicit `\p{L}` etc.) Unicode-aware. The downside is Hyperscan rejects many UCP patterns as **"Pattern is too large"** — notably `\w+`. This is a Hyperscan engine limit, not an `hprscript` choice.
+`-ucp` enables Vectorscan's **UCP** flag, which makes `\w`/`\d`/`\s` (and explicit `\p{L}` etc.) Unicode-aware. The downside is Vectorscan rejects many UCP patterns as **"Pattern is too large"** — notably `\w+`. This is a Vectorscan engine limit, not an `hprscript` choice.
 
 When `-ucp` rejects your pattern, prefer:
 
@@ -1428,7 +1428,7 @@ hprscript -p '\xff\xd8\xff' -no-utf8 *.bin
 
 ### Invalid UTF-8 input
 
-Hyperscan makes no promise about UTF-8-mode patterns scanned over invalid UTF-8: the engine may keep matching straight past the bad bytes (the common case for ASCII patterns), or stop early and return `HS_INVALID`. `hprscript` treats either outcome as a completed scan — whatever matches were reported are emitted, no error is raised, and the next file is scanned:
+Vectorscan makes no promise about UTF-8-mode patterns scanned over invalid UTF-8: the engine may keep matching straight past the bad bytes (the common case for ASCII patterns), or stop early and return `HS_INVALID`. `hprscript` treats either outcome as a completed scan — whatever matches were reported are emitted, no error is raised, and the next file is scanned:
 
 ```bash
 # Latin-1 bytes followed by ASCII — "hello" still gets found
@@ -1457,9 +1457,9 @@ Per-pattern flags override the defaults so a single script can mix Unicode-aware
 
 ---
 
-## Regex syntax (Hyperscan PCRE)
+## Regex syntax (Vectorscan PCRE)
 
-Hyperscan accepts a **subset** of PCRE syntax. Most everyday patterns work without modification.
+Vectorscan accepts a **subset** of PCRE syntax. Most everyday patterns work without modification.
 
 ### What works
 
@@ -1473,7 +1473,7 @@ literal text                           → matches it
 \b  \B                                 → word boundary, non-word boundary
 \d  \D  \w  \W  \s  \S                 → standard PCRE classes
 [abc]  [^abc]  [a-z]                   → character classes
-(...)                                  → capturing group (Hyperscan ignores captures)
+(...)                                  → capturing group (Vectorscan ignores captures)
 (?:...)                                → non-capturing group
 (?i)  (?m)  (?s)  (?x)                 → inline flags
 |                                      → alternation
@@ -1493,7 +1493,7 @@ literal text                           → matches it
 If a pattern uses one of these, `hprscript` reports:
 
 ```
-hprscript: pattern compile failed: <Hyperscan's exact reason>
+hprscript: pattern compile failed: <Vectorscan's exact reason>
   in pattern: <your regex>
 ```
 
@@ -1531,7 +1531,7 @@ In script mode, set `"word_boundary": true` on the pattern (the regex is wrapped
 
 ## Match deduplication
 
-Hyperscan reports **every** position where a pattern accepts. For greedy patterns this can mean many overlapping matches at the same start (e.g. `func\s+\w+` against `func main` reports matches ending at every position from `func m` through `func main`).
+Vectorscan reports **every** position where a pattern accepts. For greedy patterns this can mean many overlapping matches at the same start (e.g. `func\s+\w+` against `func main` reports matches ending at every position from `func m` through `func main`).
 
 `hprscript` post-processes raw matches into **leftmost-longest non-overlapping** matches **per pattern**, which is the behaviour grep users expect:
 
@@ -1566,7 +1566,7 @@ The following are deliberately rejected with an explicit error so they don't fai
 
 **Top-level**: `boundary`, `on_boundary`, `ascii_only`, `overlap`, `files` (per-file `at`/`from`/`extract`/line-range mode).
 
-**Per-pattern**: `pcre` (not needed — Hyperscan is already PCRE), `run_pattern_at`, `run_pattern_from`, `run_pattern_to`, `run_pattern_until`.
+**Per-pattern**: `pcre` (not needed — Vectorscan is already PCRE), `run_pattern_at`, `run_pattern_from`, `run_pattern_to`, `run_pattern_until`.
 
 **Actions**: the script DSL is read-only — any action that would alter file contents on disk is rejected, as are the `--write`/`--backup` CLI flags in search/script mode. File modification exists only in the explicit [`edit` subcommand](#edit-mode-hprscript-edit), which is dry-run by default.
 
@@ -1884,7 +1884,7 @@ hprscript -s '{"scan":["**/*.go"],"skip":20,"limit":20,"patterns":[{"id":"t","re
 
 ## Capture-group extraction
 
-Hyperscan ignores `(...)` capture groups. To surface them, declare names with
+Vectorscan ignores `(...)` capture groups. To surface them, declare names with
 `-extract` (CLI) or `extract:[…]` (script) — `hprscript` runs a `std::regex`
 post-pass over each `$MATCH` to pull out the groups by position. Names are
 matched to groups left-to-right in pattern order.
@@ -1940,7 +1940,7 @@ hprscript -p 'TODO(?:\(([^)]+)\))?:\s*(.*)' -extract author,message
 ```
 
 **Limitations.** The extract regex must compile under `std::regex`'s
-ECMAScript flavor. Most patterns Hyperscan accepts compile cleanly, but a
+ECMAScript flavor. Most patterns Vectorscan accepts compile cleanly, but a
 few PCRE-only constructs (some Unicode classes, recursion) won't — those are
 rejected at compile time with a clear error pointing to the offending
 pattern. Fall back to `submatch` for those cases.
@@ -2891,7 +2891,7 @@ The binary depends only on the platform C library — on Linux verify with `ldd 
 - **Case-insensitivity is per pattern.** Use `-pi <pattern>` (CLI) or `"case_insensitive": true` (script) on the patterns that need folding — and leave the rest case-sensitive. Mixing in one invocation keeps you to a single scan.
 - **Use `\b` (or `-w`) for identifier matching** to avoid matching inside larger words.
 - **Anchor with `^` / `$`** for line-shaped matches (multiline mode is the default).
-- **Pattern compile errors** mean the regex uses a feature Hyperscan doesn't support. Check the error message; common culprits are lookarounds, backreferences, and (with `-ucp`) `\w+`-style patterns. Rewrite to use plain `\b`, character classes, alternation, or unbounded `\p{L}+` instead of bounded forms like `\p{L}{1,N}` (bounded repeats of Unicode classes are what blow the pattern up).
+- **Pattern compile errors** mean the regex uses a feature Vectorscan doesn't support. Check the error message; common culprits are lookarounds, backreferences, and (with `-ucp`) `\w+`-style patterns. Rewrite to use plain `\b`, character classes, alternation, or unbounded `\p{L}+` instead of bounded forms like `\p{L}{1,N}` (bounded repeats of Unicode classes are what blow the pattern up).
 - **UTF-8 is on by default**, so literal Cyrillic/CJK/emoji patterns and Unicode case-folding "just work". `from`/`to`/`col` are always **byte** offsets even in UTF-8 mode.
 - **Don't reach for `-ucp` reflexively.** Default `\w` is ASCII; that's usually what you want for code. Use `-ucp` only when you need Unicode `\w`/`\d`/`\s` and accept that some patterns won't compile.
 - **Use scripts for explicit staged correlation.** `variables` + `on_complete` computes aggregates without shell pipelines. `phases` expresses collect-then-resolve as sequential scan stages in one invocation while preserving state.

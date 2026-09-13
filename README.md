@@ -2,7 +2,7 @@
 
 **Multi-pattern PCRE search for files, directory trees, and stdin — all patterns matched in a single pass.**
 
-`hprscript` is a command-line search tool built on [Vectorscan](https://github.com/VectorCamp/vectorscan), the portable open-source fork of Intel's [Hyperscan](https://www.hyperscan.io/) regex engine. It scans any input — files, recursive globs, or arbitrary data piped on **stdin** — and matches **all patterns simultaneously**. One invocation of `hprscript` replaces N sequential `grep`/`rg` calls.
+`hprscript` is a command-line search tool built on [Vectorscan](https://github.com/VectorCamp/vectorscan), a portable open-source multi-pattern regex engine. It scans any input — files, recursive globs, or arbitrary data piped on **stdin** — and matches **all patterns simultaneously**. One invocation of `hprscript` replaces N sequential `grep`/`rg` calls.
 
 It is a single self-contained binary with no runtime dependencies beyond the platform C library. Builds for Linux (x86-64, ARM64) and macOS (Apple Silicon / Intel).
 
@@ -59,8 +59,8 @@ Default per-match record:
 
 ## Key features
 
-- **Multi-pattern in one pass.** Hyperscan compiles all patterns into a single DFA — adding patterns has near-zero cost.
-- **PCRE syntax** (the subset Hyperscan accepts — see [Regex syntax](HPRSCRIPT.md#regex-syntax-hyperscan-pcre)). Most everyday patterns work unchanged.
+- **Multi-pattern in one pass.** Vectorscan compiles all patterns into a single DFA — adding patterns has near-zero cost.
+- **PCRE syntax** (the subset Vectorscan accepts — see [Regex syntax](HPRSCRIPT.md#regex-syntax-vectorscan-pcre)). Most everyday patterns work unchanged.
 - **JSON Lines output by default** — pipe-friendly, easy for scripts and AI agents to parse.
 - **stdin-friendly.** With no files/globs given, content is read from stdin — slots into any bash pipeline.
 - **Block extraction.** Pair every match with the balanced delimiter block that follows it (function bodies, JSON objects, JSX subtrees, SQL `BEGIN`/`END`).

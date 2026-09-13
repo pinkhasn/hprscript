@@ -166,8 +166,8 @@ Give patterns meaningful IDs. Use `$FILE`, `$PAT_ID`, `$LINE`, `$MATCH`, `$CONTE
 
 - UTF-8 is enabled by default; `.` matches one codepoint.
 - `\w`, `\d`, and `\s` are ASCII unless `-ucp` is enabled.
-- Hyperscan supports ordinary quantifiers, groups, classes, alternation, anchors, boundaries, and inline flags.
-- Hyperscan does not support lookaround, backreferences, atomic groups, conditionals, or `\K`.
+- Vectorscan supports ordinary quantifiers, groups, classes, alternation, anchors, boundaries, and inline flags.
+- Vectorscan does not support lookaround, backreferences, atomic groups, conditionals, or `\K`.
 - Match offsets and columns are byte offsets even in UTF-8 mode.
 
 ## Go deeper

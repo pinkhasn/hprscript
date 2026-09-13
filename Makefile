@@ -1,6 +1,6 @@
 # hprscript — standalone Vectorscan-powered multi-pattern grep
 #
-# Vectorscan is an API/ABI-compatible fork of Intel Hyperscan with
+# Vectorscan is a multi-pattern regex engine with
 # portable SIMD support (x86-64 SSE/AVX2, ARM NEON/SVE, POWER VSX).
 #
 # Static linking strategy:
