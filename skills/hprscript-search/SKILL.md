@@ -11,7 +11,8 @@ Invoke the binary through Bash as `hprscript`. Use one call per reasoning stage 
 
 ## Non-negotiable defaults
 
-- Put distinguishable terms in separate `-p` or `-pi` flags so every hit retains its pattern ID.
+- Strongly prefer multi-pattern search with repeated `-p` (or `-pi`) flags over regex alternation for distinct terms, symbols, or search intents. Use `-p 'foo' -p 'bar'`; avoid combining independent terms into `-p 'foo|bar'` just to shorten a command. Reserve alternation for variants within one logical pattern when its grouping or capture semantics need to stay together.
+- Add a short, meaningful, unique `-name <id>` immediately after a pattern when it is not a plain case-sensitive exact string: case-insensitive matching (`-pi`, `-Fi`, or inline flags), regex syntax (escapes, boundaries, anchors, character classes, groups, quantifiers, or wildcards), whole-word matching (`-w`), or identifier variants (`-ident`). Choose a name that explains the match intent, so the LLM can tell which regex matched even when the matched text differs from the expression. Plain case-sensitive text such as `-p 'RetryPolicy'` or a literal `-F` pattern can stay unnamed; punctuation inside `-F` is literal, not regex syntax. Still name patterns when relations or `-file-where` need their IDs, and use meaningful pattern `id` values in query or script mode.
 - Prefer `-llm` when reading results, `-f` for paths, `-c` for counts, and `-limit N` for existence checks. In `-llm`/`-elide`/`-rollup` output, patterns with zero matches are named in a trailing `--- no matches: … ---` footer — treat that as explicit evidence of absence, qualified with "scan stopped early" when a limit cut the scan. With ≥2 matching patterns a `--- files: … ---` footer gives per-pattern file counts and the overlap (`both:`/`multi-pattern:`) — read the correlation from there instead of joining by hand.
 - Use per-match role tags as lexical evidence: `[comment]`/`[string]`/`[import]` in `-llm` (a `role` field in JSONL, `$ROLE` in `-format`) classify each hit by position. With `-scope` active, a match containing the declared name reads `[def func X]`; a parameter-type mention on that line is not a definition. `-no-roles` disables tagging.
 - Use an absolute path or glob when the effective cwd is uncertain. Inspect the first emitted path and stop if it escapes the intended tree.
@@ -24,7 +25,7 @@ Invoke the binary through Bash as `hprscript`. Use one call per reasoning stage 
 | Need | Mode |
 |---|---|
 | One known string or regex | quick search with `-p` / `-F` |
-| Several known terms | one quick search with repeated pattern flags |
+| Several known terms | one quick search with repeated `-p` / `-pi`; name case-insensitive or nonliteral patterns |
 | Definitions, references, tests, config, and related identifiers | `investigate` with a profile |
 | Correlate two known match sets | declarative `query` |
 | Derive later literal or regex patterns from earlier rows | adaptive `query` |
@@ -44,14 +45,16 @@ Cheapness ladder: `-f` / `-absent` / `-c` are cheaper than `-rollup`, which is c
 
 ```bash
 hprscript -p 'RetryPolicy' -p 'backoff' -llm -glob '**/*.go'
-hprscript -pi 'TODO' -pi 'FIXME' -pi 'XXX' -C 1 -llm -glob '**/*.{go,py,js,ts,rs,c,cpp,h}'
+hprscript -pi 'TODO' -name todo -pi 'FIXME' -name fixme -pi 'XXX' -name xxx \
+  -C 1 -llm -glob '**/*.{go,py,js,ts,rs,c,cpp,h}'
+hprscript -p 'RetryPolicy' -p '\bretry\s*\(' -name retry_call -llm -glob '**/*.go'
 hprscript -F 'foo[0].bar()' -llm src
-hprscript -ident 'parse config' -glob '**/*.go'
+hprscript -ident 'parse config' -name parse_config -glob '**/*.go'
 ```
 
 - `-p` / `-pi`: case-sensitive / case-insensitive regex, repeatable.
 - `-F` / `-Fi`: literal fixed strings.
-- `-name <id>`: name the preceding pattern for output, relations, and `-file-where`.
+- `-name <id>`: name the preceding pattern for output, relations, and `-file-where`; use it for case-insensitive or nonliteral patterns, and when an explicit ID is needed.
 - `-desc <text>`: describe the preceding pattern; `-llm`/`-elide`/`-rollup` output then opens with a query legend, keeping the result block self-describing for later readers.
 - `-patterns-from <file>`: load a JSONL rule pack (entries may carry a `description`).
 - `-ident '<terms>'`: find identifier variants such as `parseConfig`, `parse_config`, and `ConfigParser`.
@@ -73,10 +76,10 @@ Choose among `-git-changed`, `-git-staged`, `-git-untracked`, and `-git-range A.
 
 ```bash
 hprscript -list-scopes -llm src/data.go
-hprscript -p '\bdangerous_call\(' -scope auto -llm -glob '**/*.go'
-hprscript -p 'retry\(' -in-scope '^ProcessBatch$' -llm src/worker.go
-hprscript -p 'func\s+LoadData\b' -block-open '{' -block-close '}' -o -glob '**/*.go'
-hprscript -p 'func\s+(\w+)\(([^)]*)\)' -extract name,args \
+hprscript -p '\bdangerous_call\(' -name dangerous_call -scope auto -llm -glob '**/*.go'
+hprscript -p 'retry\(' -name retry -in-scope '^ProcessBatch$' -llm src/worker.go
+hprscript -p 'func\s+LoadData\b' -name load_data -block-open '{' -block-close '}' -o -glob '**/*.go'
+hprscript -p 'func\s+(\w+)\(([^)]*)\)' -name func_signature -extract name,args \
   -format '$FILE:$LINE $EXTRACT_NAME($EXTRACT_ARGS)' -glob '**/*.go'
 ```
 
