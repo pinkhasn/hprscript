@@ -598,12 +598,20 @@ int run_search(const Cli &cli) {
 
     auto scan_buf = [&](const std::string &display_name,
                         std::string_view content) -> bool {
+        // Scan first: most files have no matches, and for those the line
+        // and scope indexes would be built only to be thrown away.
+        // -records line still needs the line index to list unmatched lines.
+        const bool any_raw = collector.scan(matcher, content);
+        const bool need_indexes =
+            any_raw || cli.records == Cli::RecordMode::Line;
+
         LineIndex idx;
-        if (need_idx || scope_enabled || have_rels) idx.build(content);
+        if (need_indexes && (need_idx || scope_enabled || have_rels))
+            idx.build(content);
 
         ScopeIndex scope;
         const ScopeIndex *scope_ptr = nullptr;
-        if (scope_enabled) {
+        if (need_indexes && scope_enabled) {
             scope_ptr = build_file_scope(eff_scope_lang, user_scope_custom,
                                          display_name, content, idx, scope);
         }
@@ -614,7 +622,7 @@ int run_search(const Cli &cli) {
             auto ait = added.find(display_name);
             if (ait != added.end()) al = &ait->second;
         }
-        collector.collect(matcher, content, idx, scope_ptr, al, kept);
+        collector.finish(idx, scope_ptr, al, kept);
         tf.apply(kept, idx, scope_ptr);
 
         stats.matches_seen += kept.size();

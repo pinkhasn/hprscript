@@ -7,7 +7,9 @@
 
 #include <algorithm>
 #include <cctype>
+#include <memory>
 #include <regex>
+#include <unordered_map>
 
 namespace hpr {
 
@@ -30,6 +32,46 @@ const ScopeConfig PACK_TS    = { "(?:function\\s+(\\w+)|class\\s+(\\w+)|method\\
 bool ends_with(const std::string &s, const std::string &suffix) {
     return s.size() >= suffix.size() &&
            s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+// Compiled form of one scope anchor: the Vectorscan database for the anchor
+// scan plus a std::regex for capture extraction over each match.
+struct CompiledAnchor {
+    Matcher matcher;
+    std::regex name_re;
+};
+
+// Compiling an anchor costs milliseconds while scanning a file with it is
+// cheap, and every file of a language shares the same anchor. Compile each
+// distinct anchor once per process and reuse it (single-threaded tool).
+// Failures are not cached; they abort the build with *err set.
+CompiledAnchor *compiled_anchor(const std::string &anchor_regex,
+                                std::string *err) {
+    static std::unordered_map<std::string, std::unique_ptr<CompiledAnchor>> cache;
+    auto it = cache.find(anchor_regex);
+    if (it != cache.end()) return it->second.get();
+
+    auto ca = std::make_unique<CompiledAnchor>();
+    // Anchor scan via Vectorscan (fast multi-pattern engine, even for one
+    // pattern — gives us the same UTF-8/multiline semantics as the rest of
+    // the tool).
+    Pattern p;
+    p.id = "_scope";
+    p.regexp = anchor_regex;
+    p.utf8 = true;
+    p.case_insensitive = false;
+    CompileError ce;
+    if (!ca->matcher.compile({p}, &ce)) {
+        if (err) *err = "scope anchor compile failed: " + ce.message;
+        return nullptr;
+    }
+    try {
+        ca->name_re = std::regex(anchor_regex, std::regex::ECMAScript);
+    } catch (const std::regex_error &e) {
+        if (err) *err = std::string("scope anchor std::regex compile failed: ") + e.what();
+        return nullptr;
+    }
+    return cache.emplace(anchor_regex, std::move(ca)).first->second.get();
 }
 
 } // namespace
@@ -88,33 +130,12 @@ bool ScopeIndex::build(std::string_view buf, const ScopeConfig &cfg,
     RoleIndex roles;
     if (cfg.lexical) roles.build(buf, *cfg.lexical, idx);
 
-    // Anchor scan via Vectorscan (fast multi-pattern engine, even for one
-    // pattern — gives us the same UTF-8/multiline semantics as the rest of
-    // the tool).
-    Pattern p;
-    p.id = "_scope";
-    p.regexp = cfg.anchor_regex;
-    p.utf8 = true;
-    p.case_insensitive = false;
-
-    Matcher m;
-    CompileError ce;
-    if (!m.compile({p}, &ce)) {
-        if (err) *err = "scope anchor compile failed: " + ce.message;
-        return false;
-    }
-
-    // Pre-compile std::regex once for capture extraction over each match.
-    std::regex name_re;
-    try {
-        name_re = std::regex(cfg.anchor_regex, std::regex::ECMAScript);
-    } catch (const std::regex_error &e) {
-        if (err) *err = std::string("scope anchor std::regex compile failed: ") + e.what();
-        return false;
-    }
+    CompiledAnchor *anchor = compiled_anchor(cfg.anchor_regex, err);
+    if (!anchor) return false;
+    const std::regex &name_re = anchor->name_re;
 
     std::vector<Match> raw;
-    m.scan(buf, [&](const Match &mm) -> bool {
+    anchor->matcher.scan(buf, [&](const Match &mm) -> bool {
         raw.push_back(mm);
         return true;
     });
