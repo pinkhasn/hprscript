@@ -194,6 +194,15 @@ public:
                  const LineIndex &idx, const ScopeIndex *scope_ptr,
                  const AddedLines *added, std::vector<Match> &kept);
 
+    // collect() split in two so callers can skip building the line and
+    // scope indexes for files with no matches: scan() runs the engines and
+    // returns whether anything matched (a non-empty result never filters
+    // down to nothing before finish()); finish() then dedups and filters,
+    // with the same `idx`/`scope_ptr` requirements as collect().
+    bool scan(Matcher &matcher, std::string_view content);
+    void finish(const LineIndex &idx, const ScopeIndex *scope_ptr,
+                const AddedLines *added, std::vector<Match> &kept);
+
 private:
     const std::vector<Pattern> &patterns_;
     std::vector<ResolvedRelation> rels_;

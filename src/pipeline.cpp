@@ -632,6 +632,11 @@ void MatchCollector::collect(Matcher &matcher, std::string_view content,
                              const LineIndex &idx, const ScopeIndex *scope_ptr,
                              const AddedLines *added,
                              std::vector<Match> &kept) {
+    scan(matcher, content);
+    finish(idx, scope_ptr, added, kept);
+}
+
+bool MatchCollector::scan(Matcher &matcher, std::string_view content) {
     // Vectorscan reports every accepting position, so a regex like
     // `func\w+` against "func main" yields matches at to=5,6,7…10.
     // Collect raw matches and post-process to leftmost-longest
@@ -644,6 +649,12 @@ void MatchCollector::collect(Matcher &matcher, std::string_view content,
     matcher.scan(content, cb);
     if (!ident_groups_.empty())
         scan_identifiers(content, ident_groups_, ident_base_, raw_);
+    return !raw_.empty();
+}
+
+void MatchCollector::finish(const LineIndex &idx, const ScopeIndex *scope_ptr,
+                            const AddedLines *added,
+                            std::vector<Match> &kept) {
 
     // Single sort-based dedup pass: by (pattern, from, -to). Within a
     // pattern, after this sort the longest match at each `from` comes
