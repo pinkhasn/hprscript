@@ -2682,6 +2682,69 @@ expect_contains "edit mode rejects -seen" "cannot combine with -seen" "$OUT"
 rm -rf "$SN"
 
 # ---------------------------------------------------------------------------
+section "security regressions"
+
+SEC=$(mktemp -d)
+
+# expect_no_crash NAME RC — exit 0/1 (results / no results), never a signal.
+expect_no_crash() {
+    local name=$1 rc=$2
+    [[ "$rc" == "0" || "$rc" == "1" ]] && report ok "$name" \
+        || report fail "$name (got rc=$rc)"
+}
+
+# Huge inputs to std::regex used to overflow the stack (SIGSEGV).
+python3 -c "print('void f(' + 'x '*150000 + ') {\n int y;\n}')" > "$SEC/longsig.cpp"
+"$BIN" -p 'int y' -scope auto "$SEC/longsig.cpp" >/dev/null 2>&1
+expect_no_crash "huge signature: -scope does not crash" $?
+"$BIN" -list-scopes "$SEC/longsig.cpp" >/dev/null 2>&1
+expect_no_crash "huge signature: -list-scopes does not crash" $?
+"$BIN" investigate -p f "$SEC/longsig.cpp" >/dev/null 2>&1
+expect_no_crash "huge signature: investigate does not crash" $?
+
+python3 -c "print('static ' + 'a '*150000 + '\ntarget(1);')" > "$SEC/longprev.cpp"
+"$BIN" investigate -p target "$SEC/longprev.cpp" >/dev/null 2>&1
+expect_no_crash "huge previous line: investigate does not crash" $?
+
+python3 -c "print('a'*200000)" > "$SEC/longmatch.txt"
+"$BIN" -p '(a+)' -extract name "$SEC/longmatch.txt" >/dev/null 2>&1
+expect_no_crash "huge match: -extract does not crash" $?
+
+# -file-where nesting used to recurse without bound.
+E=$(python3 -c "print('('*20000 + 'p0' + ')'*20000)")
+OUT=$("$BIN" -p x -file-where "$E" "$SEC/longmatch.txt" 2>&1); RC=$?
+expect_contains "-file-where: deep nesting is rejected" "nested too deeply" "$OUT"
+[[ "$RC" == "2" ]] && report ok "-file-where deep nesting exit 2" \
+    || report fail "-file-where deep nesting exit (got $RC)"
+
+# -git-range values starting with '-' used to reach git as options
+# (--output=<file> wrote an arbitrary file).
+OUT=$("$BIN" -git-range "--output=$SEC/injected.txt" -p x 2>&1); RC=$?
+expect_contains "-git-range rejects option-like values" "not an option" "$OUT"
+[[ "$RC" == "2" && ! -e "$SEC/injected.txt" ]] \
+    && report ok "-git-range option injection writes no file" \
+    || report fail "-git-range option injection (rc=$RC)"
+
+# A tampered plan mode used to be applied verbatim (e.g. setuid 4777).
+mkdir "$SEC/plan"
+printf 'hello world\n' > "$SEC/plan/t.txt"
+chmod 644 "$SEC/plan/t.txt"
+(cd "$SEC/plan" && "$BIN" edit -p hello -content bye -plan-out plan.json t.txt >/dev/null 2>&1)
+python3 -c "
+import json, sys
+p = json.load(open(sys.argv[1])); p['files'][0]['mode'] = 0o4777
+json.dump(p, open(sys.argv[2], 'w'))" "$SEC/plan/plan.json" "$SEC/plan/evil.json"
+OUT=$(cd "$SEC/plan" && "$BIN" apply evil.json 2>&1); RC=$?
+expect_contains "apply: tampered plan mode is refused" "mode differs" "$OUT"
+expect_eq "apply: tampered plan leaves file mode and content" "644 hello world" \
+    "$(stat -c %a "$SEC/plan/t.txt") $(cat "$SEC/plan/t.txt")"
+(cd "$SEC/plan" && "$BIN" apply plan.json >/dev/null 2>&1); RC=$?
+expect_eq "apply: untampered plan still applies" "0 644 bye world" \
+    "$RC $(stat -c %a "$SEC/plan/t.txt") $(cat "$SEC/plan/t.txt")"
+
+rm -rf "$SEC"
+
+# ---------------------------------------------------------------------------
 section "summary"
 TOTAL=$((PASS + FAIL))
 if [[ "$FAIL" -eq 0 ]]; then

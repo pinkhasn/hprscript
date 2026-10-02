@@ -843,13 +843,21 @@ int run_edit(const Cli &cli) {
             }
             if (!ed.assert_contains.empty()) {
                 const char *b = pf.content.data() + ss;
-                if (!std::regex_search(b, b + (se - ss), assert_re)) {
+                // Fail closed on spans too large for std::regex to check
+                // safely (see kMaxStdRegexInput).
+                const bool too_big = se - ss > kMaxStdRegexInput;
+                if (too_big || !std::regex_search(b, b + (se - ss), assert_re)) {
                     Violation v;
                     v.guard = "assert-contains";
                     v.file = pf.path;
                     v.line = pf.idx.line_of(ss);
-                    v.message = "target span does not match -assert-contains "
-                                "'" + ed.assert_contains + "'";
+                    v.message = too_big
+                        ? "target span is " + std::to_string(se - ss) +
+                          " bytes, over the " +
+                          std::to_string(kMaxStdRegexInput) +
+                          "-byte limit -assert-contains can check"
+                        : "target span does not match -assert-contains "
+                          "'" + ed.assert_contains + "'";
                     violations.push_back(std::move(v));
                     return;
                 }

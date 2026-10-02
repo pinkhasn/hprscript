@@ -670,6 +670,16 @@ int apply_edit_plan(const EditPlan &plan, const ApplyOptions &options,
             refused = true;
             continue;
         }
+        // The staged file is chmod'ed to the plan's mode, so it must be the
+        // file's own mode: a tampered plan could otherwise add setuid or
+        // world-writable bits to any file it edits.
+        struct stat st;
+        if (::stat(vf.write_path.c_str(), &st) != 0 ||
+            (st.st_mode & 07777) != file.mode) {
+            emit_guard(file.path, "file mode differs from the plan's recorded mode");
+            refused = true;
+            continue;
+        }
         uint64_t cursor = 0;
         vf.result.reserve(vf.original.size() + 256);
         for (const auto &edit : file.edits) {

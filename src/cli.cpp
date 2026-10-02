@@ -710,6 +710,14 @@ Cli parse_cli(int argc, char **argv) {
         }
         if (eq(a, "-git-range") || eq(a, "--git-range")) {
             const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
+            // The range is passed to `git diff` as-is; a leading '-' would be
+            // read as a git option (e.g. --output=<file> writes any file).
+            if (*v == '-') {
+                cli.error = true;
+                cli.error_message = std::string("flag ") + a +
+                    " value must be a revision range, not an option: " + v;
+                return cli;
+            }
             cli.git_ranges.emplace_back(v);
             continue;
         }
