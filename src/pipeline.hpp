@@ -14,6 +14,7 @@
 #include "line_index.hpp"
 #include "matcher.hpp"
 #include "scope.hpp"
+#include "strutil.hpp" // looks_binary
 #include "walker.hpp"
 
 #include <cstdint>
@@ -25,10 +26,6 @@
 #include <vector>
 
 namespace hpr {
-
-// True when the first 512 bytes contain a NUL — treated as binary and
-// skipped by both runners.
-bool looks_binary(std::string_view content);
 
 // Add all CLI-selected inputs to the walker: -glob / positional / -exclude,
 // -files-from / -files0-from lists, and git file selections; also loads the

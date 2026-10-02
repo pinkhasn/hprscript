@@ -4,6 +4,7 @@
 #include "common.hpp"
 #include "matcher.hpp"
 #include "roles.hpp"
+#include "strutil.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -28,11 +29,6 @@ const ScopeConfig PACK_JAVA  = { "\\b([a-zA-Z_]\\w*)\\s*\\([^;{}]*\\)\\s*(?:thro
                                  {"if", "for", "while", "switch", "return", "catch", "synchronized"} };
 const ScopeConfig PACK_JS    = { "(?:function\\s+(\\w+)|class\\s+(\\w+))",             "{", "}", "func",  {} };
 const ScopeConfig PACK_TS    = { "(?:function\\s+(\\w+)|class\\s+(\\w+)|method\\s+(\\w+))", "{", "}", "func", {} };
-
-bool ends_with(const std::string &s, const std::string &suffix) {
-    return s.size() >= suffix.size() &&
-           s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
-}
 
 // Compiled form of one scope anchor: the Vectorscan database for the anchor
 // scan plus a std::regex for capture extraction over each match.
