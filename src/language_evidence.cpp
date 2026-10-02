@@ -61,7 +61,10 @@ OccurrenceClassification classify_occurrence(
         for (unsigned count = 0; line > 1 && count < 8 && prefix.size() < 512; ++count) {
             auto prev = lines.line_text(--line);
             const size_t start = prev.find_first_not_of(" \t\r\n");
-            if (start == std::string_view::npos || prev.find_first_of(";{}") != std::string_view::npos ||
+            // The 512-byte cap must hold after the line is added, or one huge
+            // line reaches std::regex below (see kMaxStdRegexInput).
+            if (start == std::string_view::npos || prefix.size() + prev.size() >= 512 ||
+                prev.find_first_of(";{}") != std::string_view::npos ||
                 (roles && roles->at(prev.data() - content.data() + start) != LexRole::Code)) break;
             prefix = std::string(prev) + '\n' + prefix;
         }

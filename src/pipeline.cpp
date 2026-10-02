@@ -31,6 +31,10 @@ struct WhereParser {
     std::string_view src;
     size_t pos = 0;
     std::string err;
+    // Recursion guard: every nesting level ('(' or '!'/not) passes through
+    // parse_unary, so capping its depth bounds the stack for hostile input.
+    static constexpr int kMaxDepth = 256;
+    int depth = 0;
 
     void skip_ws() {
         while (pos < src.size() && std::isspace((unsigned char)src[pos])) ++pos;
@@ -127,6 +131,17 @@ struct WhereParser {
         return true;
     }
     bool parse_unary(WhereNode &out) {
+        if (depth >= kMaxDepth) {
+            err = "expression nested too deeply (limit " +
+                  std::to_string(kMaxDepth) + ")";
+            return false;
+        }
+        ++depth;
+        bool ok = parse_unary_inner(out);
+        --depth;
+        return ok;
+    }
+    bool parse_unary_inner(WhereNode &out) {
         if (eat_sym("!") || eat_kw("not")) {
             WhereNode inner;
             if (!parse_unary(inner)) return false;

@@ -153,6 +153,9 @@ bool ScopeIndex::build(std::string_view buf, const ScopeConfig &cfg,
 
     ranges_.reserve(kept.size());
     for (const auto &mm : kept) {
+        // An anchor match this long is not a real signature, and std::regex
+        // would overflow the stack on it (see kMaxStdRegexInput).
+        if (mm.to - mm.from > kMaxStdRegexInput) continue;
         // Pull capture group 1 (or the first non-empty group, for multi-arm
         // patterns like JS `function|class`) out of the matched text.
         const char *match_begin = buf.data() + mm.from;

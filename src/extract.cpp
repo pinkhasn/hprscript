@@ -1,5 +1,7 @@
 #include "extract.hpp"
 
+#include "strutil.hpp"
+
 namespace hpr {
 
 bool ExtractTable::build(const std::vector<Pattern> &patterns,
@@ -34,6 +36,9 @@ void ExtractTable::extract(uint32_t pattern_index, std::string_view match_text,
     const ExtractEntry &e = entries_[pattern_index];
     if (e.names.empty()) return;
     values.resize(e.names.size());
+    // Longer matches would overflow std::regex's recursion; leave the
+    // captures empty rather than crash (see kMaxStdRegexInput).
+    if (match_text.size() > kMaxStdRegexInput) return;
 
     std::cmatch m;
     if (std::regex_search(match_text.data(),

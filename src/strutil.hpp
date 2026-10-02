@@ -9,6 +9,11 @@
 
 namespace hpr {
 
+// Largest input handed to std::regex. libstdc++'s matcher recurses per input
+// character and overflows an 8 MB stack somewhere past ~20 KB, so text taken
+// from scanned files must be capped before it reaches std::regex.
+constexpr size_t kMaxStdRegexInput = 4096;
+
 inline bool ends_with(std::string_view s, std::string_view suffix) {
     return s.size() >= suffix.size() &&
            s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
