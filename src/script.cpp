@@ -32,6 +32,7 @@
 #include "planner.hpp"
 #include "rank.hpp"
 #include "scope.hpp"
+#include "strutil.hpp"
 #include "value.hpp"
 #include "walker.hpp"
 
@@ -88,14 +89,6 @@ bool slurp_file_to_string(const std::string &path, std::string &out) {
 }
 
 bool slurp_stdin(std::string &out) { return read_stdin(out); }
-
-bool looks_binary(std::string_view content) {
-    size_t n = std::min<size_t>(content.size(), 512);
-    for (size_t i = 0; i < n; ++i) {
-        if (content[i] == '\0') return true;
-    }
-    return false;
-}
 
 std::string i64_str(int64_t v) {
     char buf[32];

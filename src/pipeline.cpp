@@ -325,14 +325,6 @@ void collect_churn_windows(const WhereNode &n, std::vector<int> &out) {
 
 namespace hpr {
 
-bool looks_binary(std::string_view content) {
-    size_t n = std::min<size_t>(content.size(), 512);
-    for (size_t i = 0; i < n; ++i) {
-        if (content[i] == '\0') return true;
-    }
-    return false;
-}
-
 bool add_walker_inputs(const Cli &cli, Walker &walker, ScanStats &stats,
                        std::unordered_map<std::string, AddedLines> &added,
                        const std::function<void(const char *, const std::string &)> &diagnostic) {

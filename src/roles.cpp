@@ -1,6 +1,7 @@
 #include "roles.hpp"
 
 #include "scope.hpp"
+#include "strutil.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -34,11 +35,6 @@ const RoleConfig CFG_RB{
     {"require ", "require_relative "}};
 const RoleConfig CFG_HASH{ // yaml / toml: comments + quoted scalars only
     "#", false, nullptr, nullptr, false, "\"'", "", false, {}};
-
-bool ends_with(const std::string &s, const char *suffix) {
-    size_t n = std::strlen(suffix);
-    return s.size() >= n && s.compare(s.size() - n, n, suffix) == 0;
-}
 
 } // namespace
 

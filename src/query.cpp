@@ -10,6 +10,7 @@
 #include "pipeline.hpp"
 #include "planner.hpp"
 #include "scope.hpp"
+#include "strutil.hpp"
 #include "walker.hpp"
 
 #include <algorithm>
@@ -86,14 +87,6 @@ struct JoinedRow {
 
 using Projected = std::map<std::string, RuntimeValue>;
 
-bool valid_id(const std::string &s) {
-    if (s.empty() || (!std::isalpha(static_cast<unsigned char>(s[0])) && s[0] != '_'))
-        return false;
-    for (unsigned char c : s)
-        if (!std::isalnum(c) && c != '_') return false;
-    return true;
-}
-
 bool fields_only(const json::Object &obj, std::initializer_list<const char *> allowed,
                  const std::string &where, std::string &err) {
     std::set<std::string> ok;
@@ -118,12 +111,6 @@ bool string_array(const json::Value *v, std::vector<std::string> &out,
     return true;
 }
 
-std::string regex_escape(const std::string &s) {
-    static const char *special = "\\^$.[]|()?*+{}";
-    std::string out;
-    for (char c : s) { if (std::strchr(special, c)) out += '\\'; out += c; }
-    return out;
-}
 
 bool parse_pattern(const json::Value &value, PatternSpec &out,
                    const std::string &where, std::string &err) {
@@ -132,7 +119,7 @@ bool parse_pattern(const json::Value &value, PatternSpec &out,
     if (!fields_only(o, {"id","regexp","literal","case_insensitive",
                          "word_boundary","utf8","ucp","extract"}, where, err)) return false;
     const json::Value *id = value.find("id");
-    if (!id || !id->is_string() || !valid_id(id->as_string())) {
+    if (!id || !id->is_string() || !is_identifier(id->as_string())) {
         err = where + ".id must be an identifier"; return false;
     }
     out.id = id->as_string();
@@ -156,7 +143,7 @@ bool parse_pattern(const json::Value &value, PatternSpec &out,
                       where + ".extract", err)) return false;
     std::set<std::string> names;
     for (const auto &name : out.extracts)
-        if (!valid_id(name) || !names.insert(name).second) {
+        if (!is_identifier(name) || !names.insert(name).second) {
             err = where + ".extract names must be unique identifiers"; return false;
         }
     return true;
@@ -222,7 +209,7 @@ bool parse_doc(const json::Value &root, QueryDoc &doc, std::string &err) {
                 where, err)) return false;
         SetSpec set;
         const auto *id = sv.find("id");
-        if (!id || !id->is_string() || !valid_id(id->as_string()) ||
+        if (!id || !id->is_string() || !is_identifier(id->as_string()) ||
             !set_ids.insert(id->as_string()).second) {
             err = where + ".id must be a unique identifier"; return false;
         }
@@ -316,7 +303,7 @@ bool parse_aliases(const QueryDoc &doc, std::map<std::string, size_t> &aliases,
     }
     const auto *set = from->find("set"), *as = from->find("as");
     if (!set || !set->is_string() || !as || !as->is_string() ||
-        !valid_id(as->as_string()) || !find_set(doc, set->as_string(), &from_set)) {
+        !is_identifier(as->as_string()) || !find_set(doc, set->as_string(), &from_set)) {
         err = "query.from requires a known set and identifier alias"; return false;
     }
     from_alias = as->as_string(); aliases[from_alias] = from_set;
@@ -335,7 +322,7 @@ bool parse_aliases(const QueryDoc &doc, std::map<std::string, size_t> &aliases,
                 (type->as_string() != "inner" && type->as_string() != "left" &&
                  type->as_string() != "semi" && type->as_string() != "anti") ||
                 !js || !js->is_string() || !ja || !ja->is_string() ||
-                !valid_id(ja->as_string()) || aliases.count(ja->as_string()) ||
+                !is_identifier(ja->as_string()) || aliases.count(ja->as_string()) ||
                 !on || !on->is_array()) {
                 err = where + " has invalid type/set/as/on"; return false;
             }

@@ -18,6 +18,7 @@
 #include "planner.hpp"
 #include "rank.hpp"
 #include "scope.hpp"
+#include "strutil.hpp"
 #include "walker.hpp"
 
 #include <algorithm>
@@ -57,14 +58,6 @@ std::string lower(std::string s) {
         return static_cast<char>(std::tolower(c));
     });
     return s;
-}
-
-bool is_identifier(const std::string &s) {
-    if (s.empty() || (!std::isalpha(static_cast<unsigned char>(s[0])) && s[0] != '_'))
-        return false;
-    for (unsigned char c : s)
-        if (!std::isalnum(c) && c != '_') return false;
-    return true;
 }
 
 std::string profile_for(const Cli &cli) {
@@ -119,15 +112,6 @@ const std::unordered_set<std::string> &stop_words() {
     return words;
 }
 
-std::string regex_escape(const std::string &s) {
-    static const char *special = "\\^$.[]|()?*+{}";
-    std::string out;
-    for (char c : s) {
-        if (std::strchr(special, c)) out += '\\';
-        out += c;
-    }
-    return out;
-}
 
 void truncate_utf8(std::string &value, uint64_t limit) {
     if (!limit || value.size() <= limit) return;
