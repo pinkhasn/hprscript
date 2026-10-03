@@ -1507,6 +1507,17 @@ printf '{"literal":"a","bogus":1}\n' > "$FS_FIX/unk.jsonl"
 OUT=$("$BIN" -patterns-from "$FS_FIX/unk.jsonl" "$FS_FIX/src.txt" 2>&1)
 expect_contains "unknown field rejected" "unknown field 'bogus'" "$OUT"
 
+# Every regex metacharacter must be escaped on all three literal paths.
+META='a\b^c$d.e[f]g|h(i)j?k*l+m{n}o'
+printf 'x %s y\nab^c$d-e[f]g\n' "$META" > "$FS_FIX/meta.txt"
+OUT=$("$BIN" -F "$META" -o "$FS_FIX/meta.txt")
+expect_eq "-F escapes all metachars" "$META" "$OUT"
+OUT=$("$BIN" -Fi "${META^^}" -o "$FS_FIX/meta.txt")
+expect_eq "-Fi escapes all metachars" "$META" "$OUT"
+printf '{"id":"meta","literal":"a\\\\b^c$d.e[f]g|h(i)j?k*l+m{n}o"}\n' > "$FS_FIX/meta.jsonl"
+OUT=$("$BIN" -patterns-from "$FS_FIX/meta.jsonl" -o "$FS_FIX/meta.txt")
+expect_eq "patterns-from literal escapes all metachars" "$META" "$OUT"
+
 OUT=$("$BIN" -patterns-from "$FS_FIX/rules.jsonl" -s '{"patterns":[{"id":"x","regexp":"y"}]}' 2>&1) ; RC=$?
 expect_contains "patterns-from + -s rejected" "cannot be combined" "$OUT"
 [[ "$RC" == "2" ]] && report ok "patterns-from + -s exit 2" || report fail "patterns-from + -s exit (got $RC)"
