@@ -2747,11 +2747,12 @@ p = json.load(open(sys.argv[1])); p['files'][0]['mode'] = 0o4777
 json.dump(p, open(sys.argv[2], 'w'))" "$SEC/plan/plan.json" "$SEC/plan/evil.json"
 OUT=$(cd "$SEC/plan" && "$BIN" apply evil.json 2>&1); RC=$?
 expect_contains "apply: tampered plan mode is refused" "mode differs" "$OUT"
+plan_mode() { stat -c '%a' "$SEC/plan/t.txt" 2>/dev/null || stat -f '%Lp' "$SEC/plan/t.txt"; }
 expect_eq "apply: tampered plan leaves file mode and content" "644 hello world" \
-    "$(stat -c %a "$SEC/plan/t.txt") $(cat "$SEC/plan/t.txt")"
+    "$(plan_mode) $(cat "$SEC/plan/t.txt")"
 (cd "$SEC/plan" && "$BIN" apply plan.json >/dev/null 2>&1); RC=$?
 expect_eq "apply: untampered plan still applies" "0 644 bye world" \
-    "$RC $(stat -c %a "$SEC/plan/t.txt") $(cat "$SEC/plan/t.txt")"
+    "$RC $(plan_mode) $(cat "$SEC/plan/t.txt")"
 
 rm -rf "$SEC"
 
