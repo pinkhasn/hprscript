@@ -1,6 +1,7 @@
 #include "cli.hpp"
 
 #include "json.hpp"
+#include "strutil.hpp"
 
 #include <cctype>
 #include <cstdlib>
@@ -22,19 +23,6 @@ const char *take(int &i, int argc, char **argv, const char *flag, Cli &cli) {
         return nullptr;
     }
     return argv[++i];
-}
-
-// Regex-escape a fixed string so it can join the normal compile path (-F).
-// Only ASCII metacharacters are escaped — UTF-8 bytes pass through intact.
-std::string escape_literal(const char *s) {
-    static const char specials[] = "\\^$.[]|()?*+{}";
-    std::string out;
-    out.reserve(std::strlen(s) + 8);
-    for (; *s; ++s) {
-        if (std::strchr(specials, *s)) out += '\\';
-        out += *s;
-    }
-    return out;
 }
 
 // A pattern name must look like an identifier so `$PAT_ID`, `[name]` tags
@@ -547,13 +535,13 @@ Cli parse_cli(int argc, char **argv) {
         }
         if (eq(a, "-F")) {
             const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
-            CliPattern p; p.regexp = escape_literal(v); p.fixed = true;
+            CliPattern p; p.regexp = regex_escape(v); p.fixed = true;
             cli.patterns.push_back(std::move(p));
             continue;
         }
         if (eq(a, "-Fi")) {
             const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
-            CliPattern p; p.regexp = escape_literal(v); p.case_insensitive = true; p.fixed = true;
+            CliPattern p; p.regexp = regex_escape(v); p.case_insensitive = true; p.fixed = true;
             cli.patterns.push_back(std::move(p));
             continue;
         }
@@ -1319,7 +1307,7 @@ bool load_patterns_from(Cli &cli) {
                 p.regexp = re->as_string();
             } else {
                 if (!lit->is_string()) return fail("'literal' must be a string");
-                p.regexp = escape_literal(lit->as_string().c_str());
+                p.regexp = regex_escape(lit->as_string().c_str());
                 p.fixed = true;
             }
             if (const json::Value *v = pr.value.find("id")) {
