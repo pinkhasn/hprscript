@@ -1,5 +1,7 @@
 #include "matcher.hpp"
 
+#include <algorithm>
+#include <cstdint>
 #include <cstring>
 
 namespace hpr {
@@ -109,6 +111,32 @@ bool Matcher::scan(std::string_view buf, const MatchCb &cb) {
     // UTF-8 input are best-effort. Callers wanting defined semantics on
     // such data should use utf8=false (byte-level matching).
     return rc == HS_SUCCESS || rc == HS_SCAN_TERMINATED || rc == HS_INVALID;
+}
+
+void dedup_leftmost_longest(std::vector<Match> &raw, std::vector<Match> &kept) {
+    // Single sort-based pass: by (pattern, from, -to). Within a pattern,
+    // after this sort the longest match at each `from` comes first, and any
+    // later match whose `from` lies before the previous kept match's `to`
+    // is overlapping (skip).
+    std::sort(raw.begin(), raw.end(), [](const Match &a, const Match &b) {
+        if (a.pattern_index != b.pattern_index)
+            return a.pattern_index < b.pattern_index;
+        if (a.from != b.from) return a.from < b.from;
+        return a.to > b.to;
+    });
+    kept.clear();
+    kept.reserve(raw.size());
+    uint32_t cur_pat = UINT32_MAX;
+    uint64_t last_to = 0;
+    for (const auto &m : raw) {
+        if (m.pattern_index != cur_pat) {
+            cur_pat = m.pattern_index;
+            last_to = 0;
+        }
+        if (m.from < last_to) continue;
+        last_to = m.to;
+        kept.push_back(m);
+    }
 }
 
 } // namespace hpr

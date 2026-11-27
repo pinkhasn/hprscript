@@ -188,6 +188,9 @@ hprscript -p 'https?://[a-zA-Z0-9.\-]*[\x{0400}-\x{04FF}][a-zA-Z0-9.\-]*' suspec
 ### AI-agent workflows
 34. [Context retrieval & ranking for LLM agents](#34-context-retrieval--ranking-for-llm-agents)
 
+### Regions
+35. [Pattern-defined regions](#35-pattern-defined-regions)
+
 ---
 
 # Logs & Observability
@@ -3626,6 +3629,106 @@ remain seed-stage predicates.
 `scan_complete=true` can coexist with `output_complete=false`: the input scan
 finished, but the requested response omitted evidence. The complete encoded
 stdout fits the byte cap, including the footer and optional `-summary`.
+
+---
+
+# Regions
+
+## 35. Pattern-defined regions
+
+Scopes need a language pack; most text doesn't have one. A `-region` turns
+any pair of regexes (or a single "starts here" regex) into spans hprscript
+can annotate, filter and relate matches by. Full reference:
+[HPRSCRIPT.md → Pattern-defined regions](HPRSCRIPT.md#pattern-defined-regions--region---in-region---same-region---list-regions).
+
+### 35.1 Outline a document, then search one section
+
+**Problem:** "Which section says that?" — grep gives a line number; you still have to scroll up to find the heading. And "search only the Install section" needs awk.
+
+**Input:** Markdown (or any document with heading lines).
+
+**Recipe:**
+
+```bash
+# Outline: one line per section, with its line range.
+hprscript -region section -region-open '^## (.*)' -list-regions -llm docs/guide.md
+# → docs/guide.md:5-12 section Install
+# → docs/guide.md:13-20 section Usage
+# → docs/guide.md:21-22 section License
+
+# Every hit says which section it is in.
+hprscript -p 'token' -region section -region-open '^## (.*)' -llm docs/guide.md
+# →   3: Intro mentions token here.
+# →   9: export token=abc  [in section Install]
+# →   15: Pass the token flag.  [in section Usage]
+
+# Only the Usage section, and not inside fenced code.
+hprscript -p 'token' \
+  -region section -region-open '^## (.*)' -in-region 'section:^Usage$' \
+  -region fence -region-open '^```' -region-close '^```' -not-in-region fence \
+  -llm docs/guide.md
+```
+
+**Why hprscript:** An open-only region is a *section*: it runs to the next heading. Capture group 1 becomes the label, so the heading text travels with every match (`regions.section.label` in JSONL, `$REGION_SECTION` in `-format`). Two definitions compose — sections AND-ed with "not in a code fence" — in one pass.
+
+### 35.2 Log sessions: which requests failed, which never finished
+
+**Problem:** A log interleaves many requests. "Which requests logged an ERROR?" and "which started but never completed?" are questions about spans, not lines.
+
+**Input:** A log where each request has a start line and (usually) a done line.
+
+**Recipe:**
+
+```bash
+REQ=(-region req -region-open 'request start id=(\w+)' -region-close 'request done')
+
+# The sessions themselves — label = request id, byte range for slicing.
+hprscript "${REQ[@]}" -list-regions app.log
+# → {"type":"region","file":"app.log","region":"req","label":"a1","line_start":1,"line_end":3,"from":6,"to":62}
+# → {"type":"region","file":"app.log","region":"req","label":"b2","line_start":4,"line_end":6,"from":75,"to":136}
+# → {"type":"region","file":"app.log","region":"req","label":"c3","line_start":8,"line_end":9,"from":175,"to":215,"closed":false}
+
+# Each ERROR with the request it belongs to (empty = outside any request).
+hprscript -p 'ERROR' "${REQ[@]}" -format '$LINE req=[$REGION_REQ]' app.log
+# → 5 req=[b2]
+# → 7 req=[]
+# → 9 req=[c3]
+
+# Requests that started but never logged "request done".
+hprscript -p 'request start' -name start -p 'request done' -name done "${REQ[@]}" \
+  -not-same-region start:done:req -format '$PAT_ID $LINE $REGION_REQ' app.log
+# → done 3 a1
+# → done 6 b2
+# → start 8 c3          ← the only start row left: c3 never finished
+```
+
+**Why hprscript:** An open + close region follows sed/awk range rules, and an unterminated one is kept (to end of file) and flagged `"closed":false` instead of vanishing. The closing match is inside the region, so "no done in the same region" is exactly "never finished".
+
+### 35.3 Code inside (or outside) conditional blocks
+
+**Problem:** "Is there logging that ships in production?" means log calls *outside* every `#ifdef DEBUG`. Blocks nest, so a line-range trick fails.
+
+**Input:** C/C++ sources with preprocessor conditionals.
+
+**Recipe:**
+
+```bash
+IFDEF=(-region ifdef -region-open '^#ifdef (\w+)' -region-close '^#endif' -region-nested)
+
+# Log calls compiled in unconditionally.
+hprscript -p 'log\(' "${IFDEF[@]}" -not-in-region ifdef -llm src
+
+# Log calls under DEBUG, including blocks nested inside it.
+hprscript -p 'log\(' "${IFDEF[@]}" -in-region 'ifdef:^DEBUG$' -llm src
+
+# Delete the ones under VERBOSE — same targeting, guarded edit.
+hprscript edit -p 'log\("\w"\);\n' -delete "${IFDEF[@]}" \
+  -in-region 'ifdef:^VERBOSE$' -expect 1 -plan-out drop-verbose.plan.json src/cfg.c
+```
+
+**Why hprscript:** `-region-nested` balances open/close with a stack, so each match knows its innermost block and its whole enclosing chain — `-in-region 'ifdef:^DEBUG$'` still counts a line in a `VERBOSE` block nested in `DEBUG`. The same filter that finds the sites qualifies them in `edit`.
+
+---
 
 ## See also
 

@@ -15,4 +15,10 @@ int run_search(const Cli &cli);
 // Exit codes follow grep: 0 = scopes listed, 1 = none found, 2 = error.
 int run_list_scopes(const Cli &cli);
 
+// Run -list-regions mode: dump the pattern-defined region index (one
+// record per region, in file order) with no search patterns involved.
+// Honors -in-region/-not-in-region as a filter and -limit as a cap.
+// Exit codes follow grep: 0 = regions listed, 1 = none found, 2 = error.
+int run_list_regions(const Cli &cli);
+
 } // namespace hpr

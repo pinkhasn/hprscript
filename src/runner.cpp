@@ -72,6 +72,10 @@ struct BufferedFile {
     bool scope_built = false;
     hpr::RoleIndex roles;
     bool roles_built = false;
+    // Region ranges are plain offsets + owned labels, so the index built
+    // against the mmap'd buffer stays valid for the owned copy.
+    hpr::RegionIndex regions;
+    bool regions_built = false;
     std::vector<hpr::Match> kept;
 };
 
@@ -184,6 +188,8 @@ int run_search(const Cli &cli) {
             (!cli.scope_pattern.empty() || !cli.in_scopes.empty()))
             stage.scope = "auto";
         plan.scan_stages.push_back(std::move(stage));
+        if (!cli.regions.empty())
+            plan.postprocess.push_back({"regions", {}});
         if (!cli.relations.empty())
             plan.postprocess.push_back({"relations", {}});
         if (!cli.file_where.empty())
@@ -206,8 +212,10 @@ int run_search(const Cli &cli) {
     }
 
     std::vector<ResolvedRelation> rels;
-    if (!resolve_relations(cli.relations, patterns, rels)) return 2;
+    if (!resolve_relations(cli.relations, patterns, rels, &cli.regions))
+        return 2;
     const bool any_scope_rel = any_scope_relation(rels);
+    const bool any_region_rel = any_region_relation(rels);
 
     FileWhere fw;
     if (!fw.init(cli.file_where, patterns)) return 2;
@@ -222,6 +230,17 @@ int run_search(const Cli &cli) {
 
     TargetFilter tf;
     if (!tf.init(cli)) return 2;
+
+    // Pattern-defined regions (-region): delimiters compile once into
+    // their own database; a RegionIndex is built per matching file.
+    RegionSet region_set;
+    if (!cli.regions.empty()) {
+        std::string rerr;
+        if (!region_set.init(cli.regions, !cli.no_utf8, &rerr)) {
+            std::fprintf(stderr, "hprscript: %s\n", rerr.c_str());
+            return 2;
+        }
+    }
 
     Matcher matcher;
     CompileError ce;
@@ -338,11 +357,20 @@ int run_search(const Cli &cli) {
     // Block extraction populates `block_line_start`/`_end` from the line
     // index, so we need it whenever block delimiters are configured (even
     // for output modes that wouldn't otherwise build it).
+    // Regions are indexed only when something consumes them: a region
+    // filter/relation, or an output mode that annotates each match.
+    const bool regions_needed =
+        region_set.active() &&
+        (tf.regions_needed() || any_region_rel ||
+         oo.mode == OutputMode::JsonLines || oo.mode == OutputMode::Llm ||
+         oo.mode == OutputMode::Custom);
+
     const bool need_idx = needs_line_index(oo.mode)
                            || (!oo.block_open.empty() && !oo.block_close.empty())
                            || cli.records != Cli::RecordMode::None
                            || cli.git_added_lines
-                           || tf.lines_needed();
+                           || tf.lines_needed()
+                           || regions_needed;
 
     Walker walker;
     std::unordered_map<std::string, AddedLines> added;
@@ -616,14 +644,21 @@ int run_search(const Cli &cli) {
                                          display_name, content, idx, scope);
         }
 
+        RegionIndex region_idx;
+        const RegionIndex *regions_ptr = nullptr;
+        if (need_indexes && regions_needed) {
+            region_idx.build(content, region_set, idx);
+            regions_ptr = &region_idx;
+        }
+
         std::vector<Match> kept;
         const AddedLines *al = nullptr;
         if (cli.git_added_lines) {
             auto ait = added.find(display_name);
             if (ait != added.end()) al = &ait->second;
         }
-        collector.finish(idx, scope_ptr, al, kept);
-        tf.apply(kept, idx, scope_ptr);
+        collector.finish(idx, scope_ptr, al, kept, regions_ptr);
+        tf.apply(kept, idx, scope_ptr, regions_ptr);
 
         stats.matches_seen += kept.size();
         stats.rows_materialized += kept.size();
@@ -706,6 +741,10 @@ int run_search(const Cli &cli) {
                                                user_scope_custom,
                                                scope_ptr != nullptr,
                                                roles_enabled));
+            if (regions_ptr) {
+                sample_files.back().regions = region_idx;
+                sample_files.back().regions_built = true;
+            }
             stats.buffered_bytes_peak += content.size();
             for (size_t mi = 0; mi < kept.size(); ++mi) {
                 if (sample_recs.size() >= SAMPLE_REC_CAP) {
@@ -811,7 +850,7 @@ int run_search(const Cli &cli) {
                 ++per_file;
                 const Pattern &pat = patterns[m.pattern_index];
                 fmt.on_match(display_name, pat, m, content, idx, scope_ptr,
-                             roles_ptr);
+                             roles_ptr, regions_ptr);
                 if (fmt.over_budget()) break;
                 if (cli.per_file_limit > 0 &&
                     per_file >= static_cast<uint64_t>(cli.per_file_limit)) break;
@@ -936,7 +975,8 @@ int run_search(const Cli &cli) {
             const Pattern &pat = patterns[r.m.pattern_index];
             fmt.on_match(sf.path, pat, r.m, sf.content, sf.idx,
                          sf.scope_built ? &sf.scope : nullptr,
-                         sf.roles_built ? &sf.roles : nullptr);
+                         sf.roles_built ? &sf.roles : nullptr,
+                         sf.regions_built ? &sf.regions : nullptr);
             if (fmt.over_budget()) {
                 if (stats.stop_reason.empty())
                     stats.stop_reason = "output_budget";
@@ -1315,6 +1355,158 @@ int run_list_scopes(const Cli &cli) {
                 out += "}\n";
                 std::fputs(out.c_str(), stdout);
             }
+            ++stats.rows_materialized;
+            ++emitted;
+            if (cli.limit > 0 &&
+                emitted >= static_cast<uint64_t>(cli.limit)) {
+                hit_limit = true;
+                return false;
+            }
+        }
+        return true;
+    };
+
+    bool no_inputs = cli.globs.empty() && cli.positional.empty() &&
+                     cli.file_lists.empty() && !cli.git_changed &&
+                     !cli.git_staged && !cli.git_untracked &&
+                     cli.git_ranges.empty();
+    if (no_inputs && !isatty(fileno(stdin))) {
+        std::string content;
+        if (!read_stdin(content)) {
+            std::fprintf(stderr, "hprscript: failed to read stdin\n");
+            return 2;
+        }
+        ++stats.files_scanned;
+        stats.bytes_scanned += content.size();
+        scan_buf("<stdin>", content);
+    } else {
+        walker.walk([&](const WalkItem &it) {
+            MappedFile mf;
+            if (!mf.open(it.path)) {
+                ++stats.files_failed;
+                if (cli.diagnostics) {
+                    emit_warning_record("read_error", it.path);
+                } else {
+                    std::fprintf(stderr, "hprscript: cannot read %s: %s\n",
+                                 it.path.c_str(), std::strerror(errno));
+                }
+                return true;
+            }
+            if (looks_binary(mf.view())) {
+                ++stats.files_binary;
+                if (cli.diagnostics) emit_warning_record("binary_skip", it.path);
+                return true;
+            }
+            ++stats.files_scanned;
+            stats.bytes_scanned += mf.view().size();
+            return scan_buf(it.path, mf.view());
+        });
+    }
+    if (hit_limit) stats.stop_reason = "limit";
+    stats.rows_output = emitted;
+    if (cli.summary) {
+        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                           std::chrono::steady_clock::now() - t_start)
+                           .count();
+        emit_summary_record(stats, emitted, static_cast<uint64_t>(elapsed));
+    }
+    if (cli.require_complete &&
+        (stats.files_failed > 0 || stats.missing_paths > 0)) {
+        std::fprintf(stderr,
+                     "hprscript: incomplete scan: %llu unreadable file(s), "
+                     "%llu missing listed path(s)\n",
+                     (unsigned long long)stats.files_failed,
+                     (unsigned long long)stats.missing_paths);
+        return 2;
+    }
+    return emitted > 0 ? 0 : 1;
+}
+
+int run_list_regions(const Cli &cli) {
+    const auto t_start = std::chrono::steady_clock::now();
+    ScanStats stats;
+    stats.scan_stages = 1;
+    if (cli.explain_plan) {
+        ExecutionPlan plan;
+        plan.mode = "list-regions";
+        PlanStage stage;
+        stage.id = "scan0";
+        stage.sets = {"regions"};
+        stage.inputs.insert(stage.inputs.end(), cli.globs.begin(), cli.globs.end());
+        stage.inputs.insert(stage.inputs.end(), cli.positional.begin(),
+                            cli.positional.end());
+        if (stage.inputs.empty()) stage.inputs.push_back("<stdin>");
+        plan.scan_stages.push_back(std::move(stage));
+        if (!cli.region_filters.empty())
+            plan.postprocess.push_back({"region-filter", {}});
+        if (cli.limit > 0) plan.limits["rows"] = cli.limit;
+        emit_execution_plan(plan);
+        if (cli.plan_only) return 0;
+    }
+    TargetFilter tf;
+    if (!tf.init(cli)) return 2;
+
+    RegionSet region_set;
+    {
+        std::string rerr;
+        if (!region_set.init(cli.regions, !cli.no_utf8, &rerr)) {
+            std::fprintf(stderr, "hprscript: %s\n", rerr.c_str());
+            return 2;
+        }
+        stats.matcher_compilations = 1;
+        stats.patterns_compiled = region_set.pattern_count();
+    }
+
+    Walker walker;
+    std::unordered_map<std::string, AddedLines> added;
+    if (!add_walker_inputs(cli, walker, stats, added)) return 2;
+
+    const bool llm = cli.out_mode_set && cli.out_mode == OutputMode::Llm;
+    uint64_t emitted = 0;
+    bool hit_limit = false;
+
+    auto scan_buf = [&](const std::string &display_name,
+                        std::string_view content) -> bool {
+        LineIndex idx;
+        idx.build(content);
+        RegionIndex regions;
+        regions.build(content, region_set, idx);
+        const auto &defs = region_set.defs();
+        for (const RegionRange *rp : regions.in_file_order()) {
+            const RegionRange &r = *rp;
+            if (!tf.region_listed(r)) continue;
+            const RegionDef &def = defs[r.def];
+            std::string out;
+            if (llm) {
+                out = display_name;
+                out += ':';
+                out += std::to_string(r.line_start);
+                out += '-';
+                out += std::to_string(r.line_end);
+                out += ' ';
+                out += def.id;
+                if (!r.label.empty()) {
+                    out += ' ';
+                    out += r.label;
+                }
+                if (!r.closed) out += "  (unclosed)";
+                out += '\n';
+            } else {
+                out = "{\"type\":\"region\",\"file\":\"";
+                json_escape_to(out, display_name);
+                out += "\",\"region\":\"";
+                json_escape_to(out, def.id);
+                out += "\",\"label\":\"";
+                json_escape_to(out, r.label);
+                out += "\",\"line_start\":" + std::to_string(r.line_start);
+                out += ",\"line_end\":" + std::to_string(r.line_end);
+                out += ",\"from\":" + std::to_string(r.start_off);
+                out += ",\"to\":" + std::to_string(r.end_off);
+                if (def.nested) out += ",\"depth\":" + std::to_string(r.depth);
+                if (!r.closed) out += ",\"closed\":false";
+                out += "}\n";
+            }
+            std::fputs(out.c_str(), stdout);
             ++stats.rows_materialized;
             ++emitted;
             if (cli.limit > 0 &&

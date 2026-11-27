@@ -78,6 +78,11 @@ int main(int argc, char **argv) {
         return hpr::run_list_scopes(cli);
     }
 
+    // -list-regions: dump the pattern-defined region index.
+    if (cli.list_regions) {
+        return hpr::run_list_regions(cli);
+    }
+
     // Quick-search (-p) mode is selected when at least one -p was given.
     if (!cli.patterns.empty()) {
         return hpr::run_search(cli);

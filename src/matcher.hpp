@@ -49,4 +49,10 @@ private:
     hs_scratch_t *scratch_ = nullptr;
 };
 
+// Reduce raw Vectorscan hits (every accepting end offset, see above) to
+// leftmost-longest non-overlapping matches per pattern — the grep-style
+// result. Sorts `raw` in place; `kept` receives the survivors ordered by
+// (pattern_index, from).
+void dedup_leftmost_longest(std::vector<Match> &raw, std::vector<Match> &kept);
+
 } // namespace hpr

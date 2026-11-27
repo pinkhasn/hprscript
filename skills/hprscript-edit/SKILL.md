@@ -28,7 +28,7 @@ The plan binds review to exact paths, file identities and hashes, byte ranges, o
 
 - Use an absolute positional path or glob when the effective cwd is uncertain.
 - Inspect the first preview path and stop if it escapes the intended tree.
-- Narrow with `-glob`, `-exclude`, `-git-changed`, `-git-staged`, `-git-range`, `-git-added-lines`, `-lines`, `-in-scope`, `-near`, `-far`, `-same-scope`, `-not-same-scope`, or `-file-where`.
+- Narrow with `-glob`, `-exclude`, `-git-changed`, `-git-staged`, `-git-range`, `-git-added-lines`, `-lines`, `-in-scope`, `-in-region`, `-not-in-region`, `-near`, `-far`, `-same-scope`, `-not-same-scope`, `-same-region`, `-not-same-region`, or `-file-where`.
 - Prefer a stable scope name over line numbers when code may move.
 - Run `hprscript -list-scopes -llm <file>` before a scope or function-body replacement.
 - Read the exact current body with `hprscript expand <file>:<line>` before replacing a scope or block; a `file:line@hash` ref from a `-refs` search is verified first and reports stale (exit 3) instead of rendering outdated code.

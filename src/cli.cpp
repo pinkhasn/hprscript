@@ -306,6 +306,34 @@ void print_help(FILE *out) {
 "                       record per function/class (JSONL, or -llm flat).\n"
 "                       Honors -in-scope/-in-scope-kind; takes no patterns\n"
 "\n"
+"Pattern-defined regions (search and edit modes; any text, no language pack):\n"
+"  -region <id>         Declare a region; the -region-* flags after it bind\n"
+"                       to it (repeatable for several region definitions)\n"
+"  -region-open <re>    Opening pattern (PCRE). Capture group 1 = the\n"
+"                       region's label (else the opening match's first line)\n"
+"  -region-close <re>   Closing pattern: the region runs from an open match\n"
+"                       through the next close match (sed/awk range rules;\n"
+"                       unterminated = to end of file). Omitted: each open\n"
+"                       match starts a section that runs to the next one\n"
+"  -region-nested       Balance open/close with a stack (nested regions)\n"
+"                       instead of range rules; needs -region-close\n"
+"  With a region defined, JSONL records gain \"regions\":{<id>:{label,\n"
+"  line_start,line_end}}, -llm gains [in <id> <label>] tags, and -format\n"
+"  gains $REGION_<ID> (label) / $REGION_<ID>_LINE_START / _LINE_END /\n"
+"  _FROM / _TO\n"
+"  -in-region <id>[:<re>]      Keep only matches inside such a region,\n"
+"                              optionally one whose label matches <re>\n"
+"                              (same id repeated = OR, different ids = AND)\n"
+"  -not-in-region <id>[:<re>]  Keep only matches outside such regions\n"
+"  -same-region A:B:<id>       Emit A's matches with a B-match inside the\n"
+"                              same <id> region\n"
+"  -not-same-region A:B:<id>   Emit A's matches with NO B-match in the same\n"
+"                              <id> region (A outside any region is kept)\n"
+"  -list-regions        List the region index instead of searching: one\n"
+"                       record per region with label, lines and byte range\n"
+"                       (JSONL, or -llm flat). Honors -in-region/\n"
+"                       -not-in-region; takes no patterns\n"
+"\n"
 "Expand mode (hprscript expand <file:line[@hash]> ...):\n"
 "  Print the enclosing scope of each ref (a search hit's file:line).\n"
 "  With @hash (from -refs) the line is verified first: a moved line is\n"
@@ -894,6 +922,83 @@ Cli parse_cli(int argc, char **argv) {
             continue;
         }
 
+        if (eq(a, "-region")) {
+            const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
+            if (!valid_pattern_name(v)) {
+                cli.error = true;
+                cli.error_message = std::string("-region: id must be an "
+                                                "identifier ([A-Za-z_][A-Za-z0-9_]*) — got '") +
+                                    v + "'";
+                return cli;
+            }
+            for (const auto &rd : cli.regions) {
+                if (rd.id == v) {
+                    cli.error = true;
+                    cli.error_message = std::string("-region: duplicate id '") + v + "'";
+                    return cli;
+                }
+            }
+            RegionDef rd;
+            rd.id = v;
+            cli.regions.push_back(std::move(rd));
+            continue;
+        }
+        if (eq(a, "-region-open") || eq(a, "-region-close")) {
+            const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
+            if (cli.regions.empty()) {
+                cli.error = true;
+                cli.error_message = std::string(a) + " must follow a -region <id>";
+                return cli;
+            }
+            std::string &slot = eq(a, "-region-open") ? cli.regions.back().open
+                                                      : cli.regions.back().close;
+            if (!slot.empty() || !*v) {
+                cli.error = true;
+                cli.error_message = !*v
+                    ? std::string(a) + ": empty pattern"
+                    : std::string(a) + " given twice for -region " +
+                          cli.regions.back().id;
+                return cli;
+            }
+            slot = v;
+            continue;
+        }
+        if (eq(a, "-region-nested")) {
+            if (cli.regions.empty()) {
+                cli.error = true;
+                cli.error_message = "-region-nested must follow a -region <id>";
+                return cli;
+            }
+            cli.regions.back().nested = true;
+            continue;
+        }
+        if (eq(a, "-in-region") || eq(a, "-not-in-region")) {
+            const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
+            // <id>[:<label-regex>] — ids are identifiers, so the first
+            // colon is unambiguous and the regex may contain more.
+            Cli::RegionFilter rf;
+            rf.negate = eq(a, "-not-in-region");
+            const char *colon = std::strchr(v, ':');
+            if (colon) {
+                rf.id.assign(v, colon - v);
+                rf.label_re.assign(colon + 1);
+            } else {
+                rf.id = v;
+            }
+            if (rf.id.empty() || (colon && rf.label_re.empty())) {
+                cli.error = true;
+                cli.error_message = std::string(a) +
+                                    ": expected <region-id>[:<label-regex>]";
+                return cli;
+            }
+            cli.region_filters.push_back(std::move(rf));
+            continue;
+        }
+        if (eq(a, "-list-regions") || eq(a, "--list-regions")) {
+            cli.list_regions = true;
+            continue;
+        }
+
         if (eq(a, "-sample")) {
             const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
             cli.sample_n = std::atoi(v);
@@ -959,6 +1064,31 @@ Cli parse_cli(int argc, char **argv) {
             if (r.a.empty() || r.b.empty()) {
                 cli.error = true;
                 cli.error_message = std::string(a) + ": invalid A:B";
+                return cli;
+            }
+            cli.relations.push_back(std::move(r));
+            continue;
+        }
+
+        if (eq(a, "-same-region") || eq(a, "-not-same-region")) {
+            const char *v = take(i, argc, argv, a, cli); if (!v) return cli;
+            // Parse A:B:R — R names the region definition.
+            const char *colon1 = std::strchr(v, ':');
+            const char *colon2 = colon1 ? std::strchr(colon1 + 1, ':') : nullptr;
+            if (!colon2 || std::strchr(colon2 + 1, ':')) {
+                cli.error = true;
+                cli.error_message = std::string(a) + ": expected A:B:<region-id>";
+                return cli;
+            }
+            Cli::Relation r;
+            r.kind = eq(a, "-same-region") ? Cli::RelationKind::SameRegion
+                                           : Cli::RelationKind::NotSameRegion;
+            r.a.assign(v, colon1 - v);
+            r.b.assign(colon1 + 1, colon2 - colon1 - 1);
+            r.region.assign(colon2 + 1);
+            if (r.a.empty() || r.b.empty() || r.region.empty()) {
+                cli.error = true;
+                cli.error_message = std::string(a) + ": invalid A:B:<region-id>";
                 return cli;
             }
             cli.relations.push_back(std::move(r));
@@ -1173,6 +1303,109 @@ Cli parse_cli(int argc, char **argv) {
             cli.error_message = "-in-scope/-in-scope-kind/-lines work in "
                                 "quick (-p) and edit modes only";
             return cli;
+        }
+        bool region_rel = false;
+        for (const auto &r : cli.relations)
+            if (r.kind == Cli::RelationKind::SameRegion ||
+                r.kind == Cli::RelationKind::NotSameRegion)
+                region_rel = true;
+        const bool region_flags = !cli.regions.empty() ||
+                                  !cli.region_filters.empty() ||
+                                  region_rel || cli.list_regions;
+        if (region_flags) {
+            auto has_region = [&](const std::string &id) {
+                for (const auto &rd : cli.regions)
+                    if (rd.id == id) return true;
+                return false;
+            };
+            if (script_mode || cli.query.active || cli.investigate.active ||
+                cli.expand.active || cli.apply.active) {
+                cli.error = true;
+                cli.error_message =
+                    "-region/-in-region/-same-region/-list-regions work in "
+                    "quick (-p) and edit modes only";
+                return cli;
+            }
+            if (cli.regions.empty()) {
+                cli.error = true;
+                cli.error_message = "region flags need a -region <id> "
+                                    "-region-open <regex> definition";
+                return cli;
+            }
+            for (const auto &rd : cli.regions) {
+                if (rd.open.empty()) {
+                    cli.error = true;
+                    cli.error_message = "-region " + rd.id +
+                                        ": -region-open <regex> is required";
+                    return cli;
+                }
+                if (rd.nested && rd.close.empty()) {
+                    cli.error = true;
+                    cli.error_message = "-region " + rd.id +
+                                        ": -region-nested needs -region-close";
+                    return cli;
+                }
+            }
+            for (const auto &rf : cli.region_filters) {
+                if (!has_region(rf.id)) {
+                    cli.error = true;
+                    cli.error_message =
+                        std::string(rf.negate ? "-not-in-region" : "-in-region") +
+                        ": unknown region '" + rf.id + "'";
+                    return cli;
+                }
+            }
+            for (const auto &r : cli.relations) {
+                if ((r.kind == Cli::RelationKind::SameRegion ||
+                     r.kind == Cli::RelationKind::NotSameRegion) &&
+                    !has_region(r.region)) {
+                    cli.error = true;
+                    cli.error_message = "-same-region/-not-same-region: "
+                                        "unknown region '" + r.region + "'";
+                    return cli;
+                }
+            }
+            if (cli.list_scopes && cli.list_regions) {
+                cli.error = true;
+                cli.error_message =
+                    "-list-scopes and -list-regions are mutually exclusive";
+                return cli;
+            }
+            if (cli.list_regions) {
+                if (cli.edit.active) {
+                    cli.error = true;
+                    cli.error_message = "-list-regions cannot combine with edit mode";
+                } else if (!cli.patterns.empty() || !cli.patterns_from.empty()) {
+                    cli.error = true;
+                    cli.error_message = "-list-regions takes no patterns — it "
+                                        "lists the region index itself";
+                } else if (cli.out_mode_set &&
+                           cli.out_mode != OutputMode::JsonLines &&
+                           cli.out_mode != OutputMode::Llm) {
+                    cli.error = true;
+                    cli.error_message =
+                        "-list-regions output is JSONL (default) or -llm";
+                } else if (cli.sample_n > 0 || cli.hotspots_n > 0 ||
+                           cli.budget_bytes > 0 ||
+                           cli.records != Cli::RecordMode::None) {
+                    cli.error = true;
+                    cli.error_message = "-list-regions cannot combine with "
+                                        "-sample/-hotspots/-budget/-records";
+                } else if (!cli.relations.empty() || !cli.in_scopes.empty() ||
+                           !cli.in_scope_kind.empty() ||
+                           !cli.line_ranges.empty() || !cli.file_where.empty()) {
+                    cli.error = true;
+                    cli.error_message =
+                        "-list-regions lists whole regions — only "
+                        "-in-region/-not-in-region filter it";
+                }
+                if (cli.error) return cli;
+            } else if (cli.patterns.empty() && cli.patterns_from.empty()) {
+                cli.error = true;
+                cli.error_message = "-region needs search patterns (-p/-F/"
+                                    "-ident) or -list-regions";
+                return cli;
+            }
         }
         if (cli.list_scopes) {
             if (cli.edit.active) {

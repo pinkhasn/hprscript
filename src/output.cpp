@@ -3,6 +3,7 @@
 #include "block.hpp"
 #include "expand.hpp" // ref_hash6 (-refs)
 #include "language_evidence.hpp"
+#include "region.hpp"
 #include "roles.hpp"
 #include "seen.hpp"
 
@@ -245,7 +246,7 @@ std::string_view Formatter::context_block(std::string_view buf,
 void Formatter::emit_json(const std::string &file, const Pattern &pattern,
                           const Match &m, std::string_view buf,
                           const LineIndex &idx, const ScopeIndex *scope,
-                          const RoleIndex *roles) {
+                          const RoleIndex *roles, const RegionIndex *regions) {
     refresh_file_cache(file);
     refresh_pattern_cache(pattern);
 
@@ -341,6 +342,32 @@ void Formatter::emit_json(const std::string &file, const Pattern &pattern,
         s += role;
         s += '"';
     }
+    if (regions && regions->set()) {
+        // One entry per region definition containing the match (innermost
+        // instance for nested definitions), in definition order.
+        const auto &defs = regions->set()->defs();
+        bool any = false;
+        for (uint32_t d = 0; d < defs.size(); ++d) {
+            const RegionRange *rr = regions->find_innermost(d, m.from);
+            if (!rr) continue;
+            s += any ? ",\"" : ",\"regions\":{\"";
+            any = true;
+            json_escape_to(s, defs[d].id);
+            s += "\":{\"label\":\"";
+            json_escape_to(s, rr->label);
+            s += "\",\"line_start\":";
+            append_uint32(s, rr->line_start);
+            s += ",\"line_end\":";
+            append_uint32(s, rr->line_end);
+            if (defs[d].nested) {
+                s += ",\"depth\":";
+                append_uint32(s, rr->depth);
+            }
+            if (!rr->closed) s += ",\"closed\":false";
+            s += '}';
+        }
+        if (any) s += '}';
+    }
     s += "}\n";
     write_out(s);
 }
@@ -363,7 +390,7 @@ void Formatter::emit_match_only(std::string_view buf, const Match &m,
 void Formatter::emit_custom(const std::string &file, const Pattern &pattern,
                             const Match &m, std::string_view buf,
                             const LineIndex &idx, const ScopeIndex *scope,
-                            const RoleIndex *roles) {
+                            const RoleIndex *roles, const RegionIndex *regions) {
     uint32_t line = idx.line_of(m.from);
     uint32_t col = idx.col_of(m.from);
     std::string_view match_text(buf.data() + m.from, m.to - m.from);
@@ -411,6 +438,8 @@ void Formatter::emit_custom(const std::string &file, const Pattern &pattern,
     const char *role = occurrence_role(roles, scope, m.from, m.to, line);
     static const char EXTRACT_PREFIX[] = "$EXTRACT_";
     static constexpr size_t EXTRACT_PREFIX_LEN = sizeof(EXTRACT_PREFIX) - 1;
+    static const char REGION_PREFIX[] = "$REGION_";
+    static constexpr size_t REGION_PREFIX_LEN = sizeof(REGION_PREFIX) - 1;
     for (size_t i = 0; i < fmt.size();) {
         if (fmt[i] != '$') { out += fmt[i++]; continue; }
         // Order matters — longer tokens first so $BLOCK_LINE_START doesn't
@@ -437,6 +466,50 @@ void Formatter::emit_custom(const std::string &file, const Pattern &pattern,
         if (try_str(i, "$ENCLOSING_KIND", sr ? std::string_view(sr->kind) : std::string_view{})) continue;
         if (try_num(i, "$ENCLOSING_LINE_START", sr ? sr->line_start : 0)) continue;
         if (try_num(i, "$ENCLOSING_LINE_END",   sr ? sr->line_end   : 0)) continue;
+        // $REGION_<ID>[_LINE_START|_LINE_END|_FROM|_TO] — <ID> is a -region
+        // id, compared case-insensitively. A match outside every region of
+        // that definition renders an empty label / 0. Unknown ids stay
+        // literal.
+        if (regions && regions->set() &&
+            fmt.compare(i, REGION_PREFIX_LEN, REGION_PREFIX) == 0) {
+            size_t e = i + REGION_PREFIX_LEN;
+            while (e < fmt.size() && (std::isalnum((unsigned char)fmt[e]) || fmt[e] == '_'))
+                ++e;
+            std::string_view suffix(fmt.data() + i + REGION_PREFIX_LEN,
+                                    e - (i + REGION_PREFIX_LEN));
+            auto ieq = [](std::string_view a, std::string_view b) {
+                if (a.size() != b.size()) return false;
+                for (size_t j = 0; j < a.size(); ++j)
+                    if (std::toupper((unsigned char)a[j]) !=
+                        std::toupper((unsigned char)b[j]))
+                        return false;
+                return true;
+            };
+            static const char *const FIELDS[] = {"", "_LINE_START", "_LINE_END",
+                                                 "_FROM", "_TO"};
+            const auto &defs = regions->set()->defs();
+            bool done = false;
+            for (uint32_t d = 0; d < defs.size() && !done; ++d) {
+                const std::string &id = defs[d].id;
+                if (suffix.size() < id.size() ||
+                    !ieq(suffix.substr(0, id.size()), id))
+                    continue;
+                std::string_view field = suffix.substr(id.size());
+                for (int fi = 0; fi < 5 && !done; ++fi) {
+                    if (field != FIELDS[fi]) continue;
+                    const RegionRange *rr = regions->find_innermost(d, m.from);
+                    switch (fi) {
+                        case 0: if (rr) out.append(rr->label); break;
+                        case 1: append_uint(out, rr ? rr->line_start : 0); break;
+                        case 2: append_uint(out, rr ? rr->line_end : 0); break;
+                        case 3: append_uint(out, rr ? rr->start_off : 0); break;
+                        case 4: append_uint(out, rr ? rr->end_off : 0); break;
+                    }
+                    done = true;
+                }
+            }
+            if (done) { i = e; continue; }
+        }
         // $EXTRACT_<NAME> — read identifier suffix and look up in `names`.
         if (extract_names && fmt.compare(i, EXTRACT_PREFIX_LEN, EXTRACT_PREFIX) == 0) {
             size_t e = i + EXTRACT_PREFIX_LEN;
@@ -491,7 +564,7 @@ void Formatter::emit_header() {
 void Formatter::emit_llm(const std::string &file, const Pattern &pattern,
                          const Match &m, std::string_view buf,
                          const LineIndex &idx, const ScopeIndex *scope,
-                         const RoleIndex *roles) {
+                         const RoleIndex *roles, const RegionIndex *regions) {
     emit_header();
     auto &s = scratch_;
 
@@ -572,6 +645,23 @@ void Formatter::emit_llm(const std::string &file, const Pattern &pattern,
             s.append(sr->kind);
             s += ' ';
             s.append(sr->name);
+            s += ']';
+        }
+    }
+    if (regions && regions->set()) {
+        const auto &defs = regions->set()->defs();
+        for (uint32_t d = 0; d < defs.size(); ++d) {
+            const RegionRange *rr = regions->find_innermost(d, m.from);
+            if (!rr) continue;
+            s += "  [in ";
+            s.append(defs[d].id);
+            if (!rr->label.empty()) {
+                s += ' ';
+                // Labels are already one line; keep tags short.
+                std::string_view lv = truncate_safe(rr->label, 60, nullptr);
+                s.append(lv.data(), lv.size());
+                if (lv.size() < rr->label.size()) s += "\xE2\x80\xA6";
+            }
             s += ']';
         }
     }
@@ -866,10 +956,10 @@ void Formatter::on_file_rollup(const std::string &file,
 void Formatter::on_match(const std::string &file, const Pattern &pattern,
                          const Match &m, std::string_view buf,
                          const LineIndex &idx, const ScopeIndex *scope,
-                         const RoleIndex *roles) {
+                         const RoleIndex *roles, const RegionIndex *regions) {
     ++emitted_;
     switch (opts_.mode) {
-        case OutputMode::JsonLines:   emit_json(file, pattern, m, buf, idx, scope, roles); break;
+        case OutputMode::JsonLines:   emit_json(file, pattern, m, buf, idx, scope, roles, regions); break;
         case OutputMode::FilesOnly:
             // Print the file once, on first match. Counter tracked below.
             if (per_file_counts_[file]++ == 0) {
@@ -881,8 +971,8 @@ void Formatter::on_match(const std::string &file, const Pattern &pattern,
             per_file_counts_[file]++;
             break;
         case OutputMode::MatchOnly:   emit_match_only(buf, m, idx); break;
-        case OutputMode::Custom:      emit_custom(file, pattern, m, buf, idx, scope, roles); break;
-        case OutputMode::Llm:         emit_llm(file, pattern, m, buf, idx, scope, roles); break;
+        case OutputMode::Custom:      emit_custom(file, pattern, m, buf, idx, scope, roles, regions); break;
+        case OutputMode::Llm:         emit_llm(file, pattern, m, buf, idx, scope, roles, regions); break;
         case OutputMode::Elide:
         case OutputMode::Rollup:
             // Elide/Rollup render a whole file's matches at once via

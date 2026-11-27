@@ -572,8 +572,22 @@ int run_edit(const Cli &cli) {
         }
     }
     std::vector<ResolvedRelation> rels;
-    if (!resolve_relations(cli.relations, patterns, rels)) return 2;
+    if (!resolve_relations(cli.relations, patterns, rels, &cli.regions))
+        return 2;
     const bool any_scope_rel = any_scope_relation(rels);
+    // Pattern-defined regions qualify edit sites exactly as in search mode
+    // (-in-region/-not-in-region filters, -same-region relations).
+    const bool regions_needed =
+        !cli.regions.empty() &&
+        (tf.regions_needed() || any_region_relation(rels));
+    RegionSet region_set;
+    if (regions_needed) {
+        std::string rerr;
+        if (!region_set.init(cli.regions, !cli.no_utf8, &rerr)) {
+            std::fprintf(stderr, "hprscript: %s\n", rerr.c_str());
+            return 2;
+        }
+    }
     FileWhere fw;
     if (!fw.init(cli.file_where, patterns)) return 2;
     std::map<int, std::unordered_map<std::string, uint32_t>> churn_map;
@@ -726,8 +740,15 @@ int run_edit(const Cli &cli) {
                 auto ait = added.find(it.path);
                 if (ait != added.end()) al = &ait->second;
             }
-            collector.collect(matcher, content, idx, scope_ptr, al, kept);
-            tf.apply(kept, idx, scope_ptr);
+            RegionIndex region_idx;
+            const RegionIndex *regions_ptr = nullptr;
+            if (regions_needed) {
+                region_idx.build(content, region_set, idx);
+                regions_ptr = &region_idx;
+            }
+            collector.collect(matcher, content, idx, scope_ptr, al, kept,
+                              regions_ptr);
+            tf.apply(kept, idx, scope_ptr, regions_ptr);
             if (kept.empty()) return true;
             if (fw.active() &&
                 !fw.pass(kept, patterns.size(), it.path, churn_map))
