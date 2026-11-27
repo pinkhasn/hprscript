@@ -9,6 +9,7 @@
 #pragma once
 
 #include "output.hpp"
+#include "region.hpp"
 
 #include <string>
 #include <vector>
@@ -248,14 +249,47 @@ struct Cli {
     // distance (`lines` is unused). They require an active -scope config;
     // `a` matches outside any recognized scope are dropped by SameScope and
     // kept by NotSameScope. When a == b, "same scope" needs a *second* match.
-    enum class RelationKind { Near, Far, SameScope, NotSameScope };
+    //
+    // SameRegion / NotSameRegion (`-same-region A:B:R` / `-not-same-region
+    // A:B:R`) are the same test against the innermost enclosing region of
+    // definition `R` (see `regions` below) instead of a language scope.
+    enum class RelationKind {
+        Near, Far, SameScope, NotSameScope, SameRegion, NotSameRegion
+    };
     struct Relation {
         RelationKind kind = RelationKind::Near;
         std::string a;
         std::string b;
         int lines = 0;
+        std::string region; // SameRegion/NotSameRegion: region definition id
     };
     std::vector<Relation> relations;
+
+    // Pattern-defined regions (`-region <id>` followed by `-region-open`,
+    // optional `-region-close` and `-region-nested`; repeatable). Each
+    // definition delimits spans by regex — see src/region.hpp for the three
+    // delimiting modes. When any is defined, per-match records gain a
+    // `regions` annotation, -format gains `$REGION_<ID>*` tokens, and -llm
+    // gains `[in <id> <label>]` tags. Quick-search and edit modes only.
+    std::vector<RegionDef> regions;
+
+    // Region targeting (`-in-region <id>[:<label-regex>]` /
+    // `-not-in-region …`): keep only matches inside (outside) a region of
+    // that definition whose label matches the ECMAScript regex (search
+    // semantics; omitted = any label). Positive filters naming the same
+    // region OR together; different regions AND. Every negative filter must
+    // hold.
+    struct RegionFilter {
+        std::string id;
+        std::string label_re;
+        bool negate = false;
+    };
+    std::vector<RegionFilter> region_filters;
+
+    // -list-regions: dump the region index (one record per region) instead
+    // of searching — no patterns involved. Honors -in-region/-not-in-region
+    // as a filter over the listed regions; output is JSONL or -llm lines.
+    bool list_regions = false;
 
     // Record mode (-records). v1 supports `line`: combined with -absent,
     // emit one record per non-empty line lacking each pattern (record-level

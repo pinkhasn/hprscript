@@ -13,6 +13,7 @@
 #include "ident.hpp"
 #include "line_index.hpp"
 #include "matcher.hpp"
+#include "region.hpp"
 #include "scope.hpp"
 #include "strutil.hpp" // looks_binary
 #include "walker.hpp"
@@ -57,16 +58,23 @@ struct ResolvedRelation {
     uint32_t a_idx = 0;
     uint32_t b_idx = 0;
     int lines = 0;
+    uint32_t region_def = 0; // SameRegion/NotSameRegion: region definition
 };
 
 // Resolve CLI relations against the pattern list. On an unknown id, prints
-// the usual stderr message and returns false.
+// the usual stderr message and returns false. `regions` (the -region
+// definitions) resolves the region side of -same-region/-not-same-region;
+// such a relation with no matching definition is an error.
 bool resolve_relations(const std::vector<Cli::Relation> &relations,
                        const std::vector<Pattern> &patterns,
-                       std::vector<ResolvedRelation> &out);
+                       std::vector<ResolvedRelation> &out,
+                       const std::vector<RegionDef> *regions = nullptr);
 
 // True when any relation needs an active -scope config.
 bool any_scope_relation(const std::vector<ResolvedRelation> &rels);
+
+// True when any relation tests region containment (needs a RegionIndex).
+bool any_region_relation(const std::vector<ResolvedRelation> &rels);
 
 // -file-where: boolean predicate over pattern ids and file metadata,
 // evaluated per file. Leaves are either bare pattern ids ("did this pattern
@@ -135,7 +143,8 @@ const ScopeIndex *build_file_scope(const std::string &scope_lang,
                                    const LineIndex &idx, ScopeIndex &scope,
                                    ScopeConfig *out_cfg = nullptr);
 
-// -in-scope / -in-scope-kind / -lines filters. Applied to `kept` AFTER
+// -in-scope / -in-scope-kind / -lines / -in-region / -not-in-region filters.
+// Applied to `kept` AFTER
 // relations (relations judge proximity against the full match set) and
 // BEFORE -file-where (the predicate sees only matches that count).
 class TargetFilter {
@@ -149,21 +158,45 @@ public:
     // configured).
     bool scope_needed() const { return scope_needed_; }
     bool lines_needed() const { return !lines_.empty(); }
+    // True when an -in-region/-not-in-region filter exists (the caller must
+    // then build a RegionIndex per file and pass it to apply()).
+    bool regions_needed() const { return !region_filters_.empty(); }
 
     // Drop matches outside the line ranges / outside a matching enclosing
-    // scope. With a scope filter active and no scope index for the file,
-    // every match is dropped.
+    // scope / failing the region filters. With a scope filter active and no
+    // scope index for the file, every match is dropped; likewise a positive
+    // region filter with no region index.
     void apply(std::vector<Match> &kept, const LineIndex &idx,
-               const ScopeIndex *scope_ptr) const;
+               const ScopeIndex *scope_ptr,
+               const RegionIndex *regions = nullptr) const;
 
     // Does this scope itself satisfy the name/kind predicate? (Used for the
     // ancestor-chain test, anchorless edit targets, and -list-scopes.)
     bool scope_matches(const ScopeRange &r) const;
 
+    // Does this region itself pass the region filters? (-list-regions: a
+    // region is listed when it satisfies some positive filter — or there
+    // are none — and no negative filter.)
+    bool region_listed(const RegionRange &r) const;
+
 private:
+    struct RegionFilter {
+        uint32_t def = 0;
+        bool negate = false;
+        bool has_re = false;
+        std::regex label_re;
+    };
+    // Does `r` (one region instance) satisfy filter `f`'s def + label test?
+    static bool region_satisfies(const RegionFilter &f, const RegionRange &r);
+    // Is `offset` inside any region (innermost or an ancestor) satisfying `f`?
+    static bool in_matching_region(const RegionFilter &f,
+                                   const RegionIndex &regions, uint64_t offset);
+
     std::vector<std::regex> name_res_;
     std::string kind_;
     std::vector<Cli::LineRange> lines_;
+    std::vector<RegionFilter> region_filters_;
+    std::vector<uint32_t> positive_defs_; // distinct defs with -in-region
     bool scope_needed_ = false;
     bool active_ = false;
 };
@@ -185,11 +218,13 @@ public:
     // file's -git-added-lines entry (nullptr = no added lines; ignored
     // unless the collector was built with git_added_lines=true).
     // `scope_ptr` may be null; it is only consulted for -same-scope /
-    // -not-same-scope relations. `idx` must be built whenever relations are
-    // present or git line filtering is active.
+    // -not-same-scope relations, as `regions` is for -same-region /
+    // -not-same-region. `idx` must be built whenever relations are present
+    // or git line filtering is active.
     void collect(Matcher &matcher, std::string_view content,
                  const LineIndex &idx, const ScopeIndex *scope_ptr,
-                 const AddedLines *added, std::vector<Match> &kept);
+                 const AddedLines *added, std::vector<Match> &kept,
+                 const RegionIndex *regions = nullptr);
 
     // collect() split in two so callers can skip building the line and
     // scope indexes for files with no matches: scan() runs the engines and
@@ -198,13 +233,15 @@ public:
     // with the same `idx`/`scope_ptr` requirements as collect().
     bool scan(Matcher &matcher, std::string_view content);
     void finish(const LineIndex &idx, const ScopeIndex *scope_ptr,
-                const AddedLines *added, std::vector<Match> &kept);
+                const AddedLines *added, std::vector<Match> &kept,
+                const RegionIndex *regions = nullptr);
 
 private:
     const std::vector<Pattern> &patterns_;
     std::vector<ResolvedRelation> rels_;
     bool git_added_ = false;
     bool any_scope_rel_ = false;
+    bool any_region_rel_ = false;
     std::vector<IdentGroup> ident_groups_;
     uint32_t ident_base_ = 0; // patterns_ index where ident groups start
     std::vector<Match> raw_; // reused across files

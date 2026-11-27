@@ -136,6 +136,12 @@ simultaneous.
 | `-in-scope-kind <k>` | Restrict `-in-scope` to scopes of this kind (or standalone: any scope of the kind). |
 | `-lines <spec>` | Keep only matches starting on these 1-based lines: `N`, `A:B`, `A:`, `:B` (repeatable = OR). |
 | `-list-scopes` | List the scope index instead of searching — one record per function/class; takes no patterns. |
+| `-region <id>` | Declare a pattern-defined region; the `-region-*` flags that follow bind to it (repeatable). See [Pattern-defined regions](#pattern-defined-regions--region---in-region---same-region---list-regions). |
+| `-region-open <re>` / `-region-close <re>` | Region delimiters (PCRE). Open only → sections running to the next open match; open + close → sed/awk-style ranges. Capture group 1 of the open regex is the region's label. |
+| `-region-nested` | Balance open/close with a stack so regions of one definition can nest (needs `-region-close`). |
+| `-in-region <id>[:<re>]` / `-not-in-region <id>[:<re>]` | Keep only matches inside / outside a region of that definition, optionally one whose label matches the regex. Same id repeated = OR; different ids = AND. |
+| `-same-region A:B:<id>` / `-not-same-region A:B:<id>` | Emit `A`'s matches with / without a `B`-match in the same `<id>` region. |
+| `-list-regions` | List the region index instead of searching — one record per region with label, lines and byte range; takes no patterns. |
 | `-near A:B:K` | Emit pattern `A`'s matches with a `B`-match within `K` lines (repeatable). See [Pattern relations](#pattern-relations--near---far). |
 | `-far A:B:K` | Emit `A`'s matches with **no** `B`-match within `K` lines (repeatable, ANDs with other relations). |
 | `-same-scope A:B` | Emit `A`'s matches that share their innermost enclosing scope with a `B`-match. Requires `-scope`. |
@@ -2047,6 +2053,156 @@ hprscript -list-scopes src/data.go
 hprscript -list-scopes -llm -glob '**/*.go'      # flat: path:12-40 func LoadData
 ```
 
+## Pattern-defined regions (`-region` / `-in-region` / `-same-region` / `-list-regions`)
+
+A **region** is a span of a file delimited by regex matches instead of a
+language's braces: a markdown section, a log request from "start" to "done",
+an `#ifdef … #endif` block, a SQL transaction, a fenced code block. Regions
+give any text the same machinery [enclosing scopes](#enclosing-scope) give
+source code — per-match annotation, containment filters, containment
+relations, and an outline listing — with no language pack. They work in
+quick-search and edit mode (rejected in script, query and investigate modes).
+
+### Defining a region
+
+```bash
+hprscript -p 'token' \
+  -region section -region-open '^## (.*)' \
+  -region fence   -region-open '^```(\w*)' -region-close '^```' \
+  docs/guide.md
+```
+
+`-region <id>` declares a region definition; the `-region-open`,
+`-region-close` and `-region-nested` flags that follow bind to it. Repeat
+`-region` for several independent definitions — a match can sit in one
+region of each. The id is an identifier (`[A-Za-z_]\w*`).
+
+| Definition | Mode | A region is |
+|---|---|---|
+| `-region-open` only | **section** | From each open match to the next open match, or to end of file. |
+| `-region-open` + `-region-close` | **range** | From an open match through the first close match that starts at or after the open match's end (sed/awk `/open/,/close/` rules). Open matches inside a region are ignored. With no close match the region runs to end of file and is flagged `"closed":false`. |
+| … + `-region-nested` | **nested** | Balanced: a stack pairs each close with the most recent open, so regions of one definition can contain each other. Stray closes are ignored; opens left on the stack run to end of file (`"closed":false`). |
+
+A region spans from the start of its opening match to the end of its closing
+match, so the delimiters themselves are inside it. When open and close are
+the same regex (code fences), the first match opens and the next one closes.
+
+**Labels.** Each region carries a `label`: capture group 1 of the open regex
+when it has one (`^## (.*)` → the heading text, `request start id=(\w+)` →
+the id), otherwise the first line of the opening match. Labels are trimmed
+and capped at 120 bytes. The capture is re-extracted with ECMAScript
+`std::regex`, like [`-extract`](#capture-group-extraction); a leading
+`(?i)` is honoured, and an open regex `std::regex` cannot compile falls back
+to the opening-match text (with a one-line stderr note when it had a group).
+
+Delimiters are ordinary [Vectorscan PCRE](#regex-syntax-vectorscan-pcre):
+line-anchored `^`/`$`, no lookaround, and no pattern that can match the
+empty string (so `^$` cannot delimit paragraphs — use `\n\n`). They follow
+`-no-utf8`. Detection is lexical: a delimiter inside a string or comment
+still counts.
+
+### Annotation
+
+With any region defined, per-match output names the regions around each hit
+(the innermost one per definition):
+
+```bash
+hprscript -p 'token' -region section -region-open '^## (.*)' \
+  -region fence -region-open '^```(\w*)' -region-close '^```' docs/guide.md
+# {"file":"docs/guide.md","pat":"p0","line":9,…,"context":"export token=abc",
+#  "regions":{"section":{"label":"Install","line_start":5,"line_end":12},
+#             "fence":{"label":"sh","line_start":8,"line_end":11}}}
+```
+
+- **JSONL** — a `regions` object keyed by region id, each with `label`,
+  `line_start`, `line_end`; plus `depth` for nested definitions and
+  `"closed":false` for an unterminated region. The key is absent when the
+  match is outside every region.
+- **`-llm`** — one `[in <id> <label>]` tag per containing region:
+  `  9: export token=abc  [in section Install]  [in fence sh]`.
+- **`-format`** — `$REGION_<ID>` (the label), `$REGION_<ID>_LINE_START`,
+  `$REGION_<ID>_LINE_END`, `$REGION_<ID>_FROM`, `$REGION_<ID>_TO` (byte
+  range). `<ID>` is the region id, case-insensitive. Outside a region the
+  label is empty and the numbers are `0`.
+
+`-elide`, `-rollup`, `-hotspots` and `-budget` keep grouping by enclosing
+scope and do not print region tags; region filters and relations still apply
+in every output mode.
+
+### Filters: `-in-region` / `-not-in-region`
+
+```bash
+# token mentions in the Install or Usage sections, but not inside code fences
+hprscript -p 'token' \
+  -region section -region-open '^## (.*)' -in-region 'section:^(Install|Usage)$' \
+  -region fence -region-open '^```' -region-close '^```' -not-in-region fence \
+  -llm docs/guide.md
+
+# production logging only: log calls outside every #ifdef block
+hprscript -p 'log\(' -region ifdef -region-open '^#ifdef (\w+)' \
+  -region-close '^#endif' -region-nested -not-in-region ifdef -llm src
+```
+
+- **`-in-region <id>[:<label-regex>]`** — keep only matches inside a region
+  of that definition; with a label regex (ECMAScript, search semantics),
+  one whose label matches. For nested definitions the whole enclosing chain
+  counts: `-in-region 'ifdef:DEBUG'` keeps code in a `VERBOSE` block nested
+  inside `DEBUG`. Repeating the flag for the **same** id is OR; flags for
+  **different** ids are AND.
+- **`-not-in-region <id>[:<label-regex>]`** — keep only matches outside
+  every such region. Each `-not-in-region` must hold.
+
+They run where [`-in-scope`](#scoped-targeting--in-scope---in-scope-kind---lines-and--list-scopes)
+does: after relations, before `-file-where`. In edit mode they qualify edit
+sites the same way (`hprscript edit -p … -in-region 'ifdef:VERBOSE' -delete`).
+
+### Relations: `-same-region` / `-not-same-region`
+
+```bash
+# Starts of the requests that logged an ERROR (relations filter only the A
+# side, so the err rows print too)
+hprscript -p 'request start' -name start -p 'ERROR' -name err \
+  -region req -region-open 'request start id=(\w+)' -region-close 'request done' \
+  -same-region start:err:req -format '$LINE $REGION_REQ' app.log
+```
+
+- **`-same-region A:B:<id>`** — emit `A`'s matches that share their
+  innermost `<id>` region with a `B`-match.
+- **`-not-same-region A:B:<id>`** — emit `A`'s matches with **no**
+  `B`-match in the same region. An `A` match outside every region is kept
+  (dropped by `-same-region`), mirroring the
+  [scope relations](#scope-relations--same-scope---not-same-scope).
+
+Like every relation they filter only the `A` side, AND with other relations,
+and `A == B` needs a second occurrence. Because a range region includes its
+closing match, "opened but never closed" is one relation:
+`-not-same-region start:done:req` keeps the `start` of each request with no
+`request done`.
+
+### `-list-regions`
+
+Dump the region index instead of searching — one record per region in file
+order, no search patterns involved:
+
+```bash
+hprscript -region req -region-open 'request start id=(\w+)' \
+  -region-close 'request done' -list-regions app.log
+# {"type":"region","file":"app.log","region":"req","label":"a1","line_start":1,"line_end":3,"from":6,"to":62}
+# {"type":"region","file":"app.log","region":"req","label":"b2","line_start":4,"line_end":6,"from":75,"to":136}
+# {"type":"region","file":"app.log","region":"req","label":"c3","line_start":8,"line_end":9,"from":175,"to":215,"closed":false}
+
+hprscript -region section -region-open '^## (.*)' -list-regions -llm docs/guide.md
+# docs/guide.md:5-12 section Install
+# docs/guide.md:13-20 section Usage
+# docs/guide.md:21-22 section License
+```
+
+`from`/`to` are the region's byte range (`to` exclusive), so a consumer can
+slice the text directly. Nested definitions add `depth`. `-in-region` /
+`-not-in-region` filter the listing by id and label, `-limit` caps it, and
+`-summary`/stdin input work as in search mode. Exit codes follow grep:
+`0` regions listed, `1` none found, `2` error.
+
 ---
 
 ## Pattern relations (`-near` / `-far`)
@@ -2898,6 +3054,7 @@ The binary depends only on the platform C library — on Linux verify with `ldd 
 - **Reach for `group_by` / `rank` before sort+head.** They produce the right shape directly and avoid round-tripping through shell tools.
 - **`absent` patterns are great for "files missing X" sweeps** — license headers, error wrapping, security headers. They fire once per file at end-of-scan, no scripting needed beyond a single pattern.
 - **Use `block` (script) or `-block-open`/`-block-close` (CLI) for cross-line extraction.** It's the fastest way to grab a function body, struct definition, or JSON object given its anchor.
+- **Use `-region` when the structure isn't code.** Markdown sections, log sessions, `#ifdef` blocks and transactions become regions from an open (and optional close) regex — then `-list-regions` outlines them, `regions` annotates each hit, and `-in-region` / `-same-region` filter by containment, all without a language pack.
 - **Annotate matches with their enclosing function via `-scope auto`** — agents almost always want "what function is this in?", and a single flag avoids the follow-up scan.
 - **`-extract` saves the most common nested-`submatch` boilerplate** — declare names for capture groups inline and they show up as a typed `extracted` map in JSON, plus `$EXTRACT_<NAME>` tokens in `-format`.
 - **`-near A:B:K` and `-far A:B:K` express "X with/without Y nearby" in one call.** Common agent intents (`defer` near `Lock()`, `log.Print` without `// allow-print` on the same line) become single-flag queries.

@@ -2757,6 +2757,153 @@ expect_eq "apply: untampered plan still applies" "0 644 bye world" \
 rm -rf "$SEC"
 
 # ---------------------------------------------------------------------------
+section "pattern-defined regions (-region / -in-region / -same-region / -list-regions)"
+RG_FIX="$HERE/_tmp_regions"
+mkdir -p "$RG_FIX"
+printf '# Guide\n\nIntro mentions token here.\n\n## Install\n\nRun make install.\n```sh\nexport token=abc\nmake install\n```\n\n## Usage\n\nPass the token flag.\n\n### Advanced\n\nNo secrets.\n\n## License\nMIT\n' > "$RG_FIX/doc.md"
+printf '10:00 request start id=a1\n10:01 db query ok\n10:02 request done id=a1\n10:03 request start id=b2\n10:04 ERROR db timeout\n10:05 request done id=b2\n10:06 stray ERROR outside\n10:07 request start id=c3\n10:08 ERROR crashed\n' > "$RG_FIX/app.log"
+printf 'int a;\n#ifdef DEBUG\nlog("x");\n#ifdef VERBOSE\nlog("y");\n#endif\nlog("z");\n#endif\nlog("prod");\n' > "$RG_FIX/cfg.c"
+SEC_ARGS=(-region section -region-open '^## (.*)')
+FENCE_ARGS=(-region fence -region-open '^```(\w*)' -region-close '^```')
+REQ_ARGS=(-region req -region-open 'request start id=(\w+)' -region-close 'request done')
+IFDEF_ARGS=(-region ifdef -region-open '^#ifdef (\w+)' -region-close '^#endif' -region-nested)
+
+# Section mode: each open match runs to the next one; the last runs to EOF.
+OUT=$("$BIN" "${SEC_ARGS[@]}" -list-regions -llm "$RG_FIX/doc.md")
+expect_eq "list-regions: sections (open only)" \
+"$RG_FIX/doc.md:5-12 section Install
+$RG_FIX/doc.md:13-20 section Usage
+$RG_FIX/doc.md:21-22 section License" "$OUT"
+OUT=$("$BIN" "${SEC_ARGS[@]}" -list-regions "$RG_FIX/doc.md" | head -1)
+expect_contains "list-regions: JSONL record shape" \
+    '"region":"section","label":"Install","line_start":5,"line_end":12,"from":37,"to":108}' "$OUT"
+
+# Range mode: open … first close; identical open/close text toggles; an
+# unterminated region runs to EOF and is flagged.
+OUT=$("$BIN" "${FENCE_ARGS[@]}" -list-regions -llm "$RG_FIX/doc.md")
+expect_eq "list-regions: same-regex fence toggles" "$RG_FIX/doc.md:8-11 fence sh" "$OUT"
+OUT=$("$BIN" "${REQ_ARGS[@]}" -list-regions "$RG_FIX/app.log")
+expect_lines "list-regions: three request regions" 3 "$OUT"
+expect_contains "list-regions: label from capture group" '"label":"b2","line_start":4,"line_end":6' "$OUT"
+expect_contains "list-regions: unterminated region flagged" '"label":"c3","line_start":8,"line_end":9,"from":175,"to":215,"closed":false' "$OUT"
+expect_not_contains "list-regions: closed regions carry no flag" '"label":"a1","line_start":1,"line_end":3,"from":6,"to":62,"closed"' "$OUT"
+
+# Nested mode: balanced open/close with depth.
+OUT=$("$BIN" "${IFDEF_ARGS[@]}" -list-regions "$RG_FIX/cfg.c")
+expect_contains "list-regions: nested outer" '"label":"DEBUG","line_start":2,"line_end":8,"from":7,"to":78,"depth":1' "$OUT"
+expect_contains "list-regions: nested inner" '"label":"VERBOSE","line_start":4,"line_end":6,"from":30,"to":61,"depth":2' "$OUT"
+OUT=$("$BIN" -region ifdef -region-open '^#ifdef (\w+)' -region-close '^#endif' -list-regions -llm "$RG_FIX/cfg.c")
+expect_eq "list-regions: range mode ignores inner opens" "$RG_FIX/cfg.c:2-6 ifdef DEBUG" "$OUT"
+
+# Annotation: JSONL `regions`, -llm tags, -format tokens.
+OUT=$("$BIN" -p token "${SEC_ARGS[@]}" "${FENCE_ARGS[@]}" "$RG_FIX/doc.md")
+expect_contains "annotation: JSONL regions object (two definitions)" \
+    '"regions":{"section":{"label":"Install","line_start":5,"line_end":12},"fence":{"label":"sh","line_start":8,"line_end":11}}}' "$OUT"
+expect_contains "annotation: match outside every region has no regions key" \
+    '"line":3,"col":16,"from":24,"to":29,"match":"token","context":"Intro mentions token here."}' "$OUT"
+OUT=$("$BIN" -p token "${SEC_ARGS[@]}" "${FENCE_ARGS[@]}" -llm "$RG_FIX/doc.md")
+expect_contains "annotation: -llm region tags" "  9: export token=abc  [in section Install]  [in fence sh]" "$OUT"
+OUT=$("$BIN" -p token "${SEC_ARGS[@]}" -format '$LINE [$REGION_SECTION] $REGION_SECTION_LINE_START-$REGION_SECTION_LINE_END $REGION_SECTION_FROM..$REGION_SECTION_TO $REGION_NOPE' "$RG_FIX/doc.md")
+expect_eq "annotation: -format \$REGION_<ID> tokens" \
+'3 [] 0-0 0..0 $REGION_NOPE
+9 [Install] 5-12 37..108 $REGION_NOPE
+15 [Usage] 13-20 108..167 $REGION_NOPE' "$OUT"
+OUT=$("$BIN" -p 'log\("\w"\)' "${IFDEF_ARGS[@]}" -format '$LINE:$REGION_IFDEF' "$RG_FIX/cfg.c")
+expect_eq "annotation: nested → innermost region" "3:DEBUG
+5:VERBOSE
+7:DEBUG" "$OUT"
+OUT=$("$BIN" -p 'log\("y"\)' "${IFDEF_ARGS[@]}" "$RG_FIX/cfg.c")
+expect_contains "annotation: nested JSONL carries depth" '"regions":{"ifdef":{"label":"VERBOSE","line_start":4,"line_end":6,"depth":2}}' "$OUT"
+OUT=$("$BIN" -p 'ERROR crashed' "${REQ_ARGS[@]}" "$RG_FIX/app.log")
+expect_contains "annotation: unterminated region flagged on the match" '"regions":{"req":{"label":"c3","line_start":8,"line_end":9,"closed":false}}' "$OUT"
+OUT=$("$BIN" -p token "${SEC_ARGS[@]}" -sample 5 -format '$LINE:$REGION_SECTION' "$RG_FIX/doc.md" | sort)
+expect_eq "annotation survives -sample buffering" "15:Usage
+3:
+9:Install" "$OUT"
+
+# Filters: -in-region / -not-in-region, label regex, ancestor chain.
+OUT=$("$BIN" -p token "${SEC_ARGS[@]}" -in-region section -format '$LINE' "$RG_FIX/doc.md" | tr '\n' ' ')
+expect_eq "-in-region keeps matches inside any such region" "9 15 " "$OUT"
+OUT=$("$BIN" -p token "${SEC_ARGS[@]}" -in-region 'section:^Usage$' -format '$LINE' "$RG_FIX/doc.md")
+expect_eq "-in-region label regex" "15" "$OUT"
+OUT=$("$BIN" -p token "${SEC_ARGS[@]}" -in-region 'section:^Usage$' -in-region 'section:^Install$' -format '$LINE' "$RG_FIX/doc.md" | tr '\n' ' ')
+expect_eq "-in-region same id repeated = OR" "9 15 " "$OUT"
+OUT=$("$BIN" -p token "${SEC_ARGS[@]}" "${FENCE_ARGS[@]}" -in-region section -in-region fence -format '$LINE' "$RG_FIX/doc.md")
+expect_eq "-in-region different ids = AND" "9" "$OUT"
+OUT=$("$BIN" -p token "${SEC_ARGS[@]}" "${FENCE_ARGS[@]}" -in-region section -not-in-region fence -format '$LINE' "$RG_FIX/doc.md")
+expect_eq "-not-in-region excludes" "15" "$OUT"
+OUT=$("$BIN" -p 'log\(' "${IFDEF_ARGS[@]}" -not-in-region ifdef -format '$LINE' "$RG_FIX/cfg.c")
+expect_eq "-not-in-region keeps only code outside every region" "9" "$OUT"
+OUT=$("$BIN" -p 'log\(' "${IFDEF_ARGS[@]}" -in-region 'ifdef:DEBUG' -c "$RG_FIX/cfg.c")
+expect_eq "-in-region tests the ancestor chain (and works with -c)" "$RG_FIX/cfg.c:3" "$OUT"
+OUT=$("$BIN" -p ERROR "${REQ_ARGS[@]}" -in-region req -f "$RG_FIX/app.log" "$RG_FIX/doc.md")
+expect_eq "-in-region with -f" "$RG_FIX/app.log" "$OUT"
+OUT=$("$BIN" "${REQ_ARGS[@]}" -list-regions -llm -in-region 'req:^b' "$RG_FIX/app.log")
+expect_eq "list-regions honors -in-region" "$RG_FIX/app.log:4-6 req b2" "$OUT"
+OUT=$("$BIN" "${REQ_ARGS[@]}" -list-regions -llm -not-in-region 'req:^b' -limit 1 "$RG_FIX/app.log")
+expect_eq "list-regions honors -not-in-region and -limit" "$RG_FIX/app.log:1-3 req a1" "$OUT"
+
+# Relations: -same-region / -not-same-region.
+OUT=$("$BIN" -p 'request start' -name start -p ERROR -name err "${REQ_ARGS[@]}" -same-region start:err:req -format '$PAT_ID:$LINE' "$RG_FIX/app.log" | tr '\n' ' ')
+expect_eq "same-region keeps requests that logged an ERROR" "start:4 err:5 err:7 start:8 err:9 " "$OUT"
+OUT=$("$BIN" -p 'request start' -name start -p ERROR -name err "${REQ_ARGS[@]}" -not-same-region start:err:req -format '$PAT_ID:$LINE' "$RG_FIX/app.log" | tr '\n' ' ')
+expect_eq "not-same-region keeps requests with no ERROR" "start:1 err:5 err:7 err:9 " "$OUT"
+OUT=$("$BIN" -p ERROR -name err -p 'request done' -name done "${REQ_ARGS[@]}" -not-same-region err:done:req -format '$LINE' -file-where err "$RG_FIX/app.log" | tr '\n' ' ')
+expect_contains "not-same-region keeps a-side matches outside any region" "7 " "$OUT"
+OUT=$("$BIN" -p 'log\(' -name lg "${IFDEF_ARGS[@]}" -same-region lg:lg:ifdef -format '$LINE' "$RG_FIX/cfg.c" | tr '\n' ' ')
+expect_eq "same-region a==b needs a second occurrence in the innermost region" "3 7 " "$OUT"
+
+# Edit mode: region filters qualify edit sites.
+cp "$RG_FIX/cfg.c" "$RG_FIX/edit.c"
+OUT=$("$BIN" edit -p 'log\("\w"\);\n' -delete "${IFDEF_ARGS[@]}" -in-region 'ifdef:VERBOSE' -expect 1 -write -no-plan-warning "$RG_FIX/edit.c" 2>&1)
+expect_eq "edit: -in-region restricts edit sites" 'int a;
+#ifdef DEBUG
+log("x");
+#ifdef VERBOSE
+#endif
+log("z");
+#endif
+log("prod");' "$(cat "$RG_FIX/edit.c")"
+
+# stdin and -summary.
+OUT=$("$BIN" "${REQ_ARGS[@]}" -list-regions -summary < "$RG_FIX/app.log")
+expect_contains "list-regions: reads stdin" '"file":"<stdin>","region":"req","label":"a1"' "$OUT"
+expect_contains "list-regions: -summary record" '"type":"summary","files_scanned":1' "$OUT"
+"$BIN" -region none -region-open 'zzz_never' -list-regions "$RG_FIX/app.log" >/dev/null 2>&1; RC=$?
+[[ "$RC" == "1" ]] && report ok "list-regions: no regions → exit 1" || report fail "list-regions empty exit (got $RC)"
+
+# Validation.
+OUT=$("$BIN" -p x -region-open 'a' "$RG_FIX/app.log" 2>&1); RC=$?
+expect_contains "-region-open without -region rejected" "must follow a -region" "$OUT"
+[[ "$RC" == "2" ]] && report ok "-region-open without -region exit 2" || report fail "-region-open without -region exit (got $RC)"
+OUT=$("$BIN" -p x -region r "$RG_FIX/app.log" 2>&1)
+expect_contains "-region without -region-open rejected" "-region-open <regex> is required" "$OUT"
+OUT=$("$BIN" -p x -region r -region-open a -region-nested "$RG_FIX/app.log" 2>&1)
+expect_contains "-region-nested without close rejected" "-region-nested needs -region-close" "$OUT"
+OUT=$("$BIN" -p x -region r -region-open a -region r -region-open b "$RG_FIX/app.log" 2>&1)
+expect_contains "duplicate region id rejected" "duplicate id 'r'" "$OUT"
+OUT=$("$BIN" -p x -region 'bad-id' -region-open a "$RG_FIX/app.log" 2>&1)
+expect_contains "non-identifier region id rejected" "id must be an identifier" "$OUT"
+OUT=$("$BIN" -p x -region r -region-open a -in-region nope "$RG_FIX/app.log" 2>&1)
+expect_contains "-in-region unknown region rejected" "unknown region 'nope'" "$OUT"
+OUT=$("$BIN" -p x -name a -region r -region-open a -same-region a:a:nope "$RG_FIX/app.log" 2>&1)
+expect_contains "-same-region unknown region rejected" "unknown region 'nope'" "$OUT"
+OUT=$("$BIN" -p x -in-region r "$RG_FIX/app.log" 2>&1)
+expect_contains "region filter without a definition rejected" "need a -region <id>" "$OUT"
+OUT=$("$BIN" -p x -region r -region-open '(?<=a)b' "$RG_FIX/app.log" 2>&1); RC=$?
+expect_contains "bad region delimiter names the region" "in -region r open:" "$OUT"
+[[ "$RC" == "2" ]] && report ok "bad region delimiter exit 2" || report fail "bad region delimiter exit (got $RC)"
+OUT=$("$BIN" -region r -region-open a -s '{}' 2>&1)
+expect_contains "regions rejected in script mode" "quick (-p) and edit modes only" "$OUT"
+OUT=$("$BIN" -region r -region-open a "$RG_FIX/app.log" 2>&1)
+expect_contains "-region without patterns or -list-regions rejected" "needs search patterns" "$OUT"
+OUT=$("$BIN" -p x -region r -region-open a -list-regions "$RG_FIX/app.log" 2>&1)
+expect_contains "-list-regions takes no patterns" "takes no patterns" "$OUT"
+OUT=$("$BIN" -region r -region-open a -list-regions -f "$RG_FIX/app.log" 2>&1)
+expect_contains "-list-regions output modes" "JSONL (default) or -llm" "$OUT"
+rm -rf "$RG_FIX"
+
+# ---------------------------------------------------------------------------
 section "summary"
 TOTAL=$((PASS + FAIL))
 if [[ "$FAIL" -eq 0 ]]; then

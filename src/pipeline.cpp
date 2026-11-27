@@ -474,11 +474,32 @@ bool resolve_pattern_id(const std::vector<Pattern> &patterns,
 
 bool resolve_relations(const std::vector<Cli::Relation> &relations,
                        const std::vector<Pattern> &patterns,
-                       std::vector<ResolvedRelation> &out) {
+                       std::vector<ResolvedRelation> &out,
+                       const std::vector<RegionDef> *regions) {
     for (const auto &r : relations) {
         ResolvedRelation rr;
         rr.kind = r.kind;
         rr.lines = r.lines;
+        if (r.kind == Cli::RelationKind::SameRegion ||
+            r.kind == Cli::RelationKind::NotSameRegion) {
+            bool found = false;
+            if (regions) {
+                for (size_t d = 0; d < regions->size(); ++d) {
+                    if ((*regions)[d].id != r.region) continue;
+                    rr.region_def = static_cast<uint32_t>(d);
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                std::fprintf(stderr,
+                             "hprscript: relation: unknown region '%s' in "
+                             "'%s:%s:%s'\n",
+                             r.region.c_str(), r.a.c_str(), r.b.c_str(),
+                             r.region.c_str());
+                return false;
+            }
+        }
         if (!resolve_pattern_id(patterns, r.a, rr.a_idx) ||
             !resolve_pattern_id(patterns, r.b, rr.b_idx)) {
             std::fprintf(stderr,
@@ -495,6 +516,14 @@ bool any_scope_relation(const std::vector<ResolvedRelation> &rels) {
     for (const auto &r : rels)
         if (r.kind == Cli::RelationKind::SameScope ||
             r.kind == Cli::RelationKind::NotSameScope)
+            return true;
+    return false;
+}
+
+bool any_region_relation(const std::vector<ResolvedRelation> &rels) {
+    for (const auto &r : rels)
+        if (r.kind == Cli::RelationKind::SameRegion ||
+            r.kind == Cli::RelationKind::NotSameRegion)
             return true;
     return false;
 }
@@ -581,7 +610,72 @@ bool TargetFilter::init(const Cli &cli) {
             return false;
         }
     }
+    for (const auto &rf : cli.region_filters) {
+        RegionFilter f;
+        f.negate = rf.negate;
+        bool found = false;
+        for (size_t d = 0; d < cli.regions.size(); ++d) {
+            if (cli.regions[d].id != rf.id) continue;
+            f.def = static_cast<uint32_t>(d);
+            found = true;
+            break;
+        }
+        if (!found) {
+            std::fprintf(stderr, "hprscript: %s: unknown region '%s'\n",
+                         rf.negate ? "-not-in-region" : "-in-region",
+                         rf.id.c_str());
+            return false;
+        }
+        if (!rf.label_re.empty()) {
+            try {
+                f.label_re.assign(rf.label_re, std::regex::ECMAScript);
+                f.has_re = true;
+            } catch (const std::regex_error &e) {
+                std::fprintf(stderr, "hprscript: %s '%s:%s': %s\n",
+                             rf.negate ? "-not-in-region" : "-in-region",
+                             rf.id.c_str(), rf.label_re.c_str(), e.what());
+                return false;
+            }
+        }
+        if (!f.negate &&
+            std::find(positive_defs_.begin(), positive_defs_.end(), f.def) ==
+                positive_defs_.end())
+            positive_defs_.push_back(f.def);
+        region_filters_.push_back(std::move(f));
+    }
+    if (!region_filters_.empty()) active_ = true;
     return true;
+}
+
+bool TargetFilter::region_satisfies(const RegionFilter &f,
+                                    const RegionRange &r) {
+    if (r.def != f.def) return false;
+    return !f.has_re || std::regex_search(r.label, f.label_re);
+}
+
+bool TargetFilter::in_matching_region(const RegionFilter &f,
+                                      const RegionIndex &regions,
+                                      uint64_t offset) {
+    // Ancestor-chain test, like -in-scope: a match in a nested region also
+    // counts as inside every region around it.
+    for (const RegionRange *r = regions.find_innermost(f.def, offset); r;
+         r = regions.parent_of(*r)) {
+        if (region_satisfies(f, *r)) return true;
+    }
+    return false;
+}
+
+bool TargetFilter::region_listed(const RegionRange &r) const {
+    bool any_pos = false, pos_ok = false;
+    for (const RegionFilter &f : region_filters_) {
+        if (f.negate) {
+            if (region_satisfies(f, r)) return false;
+        } else {
+            any_pos = true;
+            if (region_satisfies(f, r)) pos_ok = true;
+        }
+    }
+    return !any_pos || pos_ok;
 }
 
 bool TargetFilter::scope_matches(const ScopeRange &r) const {
@@ -593,7 +687,8 @@ bool TargetFilter::scope_matches(const ScopeRange &r) const {
 }
 
 void TargetFilter::apply(std::vector<Match> &kept, const LineIndex &idx,
-                         const ScopeIndex *scope_ptr) const {
+                         const ScopeIndex *scope_ptr,
+                         const RegionIndex *regions) const {
     if (!active_ || kept.empty()) return;
     std::vector<Match> out;
     out.reserve(kept.size());
@@ -620,6 +715,32 @@ void TargetFilter::apply(std::vector<Match> &kept, const LineIndex &idx,
             }
             if (!ok) continue;
         }
+        if (!region_filters_.empty()) {
+            // Negative filters: every one must hold.
+            bool ok = true;
+            for (const RegionFilter &f : region_filters_) {
+                if (f.negate && regions &&
+                    in_matching_region(f, *regions, m.from)) {
+                    ok = false;
+                    break;
+                }
+            }
+            // Positive filters: same region id = OR, different ids = AND.
+            for (size_t di = 0; di < positive_defs_.size() && ok; ++di) {
+                bool group_ok = false;
+                if (regions) {
+                    for (const RegionFilter &f : region_filters_) {
+                        if (f.negate || f.def != positive_defs_[di]) continue;
+                        if (in_matching_region(f, *regions, m.from)) {
+                            group_ok = true;
+                            break;
+                        }
+                    }
+                }
+                ok = group_ok;
+            }
+            if (!ok) continue;
+        }
         out.push_back(m);
     }
     kept = std::move(out);
@@ -632,15 +753,17 @@ MatchCollector::MatchCollector(const std::vector<Pattern> &patterns,
     : patterns_(patterns), rels_(std::move(rels)), git_added_(git_added_lines),
       ident_groups_(std::move(ident_groups)) {
     any_scope_rel_ = any_scope_relation(rels_);
+    any_region_rel_ = any_region_relation(rels_);
     ident_base_ = static_cast<uint32_t>(patterns_.size() - ident_groups_.size());
 }
 
 void MatchCollector::collect(Matcher &matcher, std::string_view content,
                              const LineIndex &idx, const ScopeIndex *scope_ptr,
                              const AddedLines *added,
-                             std::vector<Match> &kept) {
+                             std::vector<Match> &kept,
+                             const RegionIndex *regions) {
     scan(matcher, content);
-    finish(idx, scope_ptr, added, kept);
+    finish(idx, scope_ptr, added, kept, regions);
 }
 
 bool MatchCollector::scan(Matcher &matcher, std::string_view content) {
@@ -661,31 +784,12 @@ bool MatchCollector::scan(Matcher &matcher, std::string_view content) {
 
 void MatchCollector::finish(const LineIndex &idx, const ScopeIndex *scope_ptr,
                             const AddedLines *added,
-                            std::vector<Match> &kept) {
+                            std::vector<Match> &kept,
+                            const RegionIndex *regions) {
 
-    // Single sort-based dedup pass: by (pattern, from, -to). Within a
-    // pattern, after this sort the longest match at each `from` comes
-    // first, and any later match whose `from` lies before the previous
-    // kept match's `to` is overlapping (skip).
-    std::sort(raw_.begin(), raw_.end(), [](const Match &a, const Match &b) {
-        if (a.pattern_index != b.pattern_index)
-            return a.pattern_index < b.pattern_index;
-        if (a.from != b.from) return a.from < b.from;
-        return a.to > b.to;
-    });
-    kept.clear();
-    kept.reserve(raw_.size());
-    uint32_t cur_pat = UINT32_MAX;
-    uint64_t last_to = 0;
-    for (const auto &m : raw_) {
-        if (m.pattern_index != cur_pat) {
-            cur_pat = m.pattern_index;
-            last_to = 0;
-        }
-        if (m.from < last_to) continue;
-        last_to = m.to;
-        kept.push_back(m);
-    }
+    // Leftmost-longest non-overlapping per pattern (shared with the region
+    // delimiter scan — see dedup_leftmost_longest in matcher.cpp).
+    dedup_leftmost_longest(raw_, kept);
     // Final emission order: by (from, pat) globally so multi-pattern
     // results interleave sensibly.
     if (patterns_.size() > 1) {
@@ -738,6 +842,30 @@ void MatchCollector::finish(const LineIndex &idx, const ScopeIndex *scope_ptr,
                 }
             }
         }
+        // Region-relation prep: per-region pattern occurrence counts for
+        // every region definition a relation names. Keyed by region
+        // instance — pointers are unique across definitions.
+        std::unordered_map<const RegionRange *, std::vector<int>> region_pats;
+        if (any_region_rel_ && regions) {
+            std::vector<uint32_t> defs;
+            for (const auto &r : rels_) {
+                if (r.kind != Cli::RelationKind::SameRegion &&
+                    r.kind != Cli::RelationKind::NotSameRegion)
+                    continue;
+                if (std::find(defs.begin(), defs.end(), r.region_def) ==
+                    defs.end())
+                    defs.push_back(r.region_def);
+            }
+            for (const Match &mm : kept) {
+                for (uint32_t d : defs) {
+                    const RegionRange *rr = regions->find_innermost(d, mm.from);
+                    if (!rr) continue;
+                    auto &v = region_pats[rr];
+                    if (v.empty()) v.assign(patterns_.size(), 0);
+                    v[mm.pattern_index] += 1;
+                }
+            }
+        }
         std::vector<Match> filtered;
         filtered.reserve(kept.size());
         for (size_t ki = 0; ki < kept.size(); ++ki) {
@@ -746,6 +874,30 @@ void MatchCollector::finish(const LineIndex &idx, const ScopeIndex *scope_ptr,
             bool drop = false;
             for (const auto &r : rels_) {
                 if (r.a_idx != mm.pattern_index) continue;
+                if (r.kind == Cli::RelationKind::SameRegion ||
+                    r.kind == Cli::RelationKind::NotSameRegion) {
+                    const RegionRange *rr =
+                        regions ? regions->find_innermost(r.region_def, mm.from)
+                                : nullptr;
+                    bool found = false;
+                    if (rr) {
+                        auto rit = region_pats.find(rr);
+                        if (rit != region_pats.end()) {
+                            int need = (r.a_idx == r.b_idx) ? 2 : 1;
+                            found = rit->second[r.b_idx] >= need;
+                        }
+                    }
+                    // A match outside every region of this definition is
+                    // dropped by -same-region and kept by -not-same-region
+                    // (mirrors the scope relations).
+                    if (r.kind == Cli::RelationKind::SameRegion && !found) {
+                        drop = true; break;
+                    }
+                    if (r.kind == Cli::RelationKind::NotSameRegion && found) {
+                        drop = true; break;
+                    }
+                    continue;
+                }
                 if (r.kind == Cli::RelationKind::SameScope ||
                     r.kind == Cli::RelationKind::NotSameScope) {
                     const ScopeRange *sr =

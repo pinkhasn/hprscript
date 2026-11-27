@@ -32,6 +32,7 @@ Invoke the binary through Bash as `hprscript`. Use one call per reasoning stage 
 | Aggregation, custom state, or unsupported query state machines | `-s` script DSL |
 | Files containing / missing a pattern | `-f` / `-absent` |
 | File outline / enclosing function | `-list-scopes` / `-scope auto` |
+| Structure in non-code text (sections, log sessions, `#ifdef`, transactions) | `-region` + `-list-regions` / `-in-region` / `-same-region` |
 | Representative usages | `-sample N` |
 | Which functions are involved, and how heavily | `-rollup` (one line per scope with per-pattern counts) |
 | Full function around a known hit | `hprscript expand file:line[@hash]` (batch refs in one call) |
@@ -97,6 +98,26 @@ hprscript -p '\bLock\(\)' -name lock -p '\bUnlock\(\)' -name unlock \
 ```
 
 Use `-near A:B:K`, `-far A:B:K`, `-same-scope A:B`, and `-not-same-scope A:B`. Multiple relations combine with AND.
+
+## Pattern-defined regions
+
+Use a region when the structure is not a function: a markdown section, a log request, an `#ifdef` block, a transaction, a code fence. Declare it with `-region <id>`, then `-region-open <re>` and optionally `-region-close <re>`.
+
+```bash
+hprscript -region section -region-open '^## (.*)' -list-regions -llm docs/guide.md
+hprscript -p 'token' -region section -region-open '^## (.*)' \
+  -in-region 'section:^Usage$' -llm docs/guide.md
+hprscript -p 'request start' -name start -p 'request done' -name done \
+  -region req -region-open 'request start id=(\w+)' -region-close 'request done' \
+  -not-same-region start:done:req -llm app.log
+hprscript -p 'log\(' -name log_call -region ifdef -region-open '^#ifdef (\w+)' \
+  -region-close '^#endif' -region-nested -not-in-region ifdef -llm src
+```
+
+- Open only: sections, each running to the next open match. Open + close: sed/awk-style ranges; an unterminated one runs to end of file and reports `closed:false`. Add `-region-nested` when blocks nest.
+- Capture group 1 of the open regex is the region's label. Matches gain `regions.<id>.{label,line_start,line_end}` in JSONL, `[in <id> <label>]` in `-llm`, and `$REGION_<ID>` in `-format`.
+- `-in-region <id>[:<label-re>]` / `-not-in-region` filter by containment; `-same-region A:B:<id>` / `-not-same-region` relate two patterns inside one region. `-list-regions` returns each region's lines and byte range without any search pattern.
+- Detection is lexical: a delimiter inside a string or comment still counts. Regions work in quick search and edit mode, not in `query`, `investigate`, or script mode.
 
 ## Survey, rank, and pack context
 
