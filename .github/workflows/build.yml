@@ -30,10 +30,11 @@ jobs:
             arch: arm64
             runner: ubuntu-22.04-arm
             asset: hprscript-linux-arm64
-          # Apple Silicon. macos-14+ runners are arm64.
+          # Apple Silicon. GitHub retired the macos-14 image (2026-11-02);
+          # macos-15 is the oldest arm64 image still offered.
           - os: macos
             arch: arm64
-            runner: macos-14
+            runner: macos-15
             asset: hprscript-macos-arm64
 
     steps:
