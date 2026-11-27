@@ -270,14 +270,15 @@ make test
 
 ## Use it as agent skills
 
-`hprscript` ships two portable agent skills:
+`hprscript` ships three portable agent skills:
 
 - [`skills/hprscript-search/SKILL.md`](skills/hprscript-search/SKILL.md) teaches read-only quick search, investigation, query, ranking, context packing, scope surveys (`-rollup`), and the search → expand loop.
 - [`skills/hprscript-edit/SKILL.md`](skills/hprscript-edit/SKILL.md) teaches persistent edit plans, guarded application, and the boundary with localized semantic patching.
+- [`skills/hprscript-code-mode/SKILL.md`](skills/hprscript-code-mode/SKILL.md) teaches driving hprscript from a script (a JavaScript REPL / "code mode"): parsing JSONL into objects, chaining scans, deriving patterns from earlier rows, ordered event streams, regions as data, and a search → guarded edit → verify loop in one script. Its snippets use Claude Code's REPL globals.
 
-Each is a single Markdown file with YAML frontmatter and focused instructions. Install either skill independently or install both for the complete workflow. They drive the CLI binary directly, carry inline cheat sheets, and point at [`HPRSCRIPT.md`](HPRSCRIPT.md) / [`COOKBOOK.md`](COOKBOOK.md) for depth.
+Each is a single Markdown file with YAML frontmatter and focused instructions. Install any skill independently or install them together for the complete workflow. They drive the CLI binary directly, carry inline cheat sheets, and point at [`HPRSCRIPT.md`](HPRSCRIPT.md) / [`COOKBOOK.md`](COOKBOOK.md) for depth.
 
-Both follow the standard `SKILL.md` convention — filename in caps, with `name` and `description` frontmatter — that a growing number of agents discover automatically. The only requirement on your side: the `hprscript` binary must be on the agent's `PATH` (see [Install](#install)).
+All follow the standard `SKILL.md` convention — filename in caps, with `name` and `description` frontmatter — that a growing number of agents discover automatically. The only requirement on your side: the `hprscript` binary must be on the agent's `PATH` (see [Install](#install)).
 
 ### Claude Code
 
@@ -285,14 +286,16 @@ Copy the skills into your skills directory — globally (every project) or per-p
 
 ```bash
 # Global — applies everywhere
-mkdir -p ~/.claude/skills/hprscript-search ~/.claude/skills/hprscript-edit
+mkdir -p ~/.claude/skills/hprscript-search ~/.claude/skills/hprscript-edit ~/.claude/skills/hprscript-code-mode
 cp skills/hprscript-search/SKILL.md ~/.claude/skills/hprscript-search/
 cp skills/hprscript-edit/SKILL.md ~/.claude/skills/hprscript-edit/
+cp skills/hprscript-code-mode/SKILL.md ~/.claude/skills/hprscript-code-mode/
 
 # Or per-project — commit it with your repo
-mkdir -p .claude/skills/hprscript-search .claude/skills/hprscript-edit
+mkdir -p .claude/skills/hprscript-search .claude/skills/hprscript-edit .claude/skills/hprscript-code-mode
 cp skills/hprscript-search/SKILL.md .claude/skills/hprscript-search/
 cp skills/hprscript-edit/SKILL.md .claude/skills/hprscript-edit/
+cp skills/hprscript-code-mode/SKILL.md .claude/skills/hprscript-code-mode/
 ```
 
 Start a new `claude` session and it reaches for `hprscript` whenever you ask it to search code. See the [Claude Code skills docs](https://docs.claude.com/en/docs/claude-code/skills).
